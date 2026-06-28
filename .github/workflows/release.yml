@@ -185,17 +185,24 @@ jobs:
           rm -rf staging
           ls -la
 
+      - name: debug dist contents
+        run: ls -laR dist/
+
       - name: upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: conclave-mcp-${{ matrix.target }}
-          # All platforms are packaged as .tar.gz (see the
-          # package step above for the rationale), so a
-          # single *.tar.gz glob suffices. @actions/glob
-          # supports the standard * and ** wildcards; we
-          # don't need brace expansion because every
-          # archive is .tar.gz.
-          path: dist/conclave-mcp-*.tar.gz
+          # Use the exact, deterministically-derived archive
+          # name instead of a glob pattern. @actions/glob
+          # (which upload-artifact@v4 uses internally) has
+          # known edge cases with wildcard patterns in the
+          # same path segment as other characters, especially
+          # when the pattern contains multiple hyphens and
+          # dots. The archive name is deterministic — see
+          # the "package" step above for the exact formula —
+          # so we avoid the glob entirely in favour of an
+          # explicit path.
+          path: dist/conclave-mcp-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   # Create the GitHub Release and attach all artifacts.
@@ -236,13 +243,15 @@ jobs:
         working-directory: dist
         run: |
           set -e
-          # download-artifact@v4 puts each artifact in its
-          # own subdirectory named after the artifact. Walk
-          # the tree, find every archive, and emit a single
-          # SHA256SUMS file at the root of dist/. The format
-          # is the standard `<sha>  <filename>` layout that
-          # `sha256sum -c SHA256SUMS` can verify.
-          find . -type f \( -name "conclave-mcp-*.tar.gz" -o -name "conclave-mcp-*.zip" \) -print0 | \
+          # download-artifact@v4 puts each artifact in its own
+          # subdirectory named after the artifact. Walk the tree,
+          # find every archive, and emit a single SHA256SUMS file
+          # at the root of dist/. The format is the standard
+          # `<sha>  <filename>` layout that `sha256sum -c SHA256SUMS`
+          # can verify. Every archive is .tar.gz now (see the
+          # build job's "package" step for the rationale), so a
+          # single glob suffices.
+          find . -type f -name "conclave-mcp-*.tar.gz" -print0 | \
             xargs -0 sha256sum > SHA256SUMS
           echo "=== SHA256SUMS ==="
           cat SHA256SUMS
