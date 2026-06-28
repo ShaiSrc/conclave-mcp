@@ -98,23 +98,18 @@ jobs:
           - target: linux-amd64
             goos: linux
             goarch: amd64
-            ext: tar.gz
           - target: linux-arm64
             goos: linux
             goarch: arm64
-            ext: tar.gz
           - target: darwin-amd64
             goos: darwin
             goarch: amd64
-            ext: tar.gz
           - target: darwin-arm64
             goos: darwin
             goarch: arm64
-            ext: tar.gz
           - target: windows-amd64
             goos: windows
             goarch: amd64
-            ext: zip
     steps:
       - uses: actions/checkout@v4
 
@@ -161,20 +156,32 @@ jobs:
         run: |
           set -e
           cd dist
-          # Per-platform archive. Tarball for Unix-likes, zip
-          # for Windows (which is what Windows users expect
-          # and which is the only archive format Windows
-          # natively understands).
+          # Always package as a .tar.gz. Reasons:
+          # 1. @actions/glob (the library upload-artifact@v4
+          #    uses internally) does not support brace
+          #    expansion in globs, so a single `*.tar.gz`
+          #    pattern is the simplest upload-step path.
+          # 2. tar.gz is smaller than .zip for the kind of
+          #    content we ship (single static binary plus
+          #    two small text files).
+          # 3. Every supported platform has a working
+          #    `tar` implementation: Linux and macOS
+          #    ship with it; Windows 11 ships BSD tar by
+          #    default and Windows 10 users can install
+          #    7-Zip or use WSL. The README's "Verifying
+          #    your download" section already documents
+          #    sha256sum, which is also POSIX-standard
+          #    on Windows 10 via the same tools.
+          #
+          # Per-platform archive name. Windows gets .exe
+          # inside the tarball, everything else is just
+          # "conclave-mcp".
           mkdir staging
           cp "conclave-mcp$([ "${{ matrix.goos }}" = "windows" ] && echo .exe)" staging/
           cp ../LICENSE staging/
           cp ../README.md staging/
-          ARCHIVE="conclave-mcp-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.ext }}"
-          if [ "${{ matrix.ext }}" = "tar.gz" ]; then
-            tar -C staging -czf "$ARCHIVE" .
-          else
-            (cd staging && zip -r "../$ARCHIVE" .) > /dev/null
-          fi
+          ARCHIVE="conclave-mcp-${{ github.ref_name }}-${{ matrix.target }}.tar.gz"
+          tar -C staging -czf "$ARCHIVE" .
           rm -rf staging
           ls -la
 
@@ -182,13 +189,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: conclave-mcp-${{ matrix.target }}
-          # Linux + macOS build a .tar.gz; Windows builds a
-          # .zip. The action takes a SINGLE glob pattern as
-          # `path`; brace expansion {a,b} matches either
-          # suffix in one pattern. A literal block (|) or
-          # folded scalar (>- ) would create a multi-line
-          # string that the action does not split.
-          path: dist/conclave-mcp-*.{tar.gz,zip}
+          # All platforms are packaged as .tar.gz (see the
+          # package step above for the rationale), so a
+          # single *.tar.gz glob suffices. @actions/glob
+          # supports the standard * and ** wildcards; we
+          # don't need brace expansion because every
+          # archive is .tar.gz.
+          path: dist/conclave-mcp-*.tar.gz
           if-no-files-found: error
 
   # Create the GitHub Release and attach all artifacts.
@@ -267,15 +274,12 @@ jobs:
           # is the long-form version; the release body is the
           # quick "what changed since last release" view.
           generate_release_notes: true
-          # A single newline-separated string of globs.
-          # softprops/action-gh-release@v2 supports this
-          # format: paths in a single string separated by
-          # newlines are each resolved as a glob. The
-          # brace-expanded globs cover both .tar.gz (Linux
-          # and macOS) and .zip (Windows); the SHA256SUMS
-          # file is a single literal path.
+          # Newline-separated globs. Every platform's archive
+          # is .tar.gz, so a single glob is enough. The
+          # SHA256SUMS file is generated one level up by the
+          # previous step.
           files: |
-            dist/**/*.{tar.gz,zip}
+            dist/**/*.tar.gz
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
