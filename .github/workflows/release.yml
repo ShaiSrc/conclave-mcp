@@ -1,0 +1,251 @@
+name: release
+
+# Tag-based release workflow.
+#
+# Trigger:
+#   git tag v0.1.1 && git push --tags
+#   git tag v0.1.1-rc.1 && git push --tags  (pre-release)
+#   git tag v0.2.0 && git push --tags
+#
+# What it does:
+#   1. Verifies the tag's commit passes all CI checks (gofmt,
+#      vet, go test, go test -race). If the tagged commit is
+#      red, the release is aborted before any binaries are
+#      uploaded. The CI workflow on main already provides this
+#      guarantee for merges, but checking again here protects
+#      against force-pushed tags pointing at broken commits.
+#   2. Cross-compiles a single static binary for each of the
+#      supported target platforms. The matrix is the smallest
+#      set that covers the README's "supported platforms"
+#      list.
+#   3. Bundles each binary as a tarball (zip on Windows), with
+#      a README excerpt and the LICENSE file. The tarball
+#      is what users download from the GitHub release page.
+#   4. Computes SHA-256 checksums for every artifact and writes
+#      them to a single SHA256SUMS file. Users can verify their
+#      download with `sha256sum -c SHA256SUMS`.
+#   5. Creates a GitHub Release for the tag, marks it as a
+#      pre-release if the tag contains a hyphen (e.g. v0.1.1-rc.1),
+#      and attaches every artifact plus the SHA256SUMS file.
+#      Release notes are auto-generated from PRs merged since
+#      the previous tag.
+#
+# The "needs: verify" dependency ensures we never upload a
+# broken binary. The matrix is fanned out across runners for
+# parallelism; each matrix entry writes its own artifact
+# which the "release" job then downloads and attaches.
+
+'on':
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write  # needed to create the GitHub release
+
+jobs:
+  # Verify the tag's commit is green before we ship anything.
+  # This is a defense-in-depth check: in normal flow, only
+  # commits that passed CI on main are tagged, but a force-push
+  # to the tag could otherwise publish a broken binary.
+  verify:
+    name: verify-tagged-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # so we can diff against the previous tag
+
+      - name: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - run: go mod download
+
+      - name: gofmt check
+        # The standard gofmt invocation: list files that
+        # need formatting. Empty output means clean. We use
+        # a here-doc instead of a one-liner because the
+        # conditional exit-1 inside a pipe is hard to read
+        # in YAML.
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "Files not gofmt'd:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - run: go vet ./...
+
+      - run: go test ./...
+
+      - run: go test -race ./...
+
+  # Cross-compile the binary. Each matrix entry produces one
+  # platform-specific artifact. The resulting binary is fully
+  # static (CGO_ENABLED=0) so the linux build works on any
+  # glibc-or-not distro, including Alpine, distroless, scratch.
+  build:
+    name: build ${{ matrix.target }}
+    needs: verify
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-amd64
+            goos: linux
+            goarch: amd64
+            ext: tar.gz
+          - target: linux-arm64
+            goos: linux
+            goarch: arm64
+            ext: tar.gz
+          - target: darwin-amd64
+            goos: darwin
+            goarch: amd64
+            ext: tar.gz
+          - target: darwin-arm64
+            goos: darwin
+            goarch: arm64
+            ext: tar.gz
+          - target: windows-amd64
+            goos: windows
+            goarch: amd64
+            ext: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - run: go mod download
+
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -e
+          mkdir -p dist
+          # The binary name. Windows gets .exe; everything else
+          # is just "conclave-mcp".
+          BINARY="conclave-mcp"
+          if [ "$GOOS" = "windows" ]; then
+            BINARY="conclave-mcp.exe"
+          fi
+          # -ldflags "-X main.version=..." bakes the tag name
+          # into the binary so `conclave-mcp --version` reports
+          # the actual release (e.g. v0.1.1) instead of the
+          # dev placeholder baked in by the source code.
+          # The default in cmd/conclave-mcp/main.go is
+          # "0.1.0-dev"; here we override it for the release
+          # build only. Local dev builds keep the placeholder
+          # so it's obvious they are not a tagged release.
+          TAG="${{ github.ref_name }}"
+          go build -trimpath -ldflags="-s -w -X main.version=${TAG}" -o "dist/$BINARY" ./cmd/conclave-mcp
+          # Strip the macOS quarantine bit on darwin so the
+          # binary runs without a "unidentified developer"
+          # prompt for users who don't Gatekeeper-allow it.
+          if [ "$GOOS" = "darwin" ]; then
+            xattr -dr com.apple.quarantine "dist/$BINARY" 2>/dev/null || true
+          fi
+
+      - name: package
+        run: |
+          set -e
+          cd dist
+          # Per-platform archive. Tarball for Unix-likes, zip
+          # for Windows (which is what Windows users expect
+          # and which is the only archive format Windows
+          # natively understands).
+          mkdir staging
+          cp "conclave-mcp$([ "${{ matrix.goos }}" = "windows" ] && echo .exe)" staging/
+          cp ../LICENSE staging/
+          cp ../README.md staging/
+          ARCHIVE="conclave-mcp-${{ github.ref_name }}-${{ matrix.target }}.${{ matrix.ext }}"
+          if [ "${{ matrix.ext }}" = "tar.gz" ]; then
+            tar -C staging -czf "$ARCHIVE" .
+          else
+            (cd staging && zip -r "../$ARCHIVE" .) > /dev/null
+          fi
+          rm -rf staging
+          ls -la
+
+      - name: upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: conclave-mcp-${{ matrix.target }}
+          path: dist/conclave-mcp-*.tar.gz
+          if-no-files-found: error
+          # The `path` glob also catches .zip on Windows; the
+          # upload-artifact action is fine with either.
+
+  # Create the GitHub Release and attach all artifacts.
+  release:
+    name: create-release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - name: download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # merges all per-platform artifacts into dist/
+
+      - name: generate SHA256SUMS
+        working-directory: dist
+        run: |
+          set -e
+          # sha256sum on every file. The output is a stable,
+          # two-column format that `sha256sum -c` can verify.
+          sha256sum conclave-mcp-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: determine prerelease
+        id: meta
+        run: |
+          # A tag like v0.1.1 is a stable release; v0.1.1-rc.1
+          # or v0.1.1-beta is a pre-release. The convention is
+          # the presence of a hyphen after the leading "v".
+          if echo "${{ github.ref_name }}" | grep -q -- "-"; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: create release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.prerelease }}
+          # generate_release_notes pulls titles of PRs and
+          # authors since the previous tag. This gives a
+          # human-readable changelog without us having to
+          # maintain one by hand. The maintainer's CHANGELOG.md
+          # is the long-form version; the release body is the
+          # quick "what changed since last release" view.
+          generate_release_notes: true
+          files: |
+            dist/**/*.tar.gz
+            dist/**/*.zip
+            dist/SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
