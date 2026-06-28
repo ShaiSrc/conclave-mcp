@@ -1,0 +1,44 @@
+# Reference Caddyfile for Conclave MCP.
+#
+# Place at /etc/caddy/Caddyfile (or include from it) and reload:
+#   systemctl reload caddy
+#
+# Caddy issues and renews TLS certificates automatically via ACME.
+# The `email` directive is required for Let's Encrypt notifications.
+
+{
+    email ops@conclave.example.com
+    admin localhost:2019
+}
+
+conclave.example.com {
+    encode zstd gzip
+
+    # 1 MiB max request body (SPEC-0005 §8).
+    # The server enforces 256 KiB per message; this is the proxy
+    # boundary so it can reject oversized uploads without buffering.
+    reverse_proxy 127.0.0.1:7432 {
+        transport http {
+            max_request_body 1MB
+            dial_timeout     5s
+            response_header_timeout 30s
+        }
+
+        # Overwrite (not append) X-Forwarded-For so the server
+        # never sees a client-supplied header.
+        header_up X-Real-IP         {remote_host}
+        header_up X-Forwarded-For   {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # JSON access log to stdout (Caddy's default). Operators
+    # typically add a `log` block to ship this to a file or
+    # aggregator.
+    log {
+        output file /var/log/caddy/conclave-mcp.log {
+            roll_size 100mb
+            roll_keep 10
+        }
+        format json
+    }
+}

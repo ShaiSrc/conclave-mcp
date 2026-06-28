@@ -1,0 +1,28 @@
+# Build artefacts
+bin/
+dist/
+*.test
+*.out
+coverage.*
+
+# The single compiled binary in repo root (used during local build
+# verification, e.g. `go build -o conclave-mcp ./cmd/conclave-mcp`).
+# The release build will live under bin/ or dist/ and is also covered.
+/conclave-mcp
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Conclave data directories left behind by integration / E2E tests.
+# The server respects CONCLAVE_DATA_DIR via --db; tests that don't
+# override it land here. Safe to delete at any time.
+.conclave-mcp/

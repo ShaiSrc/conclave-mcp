@@ -1,0 +1,55 @@
+# Reference systemd unit for Conclave MCP.
+#
+# Install:
+#   cp packaging/systemd/conclave-mcp.service /etc/systemd/system/
+#   systemctl daemon-reload
+#   systemctl enable --now conclave-mcp
+#
+# Required setup (SPEC-0005 §9):
+#   useradd --system --uid 7432 --shell /usr/sbin/nologin conclave
+#   install -d -m 0700 -o conclave -g conclave /var/lib/conclave-mcp
+#   install -d -m 0755 -o root    -g root    /etc/conclave-mcp
+#   install -m 0600 -o conclave -g conclave /dev/null \
+#       /etc/conclave-mcp/conclave.env
+#   # then edit /etc/conclave-mcp/conclave.env (see SPEC-0005 §5)
+
+[Unit]
+Description=Conclave MCP — local-first agent communication server
+Documentation=https://gitea:3000/hermes/conclave-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=conclave
+Group=conclave
+WorkingDirectory=/var/lib/conclave-mcp
+EnvironmentFile=/etc/conclave-mcp/conclave.env
+ExecStart=/usr/local/bin/conclave-mcp serve
+
+# Restart policy: back off, but don't flap.
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=5
+StartLimitIntervalSec=60s
+
+# Hardening per SPEC-0005 §6.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/conclave-mcp
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+
+# Resource limits.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
