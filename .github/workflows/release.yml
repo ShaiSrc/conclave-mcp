@@ -182,10 +182,16 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: conclave-mcp-${{ matrix.target }}
-          path: dist/conclave-mcp-*.tar.gz
+          # Linux + macOS build a .tar.gz; Windows builds a
+          # .zip. List both so the upload step does not error
+          # out for Windows with "no files found" (see the
+          # build matrix in this job: 4 unix targets + 1
+          # Windows target). The download step in the
+          # release job also lists both.
+          path: |
+            dist/conclave-mcp-*.tar.gz
+            dist/conclave-mcp-*.zip
           if-no-files-found: error
-          # The `path` glob also catches .zip on Windows; the
-          # upload-artifact action is fine with either.
 
   # Create the GitHub Release and attach all artifacts.
   release:
@@ -207,16 +213,36 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: dist
-          # merges all per-platform artifacts into dist/
+          # download-artifact@v4 puts each artifact in its
+          # own subdirectory named after the artifact. With
+          # five build matrix entries we end up with
+          #   dist/conclave-mcp-linux-amd64/<tarball>
+          #   dist/conclave-mcp-linux-arm64/<tarball>
+          #   dist/conclave-mcp-darwin-amd64/<tarball>
+          #   dist/conclave-mcp-darwin-arm64/<tarball>
+          #   dist/conclave-mcp-windows-amd64/<zip>
+          # The next two steps walk that tree, find every
+          # archive, and emit a single SHA256SUMS file at
+          # the root of dist/, then attach everything to
+          # the release.
+          merge-multiple: false
 
       - name: generate SHA256SUMS
         working-directory: dist
         run: |
           set -e
-          # sha256sum on every file. The output is a stable,
-          # two-column format that `sha256sum -c` can verify.
-          sha256sum conclave-mcp-* > SHA256SUMS
+          # download-artifact@v4 puts each artifact in its
+          # own subdirectory named after the artifact. Walk
+          # the tree, find every archive, and emit a single
+          # SHA256SUMS file at the root of dist/. The format
+          # is the standard `<sha>  <filename>` layout that
+          # `sha256sum -c SHA256SUMS` can verify.
+          find . -type f \( -name "conclave-mcp-*.tar.gz" -o -name "conclave-mcp-*.zip" \) -print0 | \
+            xargs -0 sha256sum > SHA256SUMS
+          echo "=== SHA256SUMS ==="
           cat SHA256SUMS
+          echo "=== files in dist/ ==="
+          ls -la
 
       - name: determine prerelease
         id: meta
