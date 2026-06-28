@@ -183,14 +183,12 @@ jobs:
         with:
           name: conclave-mcp-${{ matrix.target }}
           # Linux + macOS build a .tar.gz; Windows builds a
-          # .zip. List both so the upload step does not error
-          # out for Windows with "no files found" (see the
-          # build matrix in this job: 4 unix targets + 1
-          # Windows target). The download step in the
-          # release job also lists both.
-          path: |
-            dist/conclave-mcp-*.tar.gz
-            dist/conclave-mcp-*.zip
+          # .zip. The action takes a SINGLE glob pattern as
+          # `path`; brace expansion {a,b} matches either
+          # suffix in one pattern. A literal block (|) or
+          # folded scalar (>- ) would create a multi-line
+          # string that the action does not split.
+          path: dist/conclave-mcp-*.{tar.gz,zip}
           if-no-files-found: error
 
   # Create the GitHub Release and attach all artifacts.
@@ -269,9 +267,15 @@ jobs:
           # is the long-form version; the release body is the
           # quick "what changed since last release" view.
           generate_release_notes: true
+          # A single newline-separated string of globs.
+          # softprops/action-gh-release@v2 supports this
+          # format: paths in a single string separated by
+          # newlines are each resolved as a glob. The
+          # brace-expanded globs cover both .tar.gz (Linux
+          # and macOS) and .zip (Windows); the SHA256SUMS
+          # file is a single literal path.
           files: |
-            dist/**/*.tar.gz
-            dist/**/*.zip
+            dist/**/*.{tar.gz,zip}
             dist/SHA256SUMS
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
