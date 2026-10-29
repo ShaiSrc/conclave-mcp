@@ -148,13 +148,14 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 
-	// Initial comment line forces the headers to flush on
-	// some proxies (nginx). Standard SSE preamble.
-	_, _ = fmt.Fprint(w, ": ok\n\n")
-	flusher.Flush()
-
+	// Subscribe BEFORE the preamble: ": ok" tells the client the
+	// subscription is live, so a client that reads the backlog
+	// after seeing it cannot miss a message (messages.subscribe
+	// relies on this). It also forces headers through proxies.
 	sub, cancel := h.Broker.Subscribe(roomID)
 	defer cancel()
+	_, _ = fmt.Fprint(w, ": ok\n\n")
+	flusher.Flush()
 
 	heartbeat := time.NewTicker(h.Heartbeat)
 	defer heartbeat.Stop()

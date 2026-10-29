@@ -103,6 +103,11 @@ agent to it: [docs/agent-integration.md](docs/agent-integration.md).
   subscribes via SSE, reacts to messages, sends you a
   Telegram/ntfy push. See
   [docs/agent-integration.md](docs/agent-integration.md).
+* **Coding agents on one repo**: several Claude Code sessions
+  share a project room, claim paths before editing, and hand
+  work over; a hook feeds new messages into each agent's
+  context. See
+  [docs/agent-integration.md](docs/agent-integration.md#coding-agents-on-one-project-claude-code).
 
 ## Install
 

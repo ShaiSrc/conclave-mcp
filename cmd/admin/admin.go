@@ -297,7 +297,7 @@ func runKeysCreateBootstrap(ctx context.Context, out, errOut io.Writer, dbPath, 
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO api_keys(prefix, hash, label, created_at, trust_origin) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO api_keys(prefix, hash, label, created_at, trust_origin, is_admin) VALUES (?, ?, ?, ?, ?, 1)`,
 		prefix, hash, label, now, trustOrigin,
 	)
 	if err != nil {

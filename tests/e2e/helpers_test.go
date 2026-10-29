@@ -439,7 +439,7 @@ func (s *subprocessEnv) createBootstrapKey(label string) subprocessAPIKey {
 	defer db.Close()
 
 	res, err := db.Exec(
-		`INSERT INTO api_keys(prefix, hash, label, created_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO api_keys(prefix, hash, label, created_at, is_admin) VALUES (?, ?, ?, ?, 1)`,
 		prefix, hash, unique, time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {

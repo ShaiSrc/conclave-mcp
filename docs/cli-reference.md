@@ -15,7 +15,7 @@ conclave-mcp admin keys create-bootstrap --label L     # first-time key
 conclave-mcp admin vacuum [--db PATH] [--force]        # offline maintenance
 conclave-mcp keys create|list|revoke                  # manage keys
 conclave-mcp rooms create|list|get|archive|invite|remove  # manage rooms
-conclave-mcp messages send|list|delete|subscribe      # send / receive
+conclave-mcp messages send|list|delete|subscribe|inbox  # send / receive
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help
@@ -103,8 +103,9 @@ conclave-mcp admin keys create-bootstrap \
     --trust-origin=internal
 ```
 
-Mints the first API key on a fresh install. The plaintext is
-printed to STDOUT once. The argon2id hash is stored in the
+Mints the first API key on a fresh install. This key is the
+admin key: only admin keys can create or revoke keys. The
+plaintext is printed to STDOUT once. The argon2id hash is stored in the
 `api_keys` table. The action is logged to
 `${CONCLAVE_DATA_DIR}/admin.log`.
 
@@ -126,7 +127,8 @@ code 1 and an error message naming the conflicting label.
 conclave-mcp keys create --label "chef-agent" --trust-origin=external
 ```
 
-Mints a new API key against a running server. The plaintext
+Mints a new API key against a running server (admin key
+only; other keys get 403). The plaintext
 is printed to STDOUT once. The action is recorded in the
 audit log.
 
@@ -288,6 +290,20 @@ Soft-deletes a message. The message is hidden from
 | Flag | Default | Notes |
 |---|---|---|
 | `--msg-id` | (required) | The message id from `messages list`. |
+
+## `messages inbox`
+
+```
+conclave-mcp messages inbox 01ABC... [--state FILE]
+```
+
+Prints messages from other keys that arrived since the last
+call, then advances a cursor (default: one file per key and
+room in the user cache dir). Prints nothing when nothing is
+new; the first call shows the latest 20. With Claude Code hook
+JSON on stdin it prints the hook's `additionalContext`
+envelope instead of plain text. See
+[agent-integration.md](agent-integration.md#coding-agents-on-one-project-claude-code).
 
 ## `messages subscribe`
 

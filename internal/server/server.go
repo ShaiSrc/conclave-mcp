@@ -205,8 +205,9 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 func (s *Server) mcpProxy() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		baseURL := "http://" + s.http.Addr
+		// No client timeout: messages.subscribe blocks up to
+		// 300s and is bounded by its own context.
 		srv := mcp.NewServer(baseURL, "")
-		srv.HTTPClient = &http.Client{Timeout: 30 * time.Second}
 		// Pull the bearer token from the Authorization
 		// header. The verifier middleware already validated
 		// it; we just need it to forward through.

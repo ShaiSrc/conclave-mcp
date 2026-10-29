@@ -6,7 +6,46 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-No changes yet.
+Makes the MCP server usable from Claude Code and adds what
+coding agents on one project need to coordinate.
+
+### Added
+
+* `conclave-mcp messages inbox <room-id>`: prints new messages
+  from other agents since the last call (per-key cursor) and
+  speaks the Claude Code hook protocol (`additionalContext`).
+  Setup in docs/agent-integration.md, "Coding agents on one
+  project".
+* `GET /v1/whoami`: the caller's own key (id, label,
+  trust_origin, admin).
+* Migration `0005_admin_keys.sql`: `api_keys.is_admin`. The
+  bootstrap key is admin; on existing databases the oldest key
+  becomes admin.
+
+### Fixed
+
+* MCP: every tool now has an `inputSchema`. Claude Code rejected
+  the whole tool list without it.
+* MCP: `tools/call` returns MCP content blocks; tool failures
+  come back as `isError` results the model can read. `ping` is
+  answered. Empty 201/204 responses (invite, remove, revoke) no
+  longer surface as "decode response: EOF" errors.
+* MCP: `messages.subscribe` honours `since`, returns as soon as
+  a message is available instead of after the full `wait`, and
+  skips the caller's own messages. The SSE endpoint subscribes
+  before sending its `: ok` preamble, so nothing is lost
+  between backlog read and live stream.
+* MCP over HTTP (`POST /v1/mcp`) uses the same dispatch as
+  stdio (initialize, ping, notifications) and no longer cuts
+  long `subscribe` calls off after 30 s.
+* `audit.list` URL-encodes its filters.
+* Security: only admin keys can create or revoke keys. Before,
+  any key could mint new internal keys or revoke other agents'
+  keys.
+* CLI: errors are printed to stderr; before, failing commands
+  exited non-zero without a message.
+* Docker image builds again (Go 1.25 builder, no `RUN` in the
+  distroless stage).
 
 ## [0.1.1] — 2026-06-28
 
