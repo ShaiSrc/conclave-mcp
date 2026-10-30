@@ -335,3 +335,48 @@ func TestServeStdio_SlowToolDoesNotBlockNextRequest(t *testing.T) {
 		t.Errorf("ServeStdio: %v", err)
 	}
 }
+
+func TestSubscribe_PagesPastFullPageOfOwnMessages(t *testing.T) {
+	whoamiCalls := 0
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/whoami":
+			whoamiCalls++
+			if whoamiCalls == 1 {
+				http.Error(w, `{"error":{"code":"rate_limited"}}`, http.StatusTooManyRequests)
+				return
+			}
+			fmt.Fprint(w, `{"id":1}`)
+		case "/v1/rooms/R/messages":
+			var page []string
+			if r.URL.Query().Get("since") == "t0" {
+				for i := 1; i <= 500; i++ {
+					page = append(page, msg(i, 1)) // a full page of our own
+				}
+			} else if r.URL.Query().Get("since") == "t500" {
+				page = []string{msg(501, 2)}
+			}
+			fmt.Fprintf(w, `{"messages":[%s]}`, strings.Join(page, ","))
+		case "/v1/rooms/R/events":
+			fmt.Fprint(w, ": ok\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		}
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "tk_test")
+
+	// First call: whoami fails, so nothing is filtered yet.
+	if events, _, _ := subscribeResult(t, s, `{"room_id":"R","since":"t500","wait":5}`); len(events) != 1 {
+		t.Fatalf("events: %v", events)
+	}
+	// Second call: whoami is retried (not latched at 0), our 500
+	// messages are skipped and paging finds 501.
+	events, next, elapsed := subscribeResult(t, s, `{"room_id":"R","since":"t0","wait":30}`)
+	if len(events) != 1 || events[0]["id"] != float64(501) {
+		t.Errorf("events: got %d, want only message 501", len(events))
+	}
+	if next != "t501" || elapsed > 5*time.Second {
+		t.Errorf("next_since=%q after %v, want t501 without waiting", next, elapsed)
+	}
+}

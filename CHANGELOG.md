@@ -19,8 +19,8 @@ coding agents on one project need to coordinate.
 * `GET /v1/whoami`: the caller's own key (id, label,
   trust_origin, admin).
 * Migration `0005_admin_keys.sql`: `api_keys.is_admin`. The
-  bootstrap key is admin; on existing databases the oldest key
-  becomes admin.
+  bootstrap key is admin; on existing databases the oldest
+  active key becomes admin.
 
 ### Fixed
 

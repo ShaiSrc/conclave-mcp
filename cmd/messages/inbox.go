@@ -9,6 +9,7 @@ package messages
 // agent's context as additionalContext. See docs/agent-integration.md.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,7 +67,10 @@ context automatically.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roomID := args[0]
 			event := hookEventName(cmd.InOrStdin())
-			return mapErr(makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+			// Exit 2 would make Claude Code block the prompt (UserPromptSubmit)
+			// or the tool result, so every failure is a plain exit 1:
+			// a missing key or a down server must not lock anyone out.
+			err := makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				statePath := flagState
 				if statePath == "" {
 					statePath = defaultInboxState(c.Token, roomID)
@@ -130,7 +134,11 @@ context automatically.`,
 				return json.NewEncoder(out).Encode(map[string]any{
 					"hookSpecificOutput": map[string]any{"hookEventName": event, "additionalContext": text},
 				})
-			}))
+			})
+			if err != nil {
+				return &exitCodeError{code: 1, err: err}
+			}
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&flagState, "state", "", "cursor file (default: <user cache dir>/conclave-mcp/inbox-<key prefix>-<room>.json)")
@@ -177,8 +185,22 @@ func saveInboxState(path string, st inboxState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+	// Write-then-rename: parallel hooks must never read a half-written
+	// file (that would look like a first run and replay old messages).
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".inbox-*")
+	if err != nil {
+		return err
+	}
 	b, _ := json.Marshal(st)
-	return os.WriteFile(path, b, 0o600)
+	_, werr := tmp.Write(b)
+	if cerr := tmp.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(tmp.Name())
+		return werr
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // keyLabels maps key id -> label. Best effort: ids are shown if
@@ -215,12 +237,18 @@ func formatInbox(roomID string, msgs []inboxMsg, labels map[int64]string) string
 			fmt.Fprintf(&b, " <%s>", m.MessageType)
 		}
 		if len(m.Metadata) > 0 && string(m.Metadata) != "null" {
-			fmt.Fprintf(&b, " %s", m.Metadata)
+			var meta bytes.Buffer
+			if json.Compact(&meta, m.Metadata) == nil { // one line, no injected newlines
+				fmt.Fprintf(&b, " %s", meta.Bytes())
+			}
 		}
 		content := m.Content
 		if r := []rune(content); len(r) > inboxMaxRunes {
 			content = string(r[:inboxMaxRunes]) + " … (truncated, read it with messages.list)"
 		}
+		// Indent continuation lines so message text cannot forge a
+		// "- [ts] other-agent:" line of its own.
+		content = strings.NewReplacer("\r\n", "\n    ", "\n", "\n    ", "\r", "\n    ").Replace(content)
 		fmt.Fprintf(&b, ": %s\n", content)
 	}
 	return b.String()

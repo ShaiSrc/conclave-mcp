@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,8 +37,7 @@ type Server struct {
 	APIKey     string
 	HTTPClient *http.Client
 
-	selfOnce sync.Once
-	selfID   int64 // caller's key id, resolved lazily via /v1/whoami
+	selfID atomic.Int64 // caller's key id from /v1/whoami; 0 = not resolved yet
 }
 
 // NewServer builds an MCP server talking to baseURL with the given
@@ -491,7 +491,8 @@ func (s *Server) subscribe(ctx context.Context, roomID, since string, wait int) 
 		return nil, fmt.Errorf("subscribe: http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
 	sc := bufio.NewScanner(resp.Body)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// 256 KiB of content can JSON-escape to ~1.5 MiB in one data line.
+	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 	// The server sends ": ok" once the subscription is live.
 	for sc.Scan() && !bytes.HasPrefix(sc.Bytes(), []byte(":")) {
 	}
@@ -506,8 +507,11 @@ func (s *Server) subscribe(ctx context.Context, roomID, since string, wait int) 
 		return map[string]any{"events": events, "next_since": next, "timed_out": len(events) == 0, "has_more": hasMore}
 	}
 
-	if since != "" {
-		v, err := s.httpGet(ctx, "/v1/rooms/"+roomID+"/messages?since="+url.QueryEscape(since))
+	// Backlog: page on while pages are full but hold only our own
+	// messages, so a long run of them cannot hide a reply.
+	const pageSize = 500 // server max
+	for cursor := since; cursor != ""; {
+		v, err := s.httpGet(ctx, "/v1/rooms/"+roomID+"/messages?limit="+itoaInt(pageSize)+"&since="+url.QueryEscape(cursor))
 		if err != nil {
 			return nil, err
 		}
@@ -525,9 +529,14 @@ func (s *Server) subscribe(ctx context.Context, roomID, since string, wait int) 
 				}
 			}
 		}
+		full := len(page.Messages) >= pageSize
 		if len(events) > 0 {
-			return envelope(events, len(page.Messages) >= 50), nil // 50 = list default limit
+			return envelope(events, full), nil
 		}
+		if !full || next == cursor {
+			break
+		}
+		cursor = next
 	}
 
 	var data []byte
@@ -551,6 +560,9 @@ func (s *Server) subscribe(ctx context.Context, roomID, since string, wait int) 
 			return envelope([]json.RawMessage{m}, false), nil
 		}
 	}
+	if err := sc.Err(); err != nil && ctx.Err() == nil {
+		return nil, fmt.Errorf("subscribe: read stream: %w", err)
+	}
 	// Stream closed after wait seconds (or our timeout fired).
 	return envelope(nil, false), nil
 }
@@ -569,18 +581,20 @@ func msgInfo(m json.RawMessage, self int64) (id int64, ts string, mine bool) {
 	return v.ID, v.TS, self != 0 && v.Author == self
 }
 
-// selfKeyID resolves the caller's key id once via /v1/whoami.
-// 0 (no filtering) if the lookup fails.
+// selfKeyID resolves the caller's key id via /v1/whoami and caches
+// it. A failed lookup is retried on the next call; until then it
+// returns 0 (own messages are not filtered).
 func (s *Server) selfKeyID(ctx context.Context) int64 {
-	s.selfOnce.Do(func() {
-		v, err := s.httpGet(ctx, "/v1/whoami")
-		if m, ok := v.(map[string]any); err == nil && ok {
-			if id, ok := m["id"].(float64); ok {
-				s.selfID = int64(id)
-			}
+	if id := s.selfID.Load(); id != 0 {
+		return id
+	}
+	v, err := s.httpGet(ctx, "/v1/whoami")
+	if m, ok := v.(map[string]any); err == nil && ok {
+		if id, ok := m["id"].(float64); ok {
+			s.selfID.Store(int64(id))
 		}
-	})
-	return s.selfID
+	}
+	return s.selfID.Load()
 }
 
 func (s *Server) addAuth(req *http.Request) {
