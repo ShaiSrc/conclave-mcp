@@ -42,6 +42,13 @@ coding agents on one project need to coordinate.
 * Security: only admin keys can create or revoke keys. Before,
   any key could mint new internal keys or revoke other agents'
   keys.
+* Auth: a key's repeat requests skip argon2id (verified tokens
+  are remembered as sha256 -> PHC; the DB lookup still runs, so
+  revocation takes effect at once). Before, every request paid a
+  19 MiB argon2id run, which queued requests under load and
+  made hook-per-tool-call setups expensive.
+* e2e load tests no longer call `t.Fatalf` from goroutines and
+  allow 30 s per request; they failed spuriously on busy hosts.
 * CLI: errors are printed to stderr; before, failing commands
   exited non-zero without a message.
 * Docker image builds again (Go 1.25 builder, no `RUN` in the

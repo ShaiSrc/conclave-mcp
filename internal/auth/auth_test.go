@@ -187,3 +187,36 @@ func TestVerify_ContextCancelDuringWait(t *testing.T) {
 	}
 	<-v.sem // cleanup
 }
+
+// mutableLookup lets a test revoke or re-hash a key between calls.
+type mutableLookup struct{ f fakeLookup }
+
+func (m *mutableLookup) LookupByPrefix(ctx context.Context, prefix string) (int64, []string, string, error) {
+	return m.f.LookupByPrefix(ctx, prefix)
+}
+
+func TestVerify_CacheStillHonoursRevocationAndRehash(t *testing.T) {
+	tok, phc, _ := GenerateToken()
+	lk := &mutableLookup{fakeLookup{keyID: 7, phc: phc}}
+	v := NewVerifier(lk, 1)
+	for i := 0; i < 2; i++ { // second call is served from the cache
+		if id, _, err := v.Verify(context.Background(), "Bearer "+tok); err != nil || id != 7 {
+			t.Fatalf("call %d: id=%d err=%v", i, id, err)
+		}
+	}
+	v.sem <- struct{}{} // a cache hit must not need a verify slot
+	if _, _, err := v.Verify(context.Background(), "Bearer "+tok); err != nil {
+		t.Fatalf("cached verify blocked or failed: %v", err)
+	}
+	<-v.sem
+
+	_, otherPHC, _ := GenerateToken()
+	lk.f.phc = otherPHC
+	if _, _, err := v.Verify(context.Background(), "Bearer "+tok); !errors.Is(err, ErrInvalid) {
+		t.Errorf("after re-hash: got %v, want ErrInvalid", err)
+	}
+	lk.f = fakeLookup{err: ErrNotFound} // revoked
+	if _, _, err := v.Verify(context.Background(), "Bearer "+tok); !errors.Is(err, ErrInvalid) {
+		t.Errorf("after revoke: got %v, want ErrInvalid", err)
+	}
+}
