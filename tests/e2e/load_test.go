@@ -148,8 +148,9 @@ func TestLoad_MessageSizeGuard(t *testing.T) {
 				over413++
 			}
 		}
-		// Pace to keep the test under 600 rpm refill (10/s).
-		time.Sleep(50 * time.Millisecond)
+		// Pace to keep the test under 600 rpm refill (10/s). 50ms
+		// only worked while every request paid a full argon2id.
+		time.Sleep(110 * time.Millisecond)
 	}
 
 	if withinOK != 25 {
@@ -193,7 +194,10 @@ func TestLoad_ConcurrentVerify(t *testing.T) {
 			tokens[i] = k.Key
 			keyOK.Add(1)
 		}
-		time.Sleep(20 * time.Millisecond)
+		// Below the 10/s refill, so the master still has budget
+		// for the room create below. 20ms only worked while every
+		// request paid a full argon2id.
+		time.Sleep(110 * time.Millisecond)
 	}
 	if keyOK.Load() < n*90/100 {
 		t.Fatalf("only %d of %d key creates succeeded", keyOK.Load(), n)
