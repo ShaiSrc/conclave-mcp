@@ -5,7 +5,8 @@
 //	POST   /v1/keys       -- create; returns plaintext once
 //	GET    /v1/keys       -- list (id, label, prefix, created_at,
 //	                         last_used_at, revoked_at)
-//	DELETE /v1/keys/{id}  -- soft-revoke (set revoked_at)
+//	DELETE /v1/keys/{id}  -- soft-revoke (set revoked_at), admin only
+//	GET    /v1/whoami     -- the caller's own key
 //
 // The plaintext key is returned EXACTLY ONCE in the POST response.
 // Subsequent reads return only the prefix. Hash and salt are never
@@ -18,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -39,27 +41,45 @@ func NewService(db *sql.DB) *Service {
 	return &Service{DB: db}
 }
 
+// ScopeAdmin is the only scope so far: admin keys may create and
+// revoke keys (migration 0005).
+const ScopeAdmin = "admin"
+
 // LookupByPrefix implements auth.KeyLookup. It returns the key id,
-// scopes (empty for now — scope model is deferred per SPEC-0001 §3
-// A3), and the stored argon2id PHC string. The hash and salt are
-// never returned to the caller of the HTTP API; this method is for
-// the in-process verifier only.
+// scopes ([ScopeAdmin] for admin keys, nil otherwise), and the
+// stored argon2id PHC string. The hash and salt are never returned
+// to the caller of the HTTP API; this method is for the in-process
+// verifier only.
 func (s *Service) LookupByPrefix(ctx context.Context, prefix string) (int64, []string, string, error) {
 	var (
-		id  int64
-		phc string
+		id      int64
+		phc     string
+		isAdmin bool
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id, hash FROM api_keys WHERE prefix = ? AND revoked_at IS NULL`,
+		`SELECT id, hash, is_admin FROM api_keys WHERE prefix = ? AND revoked_at IS NULL`,
 		prefix,
-	).Scan(&id, &phc)
+	).Scan(&id, &phc, &isAdmin)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil, "", auth.ErrNotFound
 		}
 		return 0, nil, "", err
 	}
+	if isAdmin {
+		return id, []string{ScopeAdmin}, phc, nil
+	}
 	return id, nil, phc, nil
+}
+
+// requireAdmin writes 403 and returns false unless the caller
+// holds ScopeAdmin.
+func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if c, ok := auth.FromContext(r.Context()); ok && slices.Contains(c.Scopes, ScopeAdmin) {
+		return true
+	}
+	writeJSONError(w, r, http.StatusForbidden, "forbidden", "admin key required")
+	return false
 }
 
 // Routes mounts the keys endpoints on r.
@@ -67,6 +87,25 @@ func (s *Service) Routes(r chi.Router) {
 	r.Post("/keys", s.create)
 	r.Get("/keys", s.list)
 	r.Delete("/keys/{id}", s.revoke)
+	r.Get("/whoami", s.whoami)
+}
+
+// whoami returns the caller's own key: {id, label, trust_origin,
+// admin}. Agents use it to skip their own messages.
+func (s *Service) whoami(w http.ResponseWriter, r *http.Request) {
+	c, _ := auth.FromContext(r.Context())
+	var label, trust string
+	err := s.DB.QueryRowContext(r.Context(),
+		`SELECT label, trust_origin FROM api_keys WHERE id = ?`, c.KeyID,
+	).Scan(&label, &trust)
+	if err != nil {
+		writeJSONError(w, r, http.StatusNotFound, "not_found", "key not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id": c.KeyID, "label": label, "trust_origin": trust,
+		"admin": slices.Contains(c.Scopes, ScopeAdmin),
+	})
 }
 
 // TrustOrigin values (SPEC-0001 Q11, ADR-0008 §1).
@@ -103,6 +142,9 @@ type createKeyResponse struct {
 }
 
 func (s *Service) create(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	var req struct {
 		Label       string `json:"label"`
 		TrustOrigin string `json:"trust_origin"`
@@ -214,6 +256,9 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) revoke(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {

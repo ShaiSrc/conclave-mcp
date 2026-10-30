@@ -41,6 +41,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newListCmd())
 	cmd.AddCommand(newDeleteCmd())
 	cmd.AddCommand(newSubscribeCmd())
+	cmd.AddCommand(newInboxCmd())
 	return cmd
 }
 
@@ -100,9 +101,15 @@ func makeClientAndDo(ctx context.Context, cmd *cobra.Command, action func(ctx co
 
 // exitCodeError is a sentinel: tests (and the cobra glue) map
 // it to os.Exit(<code>) via the ExitCode helper below.
-type exitCodeError struct{ code int }
+type exitCodeError struct {
+	code int
+	err  error // optional cause, printed by main
+}
 
 func (e *exitCodeError) Error() string {
+	if e.err != nil {
+		return e.err.Error()
+	}
 	return fmt.Sprintf("exit %d", e.code)
 }
 
@@ -143,13 +150,13 @@ func mapErr(err error) error {
 	}
 	var netErr *client.NetError
 	if errors.As(err, &netErr) {
-		return exitWith(3)
+		return &exitCodeError{code: 3, err: err}
 	}
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
-		return exitWith(1)
+		return &exitCodeError{code: 1, err: err}
 	}
-	return exitWith(2)
+	return &exitCodeError{code: 2, err: err}
 }
 
 // ---------- send ----------

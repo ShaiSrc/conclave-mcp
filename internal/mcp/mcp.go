@@ -26,6 +26,8 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Server is the MCP transport. It wraps an *http.Client pointed at
@@ -34,6 +36,8 @@ type Server struct {
 	BaseURL    string
 	APIKey     string
 	HTTPClient *http.Client
+
+	selfID atomic.Int64 // caller's key id from /v1/whoami; 0 = not resolved yet
 }
 
 // NewServer builds an MCP server talking to baseURL with the given
@@ -81,10 +85,17 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, er
 	// Some MCP messages are large; bump the buffer cap.
 	scanner.Buffer(make([]byte, 0, 1<<16), 1<<20)
 
-	// JSON-RPC notifications (no id) get no response. We serialize
-	// writes to out so a notification and a response don't
-	// interleave bytes.
-	var writeMu sync.Mutex
+	// Requests run concurrently: a messages.subscribe blocking for
+	// minutes (or abandoned by a cancelled client) must not hold up
+	// the agent's next tool call. Writes are serialized so two
+	// responses never interleave bytes. JSON-RPC notifications (no
+	// id) get no response.
+	var (
+		writeMu  sync.Mutex
+		writeErr error
+		wg       sync.WaitGroup
+	)
+	defer wg.Wait()
 	enc := json.NewEncoder(out)
 
 	for scanner.Scan() {
@@ -106,17 +117,23 @@ func (s *Server) ServeStdio(ctx context.Context, in io.Reader, out io.Writer, er
 			fmt.Fprintf(errOut, "mcp: bad jsonrpc version: %q\n", req.JSONRPC)
 			continue
 		}
-		resp := s.handle(ctx, req)
-		if resp == nil {
-			// Notification, no response.
-			continue
-		}
-		writeMu.Lock()
-		if err := enc.Encode(resp); err != nil {
-			writeMu.Unlock()
-			return fmt.Errorf("write response: %w", err)
-		}
-		writeMu.Unlock()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp := s.handle(ctx, req)
+			if resp == nil {
+				return // notification, no response
+			}
+			writeMu.Lock()
+			defer writeMu.Unlock()
+			if err := enc.Encode(resp); err != nil && writeErr == nil {
+				writeErr = fmt.Errorf("write response: %w", err)
+			}
+		}()
+	}
+	wg.Wait()
+	if writeErr != nil {
+		return writeErr
 	}
 	if err := scanner.Err(); err != nil {
 		// EOF on the input is a clean shutdown, not an error.
@@ -153,17 +170,32 @@ func (s *Server) handle(ctx context.Context, req jsonRPCRequest) *jsonRPCRespons
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return errorResponse(req.ID, -32602, "invalid params: "+err.Error())
 		}
-		result, err := s.callTool(ctx, p.Name, p.Arguments)
-		if err != nil {
-			return errorResponse(req.ID, -32603, err.Error())
-		}
-		return &jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: result}
+		return &jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: toolResult(s.callTool(ctx, p.Name, p.Arguments))}
+	case "ping":
+		return &jsonRPCResponse{JSONRPC: "2.0", ID: req.ID, Result: map[string]any{}}
 	case "notifications/initialized", "notifications/cancelled":
 		// Notifications: no response.
 		return nil
 	default:
 		return errorResponse(req.ID, -32601, "method not found: "+req.Method)
 	}
+}
+
+// toolResult wraps a tool's output in the MCP CallToolResult
+// shape. Tool failures become isError results (not JSON-RPC
+// errors) so the model sees the message and can react.
+func toolResult(v any, err error) map[string]any {
+	if err != nil {
+		return map[string]any{
+			"content": []map[string]any{{"type": "text", "text": err.Error()}},
+			"isError": true,
+		}
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return toolResult(nil, err)
+	}
+	return map[string]any{"content": []map[string]any{{"type": "text", "text": string(b)}}}
 }
 
 func errorResponse(id json.RawMessage, code int, msg string) *jsonRPCResponse {
@@ -174,30 +206,73 @@ func errorResponse(id json.RawMessage, code int, msg string) *jsonRPCResponse {
 	}
 }
 
+// tool is one MCP tool. props/required become the JSON Schema
+// inputSchema that MCP clients (Claude Code etc.) require.
+type tool struct {
+	name, desc string
+	props      map[string]any
+	required   []string
+}
+
+func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
+func num(desc string) map[string]any { return map[string]any{"type": "integer", "description": desc} }
+func enum(desc string, vals ...string) map[string]any {
+	return map[string]any{"type": "string", "description": desc, "enum": vals}
+}
+
+var (
+	roomIDProp      = str("Room id (ULID) from rooms.list or rooms.create.")
+	keyIDProp       = num("API key id from keys.list.")
+	sinceProp       = str("Return only messages after this ts. Pass back next_since from the previous call.")
+	trustOriginProp = enum("Trust origin.", "internal", "external")
+)
+
+var tools = []tool{
+	{"rooms.list", "List rooms the caller is a member of.",
+		map[string]any{"visibility": enum("Filter by visibility.", "public", "private")}, nil},
+	{"rooms.create", "Create a new room; the caller becomes owner.",
+		map[string]any{"name": str("Room name, 1..128 chars."), "description": str("Optional, <= 1024 chars."),
+			"visibility": enum("Default private.", "public", "private")}, []string{"name"}},
+	{"rooms.delete", "Archive (soft-delete) a room. Owner only.",
+		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
+	{"rooms.invite", "Invite an API key to a room. Owner only.",
+		map[string]any{"room_id": roomIDProp, "key_id": keyIDProp, "role": enum("Member role.", "owner", "writer", "reader")},
+		[]string{"room_id", "key_id", "role"}},
+	{"rooms.remove", "Remove an API key from a room. Owner only.",
+		map[string]any{"room_id": roomIDProp, "key_id": keyIDProp}, []string{"room_id", "key_id"}},
+	{"messages.send", "Send a message to a room. The server stamps author_key_id and the author's trust_origin; the sender cannot override them.",
+		map[string]any{"room_id": roomIDProp, "content": str("Message body, <= 256 KiB."),
+			"content_type": enum("Default text/plain.", "text/plain", "text/markdown", "application/json"),
+			"message_type": enum("Intent tag.", "question", "answer", "decision", "handoff", "status_update", "task_assignment", "alert", "system"),
+			"metadata":     map[string]any{"type": "object", "description": "Free-form JSON, e.g. {\"files\": [\"src/auth/\"]}."}},
+		[]string{"room_id", "content"}},
+	{"messages.list", "List messages in a room, oldest first, paginated by sinceProp.",
+		map[string]any{"room_id": roomIDProp, "since": sinceProp, "limit": num("Max messages, default 50, max 500."), "trust_origin": trustOriginProp},
+		[]string{"room_id"}},
+	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With sinceProp: returns at once if anything newer than sinceProp exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as sinceProp.",
+		map[string]any{"room_id": roomIDProp, "since": sinceProp, "wait": num("Seconds to block, default 60, max 300.")},
+		[]string{"room_id"}},
+	{"messages.delete", "Soft-delete a message. Owner only.",
+		map[string]any{"room_id": roomIDProp, "msg_id": num("Message id.")}, []string{"room_id", "msg_id"}},
+	{"keys.list", "List API keys (id, label, trust_origin). Use it to find the key_id of another agent.",
+		map[string]any{}, nil},
+	{"keys.create", "Create a new API key; returns the plaintext once. Admin key only.",
+		map[string]any{"label": str("Unique label, 1..128 chars."), "trust_origin": trustOriginProp}, []string{"label"}},
+	{"keys.revoke", "Revoke an API key. Admin key only.",
+		map[string]any{"id": keyIDProp}, []string{"id"}},
+	{"audit.list", "List audit log entries with filters.",
+		map[string]any{"actor": str("Actor key id."), "action": str("e.g. room.create."), "room_id": roomIDProp,
+			"since": str("ISO-8601 ts."), "limit": num("Max entries.")}, nil},
+}
+
 func (s *Server) toolList() []map[string]any {
-	tools := []struct {
-		name, desc string
-	}{
-		{"rooms.list", "List rooms visible to the caller. Optional arg: visibility ('public' or 'private')."},
-		{"rooms.create", "Create a new room; caller becomes owner. Args: {name, description?, visibility?}."},
-		{"rooms.delete", "Soft-delete a room. Args: {room_id}."},
-		{"rooms.invite", "Invite an API key to a room. Args: {room_id, key_id, role}. role is 'owner', 'writer', or 'reader' (SPEC-0003 §3.3). Owner only."},
-		{"rooms.remove", "Remove an API key from a room. Args: {room_id, key_id}. Owner only."},
-		{"messages.send", "Send a message to a room. Args: {room_id, content, content_type?, message_type?, metadata?}. The server denormalises the author's trust_origin (SPEC-0001 Q11) onto the new message; the sender cannot override it."},
-		{"messages.list", "List messages in a room, paginated by since. Args: {room_id, since?, limit?, trust_origin?}. trust_origin is 'internal' or 'external' (SPEC-0001 Q11)."},
-		{"messages.subscribe", "Subscribe to a room and receive new messages as they arrive (SSE, ADR-0009). Args: {room_id, wait?}. Returns a JSON array of message objects; the connection closes after `wait` seconds (default 60, max 300) or when the room is archived. Polling via messages.list is the canonical fallback for clients that cannot hold a streaming connection."},
-		{"messages.delete", "Soft-delete a message (owner only). Args: {room_id, msg_id}."},
-		{"keys.list", "List API keys. Each row carries trust_origin (SPEC-0001 Q11)."},
-		{"keys.create", "Create a new API key; returns plaintext once. Args: {label?, trust_origin?}. trust_origin is 'internal' (default) or 'external' (SPEC-0001 Q11, ADR-0008 revision)."},
-		{"keys.revoke", "Revoke an API key (soft delete). Args: {id}."},
-		{"audit.list", "List audit log entries with filters. Args: {actor?, action?, room_id?, since?, limit?}."},
-	}
 	out := make([]map[string]any, 0, len(tools))
 	for _, t := range tools {
-		out = append(out, map[string]any{
-			"name":        t.name,
-			"description": t.desc,
-		})
+		schema := map[string]any{"type": "object", "properties": t.props}
+		if t.required != nil {
+			schema["required"] = t.required
+		}
+		out = append(out, map[string]any{"name": t.name, "description": t.desc, "inputSchema": schema})
 	}
 	return out
 }
@@ -322,27 +397,6 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}
 		return s.httpDelete(ctx, "/v1/rooms/"+p.RoomID+"/messages/"+itoaInt64(p.MsgID))
 	case "messages.subscribe":
-		// SSE subscription with backlog (ADR-0009 + a
-		// long-poll-friendly envelope). The MCP caller
-		// gets back a JSON object:
-		//
-		//   {
-		//     "events":     [ <message>, ... ],   // events that arrived
-		//     "next_since": "<ts>",              // pass back as since
-		//     "timed_out":  false,               // true if no events in wait window
-		//     "has_more":   false                // true if events still pending after this window
-		//   }
-		//
-		// An MCP agent that wants continuous coverage
-		// calls this in a loop, passing back
-		// `next_since` as `since` to catch up. The
-		// server-side SSE channel is held open for up
-		// to `wait` seconds (default 60, max 300).
-		// Polling via messages.list is the canonical
-		// fallback for clients that cannot hold a
-		// streaming connection; the user can also pass
-		// `wait=0` to skip the live wait and get just
-		// the SSE response drained immediately.
 		var p struct {
 			RoomID string `json:"room_id"`
 			Since  string `json:"since"`
@@ -358,42 +412,7 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if p.Wait > 300 {
 			p.Wait = 300
 		}
-		// Open the SSE channel. The response is a flat
-		// array of message objects; we wrap it into
-		// the long-poll envelope here.
-		raw, err := s.httpSSE(ctx, "/v1/rooms/"+p.RoomID+"/events?wait="+itoaInt(p.Wait))
-		if err != nil {
-			return nil, err
-		}
-		eventsArr, _ := raw.([]json.RawMessage)
-		// Compute next_since from the last event's ts.
-		// If no events arrived, the cursor stays at the
-		// value the caller passed in (or empty).
-		nextSince := p.Since
-		if len(eventsArr) > 0 {
-			var last struct {
-				TS string `json:"ts"`
-			}
-			if jerr := json.Unmarshal(eventsArr[len(eventsArr)-1], &last); jerr == nil && last.TS != "" {
-				nextSince = last.TS
-			}
-		}
-		// timed_out: the SSE channel returned with
-		// zero events. The agent can decide whether
-		// to keep polling or back off. We don't have
-		// a way to distinguish "no events" from
-		// "events came in but not within wait" from
-		// inside httpSSE; the conservative answer is
-		// to mark timed_out=true when the channel
-		// closes with no events, which the current
-		// implementation does.
-		timedOut := len(eventsArr) == 0
-		return map[string]any{
-			"events":     eventsArr,
-			"next_since": nextSince,
-			"timed_out":  timedOut,
-			"has_more":   !timedOut, // a non-empty result means we received something
-		}, nil
+		return s.subscribe(ctx, p.RoomID, p.Since, p.Wait)
 	case "keys.list":
 		return s.httpGet(ctx, "/v1/keys")
 	case "keys.create":
@@ -441,27 +460,22 @@ func (s *Server) httpDelete(ctx context.Context, path string) (any, error) {
 	return s.do(req)
 }
 
-// httpSSE opens a text/event-stream connection and returns
-// a JSON array containing one element per `event: <name>`
-// block. The `wait` query parameter controls how long the
-// server keeps the connection open; the client honors the
-// same timeout via the request context.
+// subscribe implements messages.subscribe as a long-poll that
+// returns the next message(s) from other members:
 //
-// The SSE format produced by the server is:
+//	{"events": [...], "next_since": "<ts>", "timed_out": bool, "has_more": bool}
 //
-//	event: message.created
-//	data: {"id":...}
-//
-//	event: ping
-//	data: {"ts":...}
-//
-// We collect the `data:` payloads (one per `message.created`
-// event) into a JSON array and ignore `ping` heartbeats.
-// This matches the spec'd behaviour of `messages.subscribe`
-// (ADR-0009 §2.1): the MCP tool returns a JSON array of
-// messages received during the subscription window.
-func (s *Server) httpSSE(ctx context.Context, path string) (any, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.BaseURL+path, nil)
+// It opens the SSE stream (ADR-0009) first and only then reads
+// the backlog after since, so a message sent in between is never
+// lost. A non-empty backlog returns at once; otherwise the first
+// live message does, or the stream closes after wait seconds.
+// The caller's own messages are skipped but still advance
+// next_since.
+func (s *Server) subscribe(ctx context.Context, roomID, since string, wait int) (any, error) {
+	ctx, cancel := context.WithTimeout(ctx, time.Duration(wait+5)*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		s.BaseURL+"/v1/rooms/"+roomID+"/events?wait="+itoaInt(wait), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -473,61 +487,114 @@ func (s *Server) httpSSE(ctx context.Context, path string) (any, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("subscribe: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("subscribe: http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
-	// bufio.Scanner with a large buffer; SSE events can be
-	// arbitrarily long (the full message body is one
-	// payload). 1 MiB is plenty for v0.x.
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var (
-		messages    []json.RawMessage
-		currentData []byte
-	)
-	flush := func() {
-		if len(currentData) == 0 {
-			return
-		}
-		// Try to parse; on parse error (e.g. a `ping` with
-		// {"ts":...}) we drop the line. We only keep
-		// payloads that look like messages.
-		var probe map[string]any
-		if err := json.Unmarshal(currentData, &probe); err == nil {
-			if _, hasID := probe["id"]; hasID {
-				messages = append(messages, json.RawMessage(append([]byte{}, currentData...)))
-			}
-		}
-		currentData = currentData[:0]
+	sc := bufio.NewScanner(resp.Body)
+	// 256 KiB of content can JSON-escape to ~1.5 MiB in one data line.
+	sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
+	// The server sends ": ok" once the subscription is live.
+	for sc.Scan() && !bytes.HasPrefix(sc.Bytes(), []byte(":")) {
 	}
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			if len(currentData) > 0 {
-				currentData = append(currentData, '\n')
-			}
-			currentData = append(currentData, line[6:]...)
-		} else if bytes.HasPrefix(line, []byte("data:")) {
-			// Same as above, no leading space.
-			if len(currentData) > 0 {
-				currentData = append(currentData, '\n')
-			}
-			currentData = append(currentData, line[5:]...)
-		} else if len(line) == 0 {
-			// Blank line = end of event.
-			flush()
+
+	self := s.selfKeyID(ctx)
+	next := since
+	var seen int64 // highest message id already handled
+	envelope := func(events []json.RawMessage, hasMore bool) map[string]any {
+		if events == nil {
+			events = []json.RawMessage{}
 		}
-		// Other lines (event:, id:, retry:, comments) are
-		// ignored for the MCP tool's purposes.
+		return map[string]any{"events": events, "next_since": next, "timed_out": len(events) == 0, "has_more": hasMore}
 	}
-	flush()
-	if err := scanner.Err(); err != nil {
-		// EOF is normal (server closed the stream at the
-		// wait timeout). Anything else is an error.
-		if err.Error() != "EOF" {
+
+	// Backlog: page on while pages are full but hold only our own
+	// messages, so a long run of them cannot hide a reply.
+	const pageSize = 500 // server max
+	for cursor := since; cursor != ""; {
+		v, err := s.httpGet(ctx, "/v1/rooms/"+roomID+"/messages?limit="+itoaInt(pageSize)+"&since="+url.QueryEscape(cursor))
+		if err != nil {
 			return nil, err
 		}
+		var page struct {
+			Messages []json.RawMessage `json:"messages"`
+		}
+		b, _ := json.Marshal(v)
+		_ = json.Unmarshal(b, &page)
+		var events []json.RawMessage
+		for _, m := range page.Messages {
+			if id, ts, mine := msgInfo(m, self); id != 0 {
+				next, seen = ts, id
+				if !mine {
+					events = append(events, m)
+				}
+			}
+		}
+		full := len(page.Messages) >= pageSize
+		if len(events) > 0 {
+			return envelope(events, full), nil
+		}
+		if !full || next == cursor {
+			break
+		}
+		cursor = next
 	}
-	return messages, nil
+
+	var data []byte
+	for sc.Scan() {
+		line := sc.Bytes()
+		if after, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+			data = append(data[:0], bytes.TrimPrefix(after, []byte(" "))...)
+			continue
+		}
+		if len(line) != 0 || len(data) == 0 {
+			continue
+		}
+		m := json.RawMessage(append([]byte(nil), data...))
+		data = data[:0]
+		id, ts, mine := msgInfo(m, self) // ping events have no id
+		if id <= seen {
+			continue // heartbeat, or already covered by the backlog
+		}
+		next, seen = ts, id
+		if !mine {
+			return envelope([]json.RawMessage{m}, false), nil
+		}
+	}
+	if err := sc.Err(); err != nil && ctx.Err() == nil {
+		return nil, fmt.Errorf("subscribe: read stream: %w", err)
+	}
+	// Stream closed after wait seconds (or our timeout fired).
+	return envelope(nil, false), nil
+}
+
+// msgInfo returns a message's id, ts and whether self wrote it.
+// id is 0 for payloads that are not messages (heartbeats).
+func msgInfo(m json.RawMessage, self int64) (id int64, ts string, mine bool) {
+	var v struct {
+		ID     int64  `json:"id"`
+		Author int64  `json:"author_key_id"`
+		TS     string `json:"ts"`
+	}
+	if json.Unmarshal(m, &v) != nil {
+		return 0, "", false
+	}
+	return v.ID, v.TS, self != 0 && v.Author == self
+}
+
+// selfKeyID resolves the caller's key id via /v1/whoami and caches
+// it. A failed lookup is retried on the next call; until then it
+// returns 0 (own messages are not filtered).
+func (s *Server) selfKeyID(ctx context.Context) int64 {
+	if id := s.selfID.Load(); id != 0 {
+		return id
+	}
+	v, err := s.httpGet(ctx, "/v1/whoami")
+	if m, ok := v.(map[string]any); err == nil && ok {
+		if id, ok := m["id"].(float64); ok {
+			s.selfID.Store(int64(id))
+		}
+	}
+	return s.selfID.Load()
 }
 
 func (s *Server) addAuth(req *http.Request) {
@@ -542,12 +609,23 @@ func (s *Server) do(req *http.Request) (any, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	if len(bytes.TrimSpace(body)) == 0 {
+		// invite (201), remove/revoke (204) answer with no body.
+		if resp.StatusCode >= 400 {
+			return nil, fmt.Errorf("http %d", resp.StatusCode)
+		}
+		return map[string]any{"ok": true}, nil
+	}
 	var result any
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("decode response (status %d): %w", resp.StatusCode, err)
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("http %d: %v", resp.StatusCode, result)
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}
 	return result, nil
 }
@@ -556,10 +634,10 @@ func itoaInt(n int) string     { return fmt.Sprintf("%d", n) }
 func itoaInt64(n int64) string { return fmt.Sprintf("%d", n) }
 
 // ServeHTTP is the JSON-RPC-over-HTTP entrypoint (SPEC-0003 §2.2,
-// ADR-0007 §Q9). It accepts a single JSON-RPC 2.0 request
-// envelope and returns a single JSON-RPC 2.0 response envelope.
-// No streaming, no SSE. The transport is intentionally the
-// same as stdio's but framed in HTTP request/response.
+// ADR-0007 §Q9): one JSON-RPC request per POST, one JSON response
+// back (the JSON-response mode of MCP Streamable HTTP). It
+// dispatches through the same handle() as stdio, so both
+// transports speak the identical protocol.
 //
 // This handler is wired into the server at `POST /v1/mcp` by
 // internal/server/server.go.
@@ -578,48 +656,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeJSONRPCError(w, req.ID, -32600, "jsonrpc must be '2.0'")
 		return
 	}
-	switch req.Method {
-	case "tools/list":
-		// tools/list takes no params; we return the
-		// same list as stdio.
-		s.writeJSONRPCResult(w, req.ID, map[string]any{"tools": s.toolList()})
-	case "tools/call":
-		var p toolCallParams
-		if err := json.Unmarshal(req.Params, &p); err != nil {
-			writeJSONRPCError(w, req.ID, -32602, "invalid params: "+err.Error())
-			return
-		}
-		result, err := s.callTool(r.Context(), p.Name, p.Arguments)
-		if err != nil {
-			// callTool returns errors for both transport
-			// failures and HTTP 4xx/5xx. We map them to
-			// the JSON-RPC "internal error" code (which is
-			// not ideal but standard for thin
-			// wrappers). The detail carries the HTTP
-			// status and the decoded body.
-			writeJSONRPCError(w, req.ID, -32603, err.Error())
-			return
-		}
-		s.writeJSONRPCResult(w, req.ID, map[string]any{
-			"content": []map[string]any{
-				{"type": "json", "data": result},
-			},
-		})
-	default:
-		writeJSONRPCError(w, req.ID, -32601, "method not found: "+req.Method)
+	resp := s.handle(r.Context(), req)
+	if resp == nil {
+		w.WriteHeader(http.StatusAccepted) // notification
+		return
 	}
-}
-
-// writeJSONRPCResult writes a successful JSON-RPC 2.0 response
-// envelope with the given id and result.
-func (s *Server) writeJSONRPCResult(w http.ResponseWriter, id json.RawMessage, result any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_ = json.NewEncoder(w).Encode(jsonRPCResponse{
-		JSONRPC: "2.0",
-		ID:      id,
-		Result:  result,
-	})
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 // writeJSONRPCError writes a JSON-RPC 2.0 error response. The
@@ -643,9 +686,9 @@ func rawJSONToQuery(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return ""
 	}
-	parts := make([]string, 0, len(m))
+	q := url.Values{}
 	for k, v := range m {
-		parts = append(parts, k+"="+fmt.Sprintf("%v", v))
+		q.Set(k, fmt.Sprint(v))
 	}
-	return strings.Join(parts, "&")
+	return q.Encode()
 }

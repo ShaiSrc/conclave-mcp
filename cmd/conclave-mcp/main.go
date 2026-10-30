@@ -8,6 +8,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -103,6 +104,9 @@ func main() {
 		}
 	}
 	if code != 0 {
+		// The root command sets SilenceErrors, so this is the only
+		// place the reason gets printed.
+		fmt.Fprintln(os.Stderr, "conclave-mcp:", err)
 		os.Exit(code)
 	}
 }

@@ -18,6 +18,7 @@ package auth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
@@ -55,6 +56,13 @@ type Verifier struct {
 	lookup KeyLookup
 	// sem caps concurrent argon2 verifications (each costs ~38 MiB + CPU).
 	sem chan struct{}
+	// verified maps sha256(token) to the PHC string it already
+	// matched, so a key's repeat requests skip argon2id. The DB
+	// lookup still runs on every request: a revoked key (lookup
+	// fails) or a changed hash (PHC differs) is rejected at once.
+	// Holds only tokens that verified, so it is bounded by the
+	// number of valid keys in use.
+	verified sync.Map // [32]byte -> string
 }
 
 // NewVerifier returns a Verifier with the lookup interface and the
@@ -96,6 +104,18 @@ func (v *Verifier) Verify(ctx context.Context, authzHeader string) (keyID int64,
 	const prefixLen = 8
 	lookupKey := token[3 : 3+prefixLen] // skip "tk_", take 8 chars
 
+	keyID, scopes, phc, err := v.lookup.LookupByPrefix(ctx, lookupKey)
+	if err != nil {
+		// Any lookup failure (including not-found) is a generic
+		// "invalid" to the client. The internal error is logged
+		// by the middleware, not surfaced.
+		return 0, nil, ErrInvalid
+	}
+	sum := sha256.Sum256([]byte(token))
+	if cached, ok := v.verified.Load(sum); ok && cached.(string) == phc {
+		return keyID, scopes, nil
+	}
+
 	// Cap concurrent argon2 verifications.
 	select {
 	case v.sem <- struct{}{}:
@@ -104,18 +124,11 @@ func (v *Verifier) Verify(ctx context.Context, authzHeader string) (keyID int64,
 		return 0, nil, ctx.Err()
 	}
 
-	keyID, scopes, phc, err := v.lookup.LookupByPrefix(ctx, lookupKey)
-	if err != nil {
-		// Any lookup failure (including not-found) is a generic
-		// "invalid" to the client. The internal error is logged
-		// by the middleware, not surfaced.
-		return 0, nil, ErrInvalid
-	}
-
 	ok, verifyErr := VerifyPHC(token, phc)
 	if verifyErr != nil || !ok {
 		return 0, nil, ErrInvalid
 	}
+	v.verified.Store(sum, phc)
 	return keyID, scopes, nil
 }
 

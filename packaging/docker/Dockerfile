@@ -13,7 +13,7 @@
 # Image target: < 25 MiB compressed (SPEC-0005 §7).
 
 # ---------- builder ----------
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 # CGO_ENABLED=0 keeps the binary fully static so the distroless
 # runtime image (no glibc, no libc) can run it without surprises.
@@ -35,7 +35,8 @@ RUN go build \
         ./cmd/conclave-mcp
 
 # Smoke check: the binary must run --version before we ship it.
-RUN /out/conclave-mcp --version
+RUN /out/conclave-mcp --version \
+ && mkdir -p /out/data
 
 # ---------- runtime ----------
 # Distroless static: no shell, no package manager, no libc.
@@ -56,11 +57,11 @@ LABEL org.opencontainers.image.title="conclave-mcp" \
 COPY --from=builder /out/conclave-mcp /usr/local/bin/conclave-mcp
 
 # Data dir must exist and be writable by the nonroot user.
-# Distroless runs as uid 65532; bind-mounts from the host should
-# chown 65532 or use a named volume (Docker handles the latter).
+# Distroless has no shell, so the dir is created in the builder
+# and copied with the right owner. Bind-mounts from the host
+# should chown 65532 or use a named volume.
+COPY --from=builder --chown=65532:65532 /out/data /var/lib/conclave-mcp
 WORKDIR /var/lib/conclave-mcp
-RUN mkdir -p /var/lib/conclave-mcp \
- && chown -R 65532:65532 /var/lib/conclave-mcp
 
 USER 65532:65532
 

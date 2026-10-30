@@ -53,14 +53,47 @@ func migrationsDir() fs.FS {
 // keep import of strconv in case other tests need it
 var _ = strconv.Itoa
 
-// newTestServer wires chi with the keys routes.
+// newTestServer wires chi with the keys routes, called as an
+// admin key.
 func newTestServer(t *testing.T) (*chi.Mux, *sql.DB) {
+	t.Helper()
+	return newTestServerAs(t, []string{ScopeAdmin})
+}
+
+// newTestServerAs wires chi with the keys routes; every request
+// carries claims with the given scopes.
+func newTestServerAs(t *testing.T, scopes []string) (*chi.Mux, *sql.DB) {
 	t.Helper()
 	db := setupDB(t)
 	s := NewService(db)
 	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: 1, Scopes: scopes})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
 	s.Routes(r)
 	return r, db
+}
+
+func TestKeys_NonAdminCannotCreateOrRevoke(t *testing.T) {
+	r, _ := newTestServerAs(t, nil)
+	for _, req := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/keys", strings.NewReader(`{"label":"x"}`)),
+		httptest.NewRequest(http.MethodDelete, "/keys/1", nil),
+	} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("%s %s: got %d, want 403", req.Method, req.URL.Path, rec.Code)
+		}
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/keys", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /keys: got %d, want 200 (list stays open so agents can find each other)", rec.Code)
+	}
 }
 
 func TestKeys_CreateReturnsPlaintextOnce(t *testing.T) {

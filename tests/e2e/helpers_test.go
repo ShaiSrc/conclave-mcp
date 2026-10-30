@@ -383,10 +383,14 @@ func (s *subprocessEnv) call(method, path, token string, body any) httpResp {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
+	// Load tests call this from many goroutines, where t.Fatalf is
+	// not allowed; transport errors come back in Err with Status 0,
+	// which fails the caller's status check. 30s, not 5s: a loaded
+	// CI host can queue argon2id verifications for seconds.
+	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		s.t.Fatalf("Do: %v", err)
+		return httpResp{Err: err}
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
@@ -439,7 +443,7 @@ func (s *subprocessEnv) createBootstrapKey(label string) subprocessAPIKey {
 	defer db.Close()
 
 	res, err := db.Exec(
-		`INSERT INTO api_keys(prefix, hash, label, created_at) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO api_keys(prefix, hash, label, created_at, is_admin) VALUES (?, ?, ?, ?, 1)`,
 		prefix, hash, unique, time.Now().UTC().Format(time.RFC3339Nano),
 	)
 	if err != nil {
