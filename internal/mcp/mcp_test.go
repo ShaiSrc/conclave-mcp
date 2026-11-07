@@ -56,12 +56,12 @@ func TestServer_ToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools not array: %T", result["tools"])
 	}
-	// 13 tools: 11 original + rooms.invite, rooms.remove
-	// (ADR-0007 §Open questions, resolved 2026-06-28). If a
-	// future commit adds or removes a tool, the message
-	// below makes the drift obvious.
-	if len(tools) != 13 {
-		t.Errorf("tool count: got %d, want 13 (rooms.list, rooms.create, rooms.delete, rooms.invite, rooms.remove, messages.send, messages.list, messages.subscribe, messages.delete, keys.list, keys.create, keys.revoke, audit.list)", len(tools))
+	// 16 tools: 11 original + rooms.invite, rooms.remove
+	// (ADR-0007 §Open questions, resolved 2026-06-28) + the
+	// three claims tools. If a future commit adds or removes a
+	// tool, the message below makes the drift obvious.
+	if len(tools) != 16 {
+		t.Errorf("tool count: got %d, want 16 (13 + claims.list, claims.claim, claims.release)", len(tools))
 	}
 	for i, raw := range tools {
 		m, ok := raw.(map[string]any)
@@ -378,5 +378,32 @@ func TestSubscribe_PagesPastFullPageOfOwnMessages(t *testing.T) {
 	}
 	if next != "t501" || elapsed > 5*time.Second {
 		t.Errorf("next_since=%q after %v, want t501 without waiting", next, elapsed)
+	}
+}
+
+func TestClaimsTools(t *testing.T) {
+	var gotBody map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		switch r.URL.Path {
+		case "/v1/rooms/R/claims":
+			w.WriteHeader(http.StatusConflict)
+			fmt.Fprint(w, `{"error":{"code":"conflict","message":"src/a.go is claimed by agent-b (claim src/, until 2026-11-07T12:00:00Z)"}}`)
+		case "/v1/rooms/R/claims/release":
+			fmt.Fprint(w, `{"released":["src/"]}`)
+		}
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "tk_test")
+
+	text, isErr := toolText(t, s, "claims.claim", `{"room_id":"R","paths":["src/a.go"],"ttl_minutes":5}`)
+	if !isErr || !strings.Contains(text, "claimed by agent-b") {
+		t.Errorf("conflict: got %q isError=%v, want isError naming the holder", text, isErr)
+	}
+	if gotBody["ttl_seconds"] != float64(300) {
+		t.Errorf("ttl_minutes must become ttl_seconds: %v", gotBody)
+	}
+	if text, isErr := toolText(t, s, "claims.release", `{"room_id":"R"}`); isErr || !strings.Contains(text, "src/") {
+		t.Errorf("release: got %q isError=%v", text, isErr)
 	}
 }

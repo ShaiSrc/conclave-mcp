@@ -263,6 +263,19 @@ var tools = []tool{
 	{"audit.list", "List audit log entries with filters.",
 		map[string]any{"actor": str("Actor key id."), "action": str("e.g. room.create."), "room_id": roomIDProp,
 			"since": str("ISO-8601 ts."), "limit": num("Max entries.")}, nil},
+	{"claims.list", "List active file claims in a room: which agent holds which repo-relative path, until when.",
+		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
+	{"claims.claim", "Claim repo-relative paths before working on them (a trailing / claims a directory). All-or-nothing: fails naming the holder if another agent holds an overlapping path. Re-claiming your own paths extends them; your hooks keep them alive while you work.",
+		map[string]any{"room_id": roomIDProp,
+			"paths":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": `e.g. ["src/auth/", "cmd/main.go"]`},
+			"note":        str("What you are doing, shown to the other agents."),
+			"ttl_minutes": num("Default 30, max 1440.")},
+		[]string{"room_id", "paths"}},
+	{"claims.release", "Release your claims in a room: the given paths, or all of them when paths is omitted. Do this when you finish an area. The room owner may pass key_id to release another agent's claims.",
+		map[string]any{"room_id": roomIDProp,
+			"paths":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+			"key_id": keyIDProp},
+		[]string{"room_id"}},
 }
 
 func (s *Server) toolList() []map[string]any {
@@ -427,6 +440,32 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		// We forward raw args as query params, which is a hack
 		// but works for the small set of filters we support.
 		return s.httpGet(ctx, "/v1/audit?"+rawJSONToQuery(args))
+	case "claims.list", "claims.claim", "claims.release":
+		var p struct {
+			RoomID     string   `json:"room_id"`
+			Paths      []string `json:"paths"`
+			Note       string   `json:"note"`
+			TTLMinutes int      `json:"ttl_minutes"`
+			KeyID      int64    `json:"key_id"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.RoomID == "" {
+			return nil, fmt.Errorf("%s requires room_id", name)
+		}
+		base := "/v1/rooms/" + p.RoomID + "/claims"
+		switch name {
+		case "claims.list":
+			return s.httpGet(ctx, base)
+		case "claims.claim":
+			if len(p.Paths) == 0 {
+				return nil, errors.New("claims.claim requires paths")
+			}
+			body, _ := json.Marshal(map[string]any{"paths": p.Paths, "note": p.Note, "ttl_seconds": p.TTLMinutes * 60})
+			return s.httpPost(ctx, base, body)
+		default:
+			body, _ := json.Marshal(map[string]any{"paths": p.Paths, "key_id": p.KeyID})
+			return s.httpPost(ctx, base+"/release", body)
+		}
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
