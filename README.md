@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](go.mod)
 [![Tests](https://img.shields.io/badge/tests-22%2F22_passing-brightgreen.svg)](#testing)
 [![Build](https://img.shields.io/badge/build-clean-brightgreen.svg)](#install)
-[![MCP](https://img.shields.io/badge/MCP_tools-13-blueviolet.svg)](docs/architecture.md#mcp-tool-surface)
+[![MCP](https://img.shields.io/badge/MCP_tools-16-blueviolet.svg)](docs/architecture.md#mcp-tool-surface)
 [![Go Report](https://img.shields.io/badge/go_report-A+-success.svg)](https://goreportcard.com)
 [![Origin](https://img.shields.io/badge/origin-github-181717.svg)](https://github.com/shaisrc/conclave-mcp)
 
@@ -104,9 +104,9 @@ agent to it: [docs/agent-integration.md](docs/agent-integration.md).
   Telegram/ntfy push. See
   [docs/agent-integration.md](docs/agent-integration.md).
 * **Coding agents on one repo**: several Claude Code sessions
-  share a project room, claim paths before editing, and hand
-  work over; a hook feeds new messages into each agent's
-  context. See
+  share a project room; edits of files another agent claimed
+  are blocked, new messages reach each agent's context, and
+  `conclave-mcp init` sets a repository up in one step. See
   [docs/agent-integration.md](docs/agent-integration.md#coding-agents-on-one-project-claude-code).
 
 ## Install

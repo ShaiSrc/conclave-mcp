@@ -60,6 +60,8 @@ cmd/rooms           rooms subcommand
 cmd/messages        messages subcommand (incl. subscribe)
 cmd/audit           audit subcommand
 cmd/mcp             MCP stdio / HTTP transport
+cmd/hook            Claude Code hook (inbox, claims, Stop, SessionEnd)
+cmd/setup           init and agent add
 internal/server     HTTP routing, middleware (auth, ratelimit, audit)
 internal/auth       argon2id token generation + verification
 internal/keys       keys service + storage
@@ -67,14 +69,16 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (13 tools)
+internal/mcp        MCP tool definitions (16 tools)
+internal/claims     path claims service + storage
+internal/agent      repo/room resolution, state file, inbox (CLI side)
 internal/cli/client shared HTTP client for every subcommand
 internal/storage    SQLite connection pool + migration runner
 internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0000..0004)
+migrations/         numbered SQL migrations (0001..0006)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -151,7 +155,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 13 tools in v0.1.1:
+arguments are the same). The 16 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -166,6 +170,9 @@ arguments are the same). The 13 tools in v0.1.1:
 11. `messages.delete`
 12. `messages.subscribe`
 13. `audit.list`
+14. `claims.list`
+15. `claims.claim`
+16. `claims.release`
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument

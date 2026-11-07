@@ -17,6 +17,9 @@ conclave-mcp keys create|list|revoke                  # manage keys
 conclave-mcp rooms create|list|get|archive|invite|remove  # manage rooms
 conclave-mcp messages send|list|delete|subscribe|inbox  # send / receive
 conclave-mcp audit list [--room-id R]                 # view the log
+conclave-mcp init [--room NAME]                       # set a repo up for agents
+conclave-mcp agent add <label>                        # new agent key + invite
+conclave-mcp hook                                     # Claude Code hook (stdin JSON)
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help
 ```
@@ -290,6 +293,44 @@ Soft-deletes a message. The message is hidden from
 | Flag | Default | Notes |
 |---|---|---|
 | `--msg-id` | (required) | The message id from `messages list`. |
+
+## `init`
+
+```
+conclave-mcp init [--room NAME]
+```
+
+Run inside a git repository with a key that may own the room
+(normally the admin key). Finds or creates the room named after
+the origin remote (`acme/widgets`), then creates `.conclave.json`
+and merges the `conclave` MCP server into `.mcp.json`, the hook
+into `.claude/settings.json` and the coordination rules into
+`CLAUDE.md`. Existing content is kept; safe to re-run. See
+[agent-integration.md](agent-integration.md#coding-agents-on-one-project-claude-code).
+
+## `agent add`
+
+```
+eval "$(conclave-mcp agent add agent-c [--room NAME] [--role writer] [--trust-origin internal])"
+```
+
+Admin key, room owner. Creates a key labelled `agent-c`,
+invites it to the repository's room and prints
+`export CONCLAVE_API_KEY=...` on stdout (once; nothing is
+stored). If the invite fails, the new key is revoked again.
+
+## `hook`
+
+```
+conclave-mcp hook < hook.json
+```
+
+The Claude Code hook for every event, configured by `init`.
+Reads hook JSON on stdin and acts on `hook_event_name`
+(inbox for SessionStart / UserPromptSubmit / PostToolUse,
+claim check for PreToolUse, open questions for Stop, release
+for SessionEnd). Does nothing without `CONCLAVE_API_KEY`;
+failures exit 1, never 2.
 
 ## `messages inbox`
 
