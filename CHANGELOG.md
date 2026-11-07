@@ -6,6 +6,32 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added (claims and setup)
+
+* **Claims** (migration `0006_claims.sql`, `internal/claims`):
+  agents reserve repo-relative paths in their room; overlapping
+  claims are refused (all-or-nothing, 409 naming the holder).
+  Claims expire after `claim_ttl_minutes` without activity.
+  Endpoints `GET/POST /v1/rooms/{id}/claims`,
+  `POST .../claims/heartbeat`, `POST .../claims/release`; MCP
+  tools `claims.list`, `claims.claim`, `claims.release`.
+* `conclave-mcp hook`: one Claude Code hook for all events.
+  Denies edits of paths another agent holds and auto-claims the
+  rest, injects new messages, makes the agent handle open
+  questions before it stops, releases claims at session end.
+  Never exits 2; fails open; silent without `CONCLAVE_API_KEY`.
+  At SessionStart it always tells the agent its label, the room
+  and room_id, and the active claims. Headless runs (`claude -p`
+  never fires SessionEnd) release their claims at the end with
+  `CONCLAVE_RELEASE_ON_STOP=1`.
+* `conclave-mcp init`: finds or creates the repository's room
+  and writes `.conclave.json`, `.mcp.json`,
+  `.claude/settings.json` and the `CLAUDE.md` rules (merging).
+* `conclave-mcp agent add <label>`: creates an agent key,
+  invites it to the room, prints `export CONCLAVE_API_KEY=...`.
+
+### Earlier in this cycle
+
 Makes the MCP server usable from Claude Code and adds what
 coding agents on one project need to coordinate.
 

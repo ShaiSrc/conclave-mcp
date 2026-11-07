@@ -25,6 +25,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/claims"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/keys"
 	"github.com/hermes/conclave-mcp/internal/mcp"
@@ -150,6 +151,7 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 	}
 	messagesSvc := messages.NewService(deps.DB, deps.MaxMessageBytes, messagesBroker)
 	auditSvc := audit.NewService(deps.DB)
+	claimsSvc := claims.NewService(deps.DB)
 
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.
@@ -168,6 +170,7 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 		roomsSvc.Routes(r)
 		messagesSvc.Routes(r)
 		auditSvc.Routes(r)
+		claimsSvc.Routes(r)
 
 		// 404/405 envelopes apply AFTER the routes are mounted,
 		// otherwise the NotFound handler shadows the routes.

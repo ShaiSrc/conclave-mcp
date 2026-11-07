@@ -8,6 +8,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -15,11 +16,13 @@ import (
 
 	"github.com/hermes/conclave-mcp/cmd/admin"
 	"github.com/hermes/conclave-mcp/cmd/audit"
+	"github.com/hermes/conclave-mcp/cmd/hook"
 	"github.com/hermes/conclave-mcp/cmd/keys"
 	mcpcli "github.com/hermes/conclave-mcp/cmd/mcp"
 	"github.com/hermes/conclave-mcp/cmd/messages"
 	"github.com/hermes/conclave-mcp/cmd/rooms"
 	"github.com/hermes/conclave-mcp/cmd/serve"
+	"github.com/hermes/conclave-mcp/cmd/setup"
 )
 
 var version = "0.1.0-dev"
@@ -40,6 +43,9 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(keys.NewCmd())
 	root.AddCommand(audit.NewCmd())
 	root.AddCommand(admin.NewCmd())
+	root.AddCommand(hook.NewCmd())
+	root.AddCommand(setup.NewInitCmd())
+	root.AddCommand(setup.NewAgentCmd())
 	root.AddCommand(newVersionCmd())
 
 	// Global flags shared by every CLI subcommand that talks to a server.
@@ -65,6 +71,13 @@ func main() {
 	err := cmd.Execute()
 	if err == nil {
 		return
+	}
+	// Hook failures always exit 1: exit 2 would make Claude Code block
+	// the user's prompt or the tool call.
+	var hookErr *hook.Error
+	if errors.As(err, &hookErr) {
+		fmt.Fprintln(os.Stderr, "conclave-mcp hook:", err)
+		os.Exit(1)
 	}
 	// rooms subcommands carry a typed exit code via *rooms.exitError.
 	// Detect it before delegating to exitClassifier (which only knows
@@ -100,6 +113,11 @@ func main() {
 	// admin.ExitCode same.
 	if code == 0 || code == 2 {
 		if c := admin.ExitCode(err); c == 1 || c == 3 {
+			code = c
+		}
+	}
+	if code == 0 || code == 2 {
+		if c := setup.ExitCode(err); c == 1 {
 			code = c
 		}
 	}
