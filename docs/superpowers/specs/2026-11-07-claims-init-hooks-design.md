@@ -59,7 +59,7 @@ when one ends in `/` and is a prefix of the other.
 | `GET /v1/rooms/{id}/claims` | any member | active claims: `{claims:[{id,path,key_id,label,auto,note,expires_at}]}` |
 | `POST /v1/rooms/{id}/claims` `{paths, ttl_seconds?, auto?, note?}` | writer/owner | all-or-nothing: 409 `{error:{code:"conflict"}, conflicts:[{path,held_path,key_id,label,expires_at}]}` if any path overlaps another key's active claim; otherwise upsert the caller's claims, 201 `{claims}`. Also refreshes all of the caller's active claims in the room to the same TTL. Expired rows of the room are deleted first. |
 | `POST /v1/rooms/{id}/claims/heartbeat` `{ttl_seconds?}` | member | extend all of the caller's active claims; `{refreshed:n}` |
-| `DELETE /v1/rooms/{id}/claims` `{paths?, key_id?}` | member | release the caller's claims (all when `paths` empty). `key_id` of another key: room owner only (force release). `{released:[paths]}` |
+| `POST /v1/rooms/{id}/claims/release` `{paths?, key_id?}` | member | release the caller's claims (all when `paths` empty). `key_id` of another key: room owner only (force release). `{released:[paths]}` |
 
 TTL: default 1800 s, max 86400 s. Every state change writes an audit row
 (`claim.create`, `claim.release`).
