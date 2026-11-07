@@ -25,6 +25,8 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
+	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
 type Service struct {
@@ -96,6 +98,11 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		args = append(args, roomID)
 	}
 	if since != "" {
+		var err error
+		if since, err = storage.NormalizeTS(since); err != nil {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "since must be an RFC 3339 timestamp")
+			return
+		}
 		q2 += " AND ts >= ?"
 		args = append(args, since)
 	}
@@ -174,7 +181,7 @@ func Write(ctx context.Context, db *sql.DB, actorKeyID int64, action, targetType
 	_, err := db.ExecContext(ctx,
 		`INSERT INTO audit(ts, actor_key_id, action, target_type, target_id, room_id, result, detail)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		time.Now().UTC().Format(time.RFC3339Nano), actor, action, targetType, targetID, rid, result, det,
+		storage.FormatTS(time.Now()), actor, action, targetType, targetID, rid, result, det,
 	)
 	return err
 }

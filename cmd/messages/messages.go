@@ -3,7 +3,7 @@
 // Per SPEC-0004 §5:
 //
 //	conclave-mcp messages send <room-id> [--content "..." | --content-file PATH | stdin]
-//	conclave-mcp messages list <room-id> [--since <msg-id>] [--limit N] [--format json|table]
+//	conclave-mcp messages list <room-id> [--since <ts>] [--limit N] [--format json|table]
 //	conclave-mcp messages delete <room-id> <msg-id>
 //	conclave-mcp messages subscribe <room-id> [--wait SECONDS] [--format json|table]
 //
@@ -20,9 +20,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -292,26 +292,26 @@ func newListCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "list <room-id>",
-		Short: "List messages in a room, paginated ascending by id",
+		Short: "List messages in a room, oldest first, paginated by timestamp",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roomID := args[0]
 			if flagTrustOrigin != "" && flagTrustOrigin != "internal" && flagTrustOrigin != "external" {
 				return fmt.Errorf("--trust-origin must be 'internal' or 'external'")
 			}
-			path := "/v1/rooms/" + roomID + "/messages"
-			q := []string{}
+			path := "/v1/rooms/" + url.PathEscape(roomID) + "/messages"
+			q := url.Values{}
 			if flagSince != "" {
-				q = append(q, "since="+flagSince)
+				q.Set("since", flagSince)
 			}
 			if flagLimit > 0 {
-				q = append(q, fmt.Sprintf("limit=%d", flagLimit))
+				q.Set("limit", strconv.Itoa(flagLimit))
 			}
 			if flagTrustOrigin != "" {
-				q = append(q, "trust_origin="+flagTrustOrigin)
+				q.Set("trust_origin", flagTrustOrigin)
 			}
 			if len(q) > 0 {
-				path += "?" + strings.Join(q, "&")
+				path += "?" + q.Encode()
 			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				var resp listResponse
@@ -326,7 +326,7 @@ func newListCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&flagSince, "since", "", "return messages with id > this (cursor)")
+	cmd.Flags().StringVar(&flagSince, "since", "", "return messages after this RFC 3339 timestamp (pass back next_since)")
 	cmd.Flags().IntVar(&flagLimit, "limit", 100, "max messages to return (server caps at 500)")
 	cmd.Flags().StringVar(&flagFormat, "format", "table", "output format: json or table")
 	cmd.Flags().StringVar(&flagTrustOrigin, "trust-origin", "", "filter by trust_origin (internal|external)")

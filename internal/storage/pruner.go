@@ -94,7 +94,7 @@ func (p *Pruner) RunOnce(ctx context.Context) error {
 
 func (p *Pruner) runCycle(ctx context.Context) error {
 	start := time.Now()
-	cutoff := time.Now().UTC().Add(-p.cfg.Retention).Format(time.RFC3339Nano)
+	cutoff := FormatTS(time.Now().Add(-p.cfg.Retention))
 
 	var totalDeleted int64
 	for {

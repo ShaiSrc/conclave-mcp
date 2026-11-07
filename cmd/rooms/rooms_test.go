@@ -230,8 +230,8 @@ func TestInvite_OK(t *testing.T) {
 	if err := sub.RunE(sub, []string{"r1", "42"}); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if gotBody["key_id"].(float64) != 42 {
-		t.Errorf("body=%v", gotBody)
+	if gotBody["key_id"].(float64) != 42 || gotBody["role"] != "writer" {
+		t.Errorf("body=%v (default role must be writer)", gotBody)
 	}
 	if !strings.Contains(buf.String(), "invited key 42") {
 		t.Errorf("out=%q", buf.String())

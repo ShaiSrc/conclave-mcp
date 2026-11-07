@@ -21,6 +21,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
 type Service struct {
@@ -202,7 +203,7 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := storage.FormatTS(time.Now())
 	// message_type is NOT NULL with DEFAULT 'system'; we
 	// send an explicit value rather than rely on the column
 	// default, so the SQLite CHECK on the 8 enum values
@@ -297,7 +298,14 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		}
 		limit = n
 	}
-	sinceTS := q.Get("since") // ISO-8601; empty = from beginning
+	sinceTS := q.Get("since") // RFC 3339; empty = from beginning
+	if sinceTS != "" {
+		var err error
+		if sinceTS, err = storage.NormalizeTS(sinceTS); err != nil {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "since must be an RFC 3339 timestamp")
+			return
+		}
+	}
 	// SPEC-0001 Q11 / ADR-0008: optional trust_origin filter.
 	// Validated against the closed set before the SQL CHECK
 	// fires (so we return 400, not 500).

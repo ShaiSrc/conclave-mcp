@@ -144,3 +144,42 @@ func TestLockState_WaitsAndTakesOverStaleLocks(t *testing.T) {
 	}
 	u()
 }
+
+func TestReadHookInput_OpenEmptyPipeDoesNotBlock(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close() // held open: nothing written, no EOF
+	done := make(chan HookInput, 1)
+	go func() { done <- ReadHookInput(r) }()
+	select {
+	case h := <-done:
+		if h.Event != "" {
+			t.Errorf("event %q, want empty", h.Event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadHookInput blocked on an open, empty stdin pipe")
+	}
+}
+
+func TestReadHookInput_JSONOnOpenPipe(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	_, _ = w.WriteString(`{"hook_event_name":"Stop"}`)
+	done := make(chan HookInput, 1)
+	go func() { done <- ReadHookInput(r) }()
+	select {
+	case h := <-done:
+		if h.Event != "Stop" {
+			t.Errorf("event %q, want Stop", h.Event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("ReadHookInput waited for EOF after a complete JSON object")
+	}
+}

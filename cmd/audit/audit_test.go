@@ -136,3 +136,23 @@ func TestList_JSON(t *testing.T) {
 		t.Fatalf("not json: %v", err)
 	}
 }
+
+func TestList_SinceIsURLEscaped(t *testing.T) {
+	const since = "2026-11-07T11:00:00+01:00"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("since"); got != since {
+			t.Errorf("server got since=%q, want %q", got, since)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"entries": []map[string]any{}})
+	}))
+	defer srv.Close()
+	stubOC(t, srv.URL)
+
+	sub := newListCmd()
+	_ = sub.Flags().Set("since", since)
+	sub.SetOut(&bytes.Buffer{})
+	sub.SetContext(context.Background())
+	if err := sub.RunE(sub, nil); err != nil {
+		t.Fatal(err)
+	}
+}

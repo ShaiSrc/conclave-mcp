@@ -215,19 +215,18 @@ for non-owner members, but the messages remain. Owner only.
 ## `rooms invite`
 
 ```
-conclave-mcp rooms invite 01ABC... --key-id 4 --role=writer
+conclave-mcp rooms invite 01ABC... 4 --role=writer
 ```
 
-Invites an API key to a room. The role is `owner`, `writer`,
-or `reader`. Owner only.
+Invites an API key (the id from `keys list`) to a room. Owner
+only.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--key-id` | (required) | The API key id from `keys list`. |
-| `--role` | (required) | `owner`, `writer`, or `reader`. |
+| `--role` | `writer` | `owner`, `writer`, or `reader`. |
 
 The MCP equivalent is the `rooms.invite` tool. The HTTP
-equivalent is `POST /v1/rooms/{id}/invite` with body
+equivalent is `POST /v1/rooms/{id}/members` with body
 `{key_id, role}`.
 
 ## `rooms remove`
@@ -277,7 +276,7 @@ caller must be a member. Output is a table by default; pass
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--since` | (none) | ISO-8601 ts; only messages newer than this are returned. Use the `next_since` field from the previous call for pagination. |
+| `--since` | (none) | RFC 3339 timestamp, any offset; only messages newer than this are returned. Use the `next_since` field from the previous call for pagination. |
 | `--limit` | `100` | Max messages to return. |
 | `--trust-origin` | (all) | `internal` or `external`. |
 
@@ -385,7 +384,7 @@ keys have admin scope; this will change in v0.2).
 |---|---|---|
 | `--room-id` | (all) | Restrict to a single room. |
 | `--limit` | `100` | Max entries to return. |
-| `--since` | (none) | ISO-8601 ts. |
+| `--since` | (none) | RFC 3339 timestamp, any offset; entries at or after it. |
 
 Output is a table with columns: `TS`, `ACTOR`, `ACTION`,
 `ROOM`, `MESSAGE`, `METADATA`.
@@ -421,7 +420,7 @@ conclave-mcp keys create --label "agent-B" --trust-origin=internal
 # → note the id, say 2
 
 # Invite B to "inbox" only.
-conclave-mcp rooms invite "$INBOX_ID" --key-id 2 --role=writer
+conclave-mcp rooms invite "$INBOX_ID" 2 --role=writer
 ```
 
 ### Tail a room in another terminal

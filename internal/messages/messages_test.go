@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -49,7 +50,7 @@ func seedKey(t *testing.T, db *sql.DB, label string) int64 {
 	t.Helper()
 	res, err := db.Exec(
 		`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES (?, 'phc:fake', ?, ?)`,
-		label, label+"-prefix", time.Now().UTC().Format(time.RFC3339Nano),
+		label, label+"-prefix", storage.FormatTS(time.Now()),
 	)
 	if err != nil {
 		t.Fatalf("seed key: %v", err)
@@ -63,13 +64,13 @@ func seedRoom(t *testing.T, db *sql.DB, ownerID int64, name string) string {
 	id := "01J" + name + "ROOMTEST"
 	if _, err := db.Exec(
 		`INSERT INTO rooms(id, name, owner_key_id, created_at) VALUES (?, ?, ?, ?)`,
-		id, name, ownerID, time.Now().UTC().Format(time.RFC3339Nano),
+		id, name, ownerID, storage.FormatTS(time.Now()),
 	); err != nil {
 		t.Fatalf("seed room: %v", err)
 	}
 	if _, err := db.Exec(
 		`INSERT INTO room_members(room_id, key_id, role, joined_at) VALUES (?, ?, 'owner', ?)`,
-		id, ownerID, time.Now().UTC().Format(time.RFC3339Nano),
+		id, ownerID, storage.FormatTS(time.Now()),
 	); err != nil {
 		t.Fatalf("seed member: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestMessages_ListReturnsMessagesInOrder(t *testing.T) {
 	for _, content := range []string{"a", "b", "c"} {
 		if _, err := db.Exec(
 			`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, ?, ?, 'text/plain')`,
-			roomID, 1, time.Now().UTC().Format(time.RFC3339Nano), content,
+			roomID, 1, storage.FormatTS(time.Now()), content,
 		); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
@@ -199,7 +200,7 @@ func TestMessages_ListRespectsSince(t *testing.T) {
 	// return only the second and third.
 	var tss []string
 	for _, content := range []string{"a", "b", "c"} {
-		ts := time.Now().UTC().Format(time.RFC3339Nano)
+		ts := storage.FormatTS(time.Now())
 		tss = append(tss, ts)
 		_, err := db.Exec(
 			`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, ?, ?, 'text/plain')`,
@@ -307,4 +308,46 @@ func itoa(n int64) string {
 		n /= 10
 	}
 	return string(buf[i:])
+}
+
+func TestMessages_SendTSIsFixedWidth(t *testing.T) {
+	r, _, _, roomID := setupAs(t)
+	req := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", strings.NewReader(`{"content":"hi"}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	var resp struct {
+		TS string `json:"ts"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.TS) != len("2006-01-02T15:04:05.000000000Z") {
+		t.Errorf("ts %q is not fixed width (status %d)", resp.TS, rec.Code)
+	}
+}
+
+func TestMessages_ListSinceAcceptsAnyOffset(t *testing.T) {
+	r, db, _, roomID := setupAs(t)
+	for _, ts := range []string{"2026-11-07T10:00:00.100000000Z", "2026-11-07T10:00:00.120000000Z"} {
+		if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, 1, ?, 'x', 'text/plain')`, roomID, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	since := url.QueryEscape("2026-11-07T11:00:00.1+01:00")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages?since="+since, nil))
+	var resp struct {
+		Messages []messageView `json:"messages"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Messages) != 1 || resp.Messages[0].TS != "2026-11-07T10:00:00.120000000Z" {
+		t.Errorf("status %d, messages %+v", rec.Code, resp.Messages)
+	}
+}
+
+func TestMessages_ListBadSinceIs400(t *testing.T) {
+	r, _, _, roomID := setupAs(t)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages?since=m0", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status %d, want 400", rec.Code)
+	}
 }
