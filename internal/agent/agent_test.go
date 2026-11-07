@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func gitRepo(t *testing.T, remote string) string {
@@ -105,4 +106,41 @@ func TestStateRoundTrip(t *testing.T) {
 	if got := LoadState(p); got != want {
 		t.Errorf("got %+v", got)
 	}
+}
+
+func TestLockState_WaitsAndTakesOverStaleLocks(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "s.json")
+	unlock, err := LockState(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan struct{})
+	go func() {
+		if u, err := LockState(p); err == nil {
+			u()
+		}
+		close(got)
+	}()
+	select {
+	case <-got:
+		t.Fatal("second lock must wait for the first")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-got:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second lock never acquired")
+	}
+	// A lock left behind by a killed hook is taken over.
+	if err := os.Mkdir(p+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Minute)
+	_ = os.Chtimes(p+".lock", old, old)
+	u, err := LockState(p)
+	if err != nil {
+		t.Fatalf("stale lock not taken over: %v", err)
+	}
+	u()
 }

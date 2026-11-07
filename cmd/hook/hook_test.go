@@ -231,3 +231,33 @@ func TestStop_ReleaseOnStopForHeadlessRuns(t *testing.T) {
 		t.Errorf("ReleaseOnStop: want release + handoff, got released=%v posted=%v", s.f.released, s.f.posted)
 	}
 }
+
+func TestInbox_ParallelHooksInjectOnce(t *testing.T) {
+	s := newSetup(t)
+	s.f.msgs = []agent.Msg{{ID: 1, Author: 2, TS: "t1", Content: "only once"}}
+	in, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "cwd": s.repo})
+	var (
+		wg sync.WaitGroup
+		mu sync.Mutex
+		n  int
+	)
+	for range 8 { // parallel tool calls each fire PostToolUse
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var out bytes.Buffer
+			if err := s.h.Run(context.Background(), agent.ReadHookInput(bytes.NewReader(in)), &out); err != nil {
+				t.Error(err)
+			}
+			if strings.Contains(out.String(), "only once") {
+				mu.Lock()
+				n++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if n != 1 {
+		t.Errorf("message injected %d times, want exactly 1", n)
+	}
+}

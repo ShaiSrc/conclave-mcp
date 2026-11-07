@@ -2,8 +2,11 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 // State is the per-key, per-scope state file: inbox cursor, own key
@@ -31,6 +34,43 @@ func StatePath(dir, token, scope string) string {
 		prefix = token[3:11] // the public key prefix shown by `keys list`
 	}
 	return filepath.Join(dir, "inbox-"+prefix+"-"+scope+".json")
+}
+
+const (
+	lockWait  = 10 * time.Second // longer than any hook run should take
+	staleLock = 30 * time.Second // a lock this old belongs to a killed hook
+)
+
+// LockState serialises the hooks of one agent on one state file.
+// Parallel tool calls (or subagents sharing the key) would otherwise
+// overwrite each other's cursor and inject the same messages twice.
+// A lock directory works on every platform (mkdir is atomic). Call
+// the returned func to release it.
+// ponytail: taking over a stale lock can race with a second waiter;
+// harmless after a 30s-old crash, flock if it ever matters.
+func LockState(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, err
+	}
+	lock := path + ".lock"
+	deadline := time.Now().Add(lockWait)
+	for {
+		err := os.Mkdir(lock, 0o700)
+		if err == nil {
+			return func() { os.Remove(lock) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		if fi, serr := os.Stat(lock); serr == nil && time.Since(fi.ModTime()) > staleLock {
+			os.Remove(lock)
+			continue
+		}
+		if time.Now().After(deadline) {
+			return nil, fmt.Errorf("state file busy (%s)", lock)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func LoadState(path string) State {

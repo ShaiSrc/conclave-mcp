@@ -104,7 +104,13 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 	}
 	sum := sha256.Sum256([]byte(repo.Root))
 	statePath := agent.StatePath(h.StateDir, h.Token, "repo-"+hex.EncodeToString(sum[:6]))
-	st := agent.LoadState(statePath)
+	unlock, err := agent.LockState(statePath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	loaded := agent.LoadState(statePath)
+	st := loaded
 	if st.RoomID == "" {
 		if st.RoomID, err = agent.ResolveRoom(ctx, h.C, repo.RoomName()); err != nil {
 			return err
@@ -126,8 +132,10 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
 		st.RoomID = "" // room gone or re-created: resolve it again next time
 	}
-	if serr := agent.SaveState(statePath, st); err == nil {
-		err = serr
+	if st != loaded {
+		if serr := agent.SaveState(statePath, st); err == nil {
+			err = serr
+		}
 	}
 	return err
 }

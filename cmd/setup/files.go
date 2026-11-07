@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -101,11 +102,14 @@ func writeJSONFile(p string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false) // keep "&&" and "<" in hook commands readable
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		return err
 	}
-	return os.WriteFile(p, append(b, '\n'), 0o644)
+	return os.WriteFile(p, b.Bytes(), 0o644)
 }
 
 func mergeMCP(p string) (bool, error) {
@@ -113,7 +117,10 @@ func mergeMCP(p string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	servers, _ := m["mcpServers"].(map[string]any)
+	servers, ok := m["mcpServers"].(map[string]any)
+	if !ok && m["mcpServers"] != nil {
+		return false, errors.New("mcpServers is not an object; fix it by hand, nothing was changed")
+	}
 	if servers == nil {
 		servers = map[string]any{}
 	}
@@ -137,9 +144,17 @@ func mergeHooks(p string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	hooks, _ := m["hooks"].(map[string]any)
+	hooks, ok := m["hooks"].(map[string]any)
+	if !ok && m["hooks"] != nil {
+		return false, errors.New("hooks is not an object; fix it by hand, nothing was changed")
+	}
 	if hooks == nil {
 		hooks = map[string]any{}
+	}
+	for _, ev := range hookEvents {
+		if _, ok := hooks[ev.event].([]any); !ok && hooks[ev.event] != nil {
+			return false, fmt.Errorf("hooks.%s is not a list; fix it by hand, nothing was changed", ev.event)
+		}
 	}
 	changed := false
 	for _, ev := range hookEvents {
@@ -169,7 +184,8 @@ func hasConclave(groups []any) bool {
 		hs, _ := gm["hooks"].([]any)
 		for _, h := range hs {
 			hm, _ := h.(map[string]any)
-			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "conclave-mcp") {
+			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "conclave-mcp hook") ||
+				strings.Contains(cmd, "conclave-mcp messages inbox") {
 				return true
 			}
 		}

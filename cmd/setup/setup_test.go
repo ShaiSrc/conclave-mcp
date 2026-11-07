@@ -158,3 +158,21 @@ func TestEnsureRoom_CreatesWhenMissing(t *testing.T) {
 		t.Errorf("got %q %v %v", id, created, err)
 	}
 }
+
+func TestWriteFiles_RefusesToClobberUnexpectedTypes(t *testing.T) {
+	root := t.TempDir()
+	settings := filepath.Join(root, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := `{"hooks":{"PreToolUse":{"oops":"an object, not a list"}}}`
+	if err := os.WriteFile(settings, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteFiles(root, "acme/widgets"); err == nil {
+		t.Fatal("want an error for hooks.PreToolUse of the wrong type")
+	}
+	if b, _ := os.ReadFile(settings); string(b) != orig {
+		t.Errorf("settings.json was modified:\n%s", b)
+	}
+}

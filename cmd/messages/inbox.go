@@ -39,6 +39,11 @@ additionalContext envelope. For new setups prefer ` + "`conclave-mcp hook`" + `.
 				if statePath == "" {
 					statePath = agent.StatePath("", c.Token, roomID)
 				}
+				unlock, err := agent.LockState(statePath)
+				if err != nil {
+					return err
+				}
+				defer unlock()
 				st := agent.LoadState(statePath)
 				news, err := agent.FetchNew(ctx, c, roomID, &st)
 				if err != nil {
