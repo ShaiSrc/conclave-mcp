@@ -20,6 +20,10 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   rest, injects new messages, makes the agent handle open
   questions before it stops, releases claims at session end.
   Never exits 2; fails open; silent without `CONCLAVE_API_KEY`.
+  At SessionStart it always tells the agent its label, the room
+  and room_id, and the active claims. Headless runs (`claude -p`
+  never fires SessionEnd) release their claims at the end with
+  `CONCLAVE_RELEASE_ON_STOP=1`.
 * `conclave-mcp init`: finds or creates the repository's room
   and writes `.conclave.json`, `.mcp.json`,
   `.claude/settings.json` and the `CLAUDE.md` rules (merging).

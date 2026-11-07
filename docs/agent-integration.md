@@ -73,6 +73,20 @@ writes or merges four files, keeping whatever is already there:
 the key is stored nowhere else. `CONCLAVE_BASE_URL` defaults to
 `http://127.0.0.1:7432`.
 
+At session start each agent is told who it is, the room and its
+`room_id`, and the active claims, even before anyone has written.
+
+**Headless agents (`claude -p`, SDK runs):** Claude Code does not
+fire SessionEnd there, so start them with
+`CONCLAVE_RELEASE_ON_STOP=1`: the end of the run then releases the
+agent's claims and posts the handoff. Do not set it for
+interactive sessions, where Stop fires after every turn.
+
+```sh
+eval "$(conclave-mcp agent add worker-1)"
+CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
+```
+
 ### How claims behave
 
 * Paths are relative to the repository root; a trailing `/`
@@ -86,7 +100,8 @@ the key is stored nowhere else. `CONCLAVE_BASE_URL` defaults to
   still holds.
 * **Lifetime:** `claim_ttl_minutes` (default 30). The hooks
   extend an agent's claims while it works; a crashed agent's
-  claims expire on their own, a finished session releases them.
+  claims expire on their own, a finished session releases them
+  (headless runs: with `CONCLAVE_RELEASE_ON_STOP=1`).
 * The room owner can release anyone's claims
   (`claims.release` with `key_id`).
 

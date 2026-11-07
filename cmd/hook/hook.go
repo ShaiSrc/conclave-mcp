@@ -66,7 +66,7 @@ the server is unreachable.`,
 			if err != nil {
 				return &Error{err}
 			}
-			h := &Hook{C: c, Token: token, Now: time.Now}
+			h := &Hook{C: c, Token: token, Now: time.Now, ReleaseOnStop: os.Getenv("CONCLAVE_RELEASE_ON_STOP") == "1"}
 			if err := h.Run(cmd.Context(), agent.ReadHookInput(cmd.InOrStdin()), cmd.OutOrStdout()); err != nil {
 				return &Error{err}
 			}
@@ -81,6 +81,12 @@ type Hook struct {
 	Token    string
 	Now      func() time.Time
 	StateDir string // "" = user cache dir; tests use a temp dir
+
+	// ReleaseOnStop (CONCLAVE_RELEASE_ON_STOP=1) releases the claims
+	// when the turn ends. For headless runs (`claude -p`), which never
+	// fire SessionEnd; interactive sessions must not set it, Stop
+	// fires after every turn there.
+	ReleaseOnStop bool
 }
 
 // Run dispatches on in.Event and writes the hook's JSON answer to out.
@@ -105,7 +111,9 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 		}
 	}
 	switch in.Event {
-	case "SessionStart", "UserPromptSubmit", "PostToolUse":
+	case "SessionStart":
+		err = h.sessionStart(ctx, repo, &st, out)
+	case "UserPromptSubmit", "PostToolUse":
 		err = h.inbox(ctx, in.Event, repo, &st, out)
 	case "PreToolUse":
 		err = h.preToolUse(ctx, in, cwd, repo, &st, out)
@@ -126,6 +134,49 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 
 func (h *Hook) roomLabel(repo agent.Repo, st *agent.State) string {
 	return repo.RoomName() + " (room_id " + st.RoomID + ")"
+}
+
+// sessionStart always tells the agent who it is, which room to use
+// and what is claimed, so it never has to look any of it up.
+func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.State, out io.Writer) error {
+	h.heartbeat(ctx, repo, st)
+	var me struct {
+		ID    int64  `json:"id"`
+		Label string `json:"label"`
+	}
+	if _, err := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/whoami", Out: &me}); err != nil {
+		return err
+	}
+	st.SelfID = me.ID
+	var held struct {
+		Claims []claims.Claim `json:"claims"`
+	}
+	if _, err := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + st.RoomID + "/claims", Out: &held}); err != nil {
+		return err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "Conclave: you are %s in room %s (room_id %s); use this room_id with the conclave tools.\n",
+		me.Label, repo.RoomName(), st.RoomID)
+	if len(held.Claims) == 0 {
+		b.WriteString("No active claims.\n")
+	} else {
+		b.WriteString("Active claims (do not edit paths others hold):\n")
+		for _, c := range held.Claims {
+			fmt.Fprintf(&b, "- %s: %s until %s", c.Path, c.Label, c.ExpiresAt)
+			if c.Note != "" {
+				fmt.Fprintf(&b, " (%s)", c.Note)
+			}
+			b.WriteString("\n")
+		}
+	}
+	msgs, err := agent.FetchNew(ctx, h.C, st.RoomID, st)
+	if err != nil {
+		return err
+	}
+	if len(msgs) > 0 {
+		b.WriteString(agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C)))
+	}
+	return json.NewEncoder(out).Encode(agent.ContextOutput("SessionStart", b.String()))
 }
 
 func (h *Hook) inbox(ctx context.Context, event string, repo agent.Repo, st *agent.State, out io.Writer) error {
@@ -203,12 +254,15 @@ func deny(out io.Writer, reason string) error {
 // something; plain updates wait for the next inbox read.
 func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st *agent.State, out io.Writer) error {
 	if in.StopHookActive {
-		return nil
+		return h.releaseOnStop(ctx, st)
 	}
 	next := *st
 	msgs, err := agent.FetchNew(ctx, h.C, st.RoomID, &next)
-	if err != nil || !slices.ContainsFunc(msgs, agent.Actionable) {
-		return err // cursor untouched: the messages stay for the next inbox read
+	if err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(msgs, agent.Actionable) {
+		return h.releaseOnStop(ctx, st) // cursor untouched: the messages stay for the next inbox read
 	}
 	*st = next
 	return json.NewEncoder(out).Encode(map[string]any{
@@ -216,6 +270,13 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C)) +
 			"Before you stop: answer what is addressed to you in the Conclave room (messages.send), or say briefly why no answer is needed. Then stop.",
 	})
+}
+
+func (h *Hook) releaseOnStop(ctx context.Context, st *agent.State) error {
+	if !h.ReleaseOnStop {
+		return nil
+	}
+	return h.sessionEnd(ctx, st)
 }
 
 func (h *Hook) sessionEnd(ctx context.Context, st *agent.State) error {

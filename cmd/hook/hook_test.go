@@ -37,7 +37,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
 	switch r.Method + " " + r.URL.Path {
 	case "GET /v1/whoami":
-		write(map[string]any{"id": 1})
+		write(map[string]any{"id": 1, "label": "agent-a"})
 	case "GET /v1/rooms":
 		write(map[string]any{"rooms": []any{map[string]any{"id": "R", "name": "acme/widgets"}}})
 	case "GET /v1/keys":
@@ -203,5 +203,31 @@ func TestCmd_SilentWithoutKey(t *testing.T) {
 	cmd.SetOut(&out)
 	if err := cmd.RunE(cmd, nil); err != nil || out.Len() != 0 {
 		t.Errorf("no key: want silent success, got err=%v out=%q", err, out.String())
+	}
+}
+
+func TestSessionStart_AlwaysTellsIdentityRoomAndClaims(t *testing.T) {
+	s := newSetup(t)
+	s.f.claims = []claims.Claim{{Path: "src/", KeyID: 2, Label: "agent-b", Note: "refactor", ExpiresAt: "2026-11-07T12:00:00Z"}}
+	out := s.run(map[string]any{"hook_event_name": "SessionStart"})
+	for _, want := range []string{"additionalContext", "you are agent-a", "room_id R", "src/: agent-b", "refactor"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("SessionStart context lacks %q: %s", want, out)
+		}
+	}
+}
+
+func TestStop_ReleaseOnStopForHeadlessRuns(t *testing.T) {
+	s := newSetup(t)
+	s.run(map[string]any{"hook_event_name": "Stop"})
+	if s.f.released {
+		t.Fatal("without ReleaseOnStop, Stop must not release claims")
+	}
+	s.h.ReleaseOnStop = true
+	if out := s.run(map[string]any{"hook_event_name": "Stop"}); out != "" {
+		t.Errorf("nothing actionable: Stop must not block, got %s", out)
+	}
+	if !s.f.released || len(s.f.posted) != 1 || s.f.posted[0]["message_type"] != "handoff" {
+		t.Errorf("ReleaseOnStop: want release + handoff, got released=%v posted=%v", s.f.released, s.f.posted)
 	}
 }

@@ -330,7 +330,9 @@ Reads hook JSON on stdin and acts on `hook_event_name`
 (inbox for SessionStart / UserPromptSubmit / PostToolUse,
 claim check for PreToolUse, open questions for Stop, release
 for SessionEnd). Does nothing without `CONCLAVE_API_KEY`;
-failures exit 1, never 2.
+failures exit 1, never 2. `CONCLAVE_RELEASE_ON_STOP=1` also
+releases the claims when the turn ends (for `claude -p` runs,
+which never fire SessionEnd).
 
 ## `messages inbox`
 
