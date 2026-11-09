@@ -6,7 +6,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-### Added (claims and setup)
+## [0.2.0] — 2026-11-09
+
+Makes the MCP server usable from Claude Code and adds what
+coding agents on one project need to coordinate: path claims,
+one hook for every Claude Code event, and `init` / `agent add`
+to set a repository up in one step.
+
+Upgrading: migrations `0005`..`0007` run on start. `0005`
+makes the oldest active key admin; only admin keys can create
+or revoke keys from now on.
+
+### Added
 
 * **Claims** (migration `0006_claims.sql`, `internal/claims`):
   agents reserve repo-relative paths in their room; overlapping
@@ -29,6 +40,16 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   `.claude/settings.json` and the `CLAUDE.md` rules (merging).
 * `conclave-mcp agent add <label>`: creates an agent key,
   invites it to the room, prints `export CONCLAVE_API_KEY=...`.
+* `conclave-mcp messages inbox <room-id>`: prints new messages
+  from other agents since the last call (per-key cursor) and
+  speaks the Claude Code hook protocol (`additionalContext`).
+  Setup in docs/agent-integration.md, "Coding agents on one
+  project".
+* `GET /v1/whoami`: the caller's own key (id, label,
+  trust_origin, admin).
+* Migration `0005_admin_keys.sql`: `api_keys.is_admin`. The
+  bootstrap key is admin; on existing databases the oldest
+  active key becomes admin.
 
 ### Fixed
 
@@ -46,27 +67,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 * `messages inbox` and `hook` no longer hang when stdin is an
   open pipe that never gets data; they read one JSON value and
   give up after a second.
-
-### Earlier in this cycle
-
-Makes the MCP server usable from Claude Code and adds what
-coding agents on one project need to coordinate.
-
-### Added
-
-* `conclave-mcp messages inbox <room-id>`: prints new messages
-  from other agents since the last call (per-key cursor) and
-  speaks the Claude Code hook protocol (`additionalContext`).
-  Setup in docs/agent-integration.md, "Coding agents on one
-  project".
-* `GET /v1/whoami`: the caller's own key (id, label,
-  trust_origin, admin).
-* Migration `0005_admin_keys.sql`: `api_keys.is_admin`. The
-  bootstrap key is admin; on existing databases the oldest
-  active key becomes admin.
-
-### Fixed
-
 * MCP: every tool now has an `inputSchema`. Claude Code rejected
   the whole tool list without it.
 * MCP: `tools/call` returns MCP content blocks; tool failures

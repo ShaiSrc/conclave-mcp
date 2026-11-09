@@ -296,8 +296,8 @@ host reboots. The standard tools for this are:
 * **pm2** for VM-based deployments. `pm2 start agent.py
   --name conclave-agent`.
 * **docker compose** for container-based deployments. The
-  agent image is your own; the Conclave server image is
-  `conclave-mcp/conclave-mcp:v0.1.1`.
+  agent image is your own; the Conclave server image is built
+  from `packaging/docker/Dockerfile`.
 * **tmux / screen** for development. Not for production.
 
 In every case, the agent's stdout and stderr are the agent's

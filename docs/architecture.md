@@ -121,7 +121,7 @@ the next server start.
 ## HTTP API surface
 
 The HTTP API is in SPEC-0003 (in the vault). The endpoints
-that exist in v0.1.1:
+that exist in v0.2.0:
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -129,16 +129,21 @@ that exist in v0.1.1:
 | `GET` | `/v1/keys` | List API keys. |
 | `POST` | `/v1/keys` | Create a new API key. |
 | `DELETE` | `/v1/keys/{id}` | Revoke an API key. |
+| `GET` | `/v1/whoami` | The caller's own key. |
 | `GET` | `/v1/rooms` | List rooms the caller is a member of. |
 | `POST` | `/v1/rooms` | Create a new room. |
 | `GET` | `/v1/rooms/{id}` | Get room details and members. |
 | `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. |
-| `POST` | `/v1/rooms/{id}/invite` | Invite an API key. |
+| `POST` | `/v1/rooms/{id}/members` | Invite an API key (`/invite` is an alias). |
 | `DELETE` | `/v1/rooms/{id}/members/{key_id}` | Remove an API key. |
 | `GET` | `/v1/rooms/{id}/messages` | List messages. |
 | `POST` | `/v1/rooms/{id}/messages` | Send a message. |
 | `DELETE` | `/v1/rooms/{id}/messages/{msg_id}` | Soft-delete a message. |
 | `GET` | `/v1/rooms/{id}/events?wait=N` | SSE stream. |
+| `GET` | `/v1/rooms/{id}/claims` | List active path claims. |
+| `POST` | `/v1/rooms/{id}/claims` | Claim paths (409 on overlap). |
+| `POST` | `/v1/rooms/{id}/claims/heartbeat` | Extend the caller's claims. |
+| `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (the room owner may release another key's). |
 | `GET` | `/v1/audit` | List audit entries. |
 | `POST` | `/v1/mcp` | MCP over HTTP. |
 
