@@ -15,6 +15,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"strconv"
 	"text/tabwriter"
 	"time"
 
@@ -117,39 +119,32 @@ func newListCmd() *cobra.Command {
 		Short: "List audit entries (admin-scope required)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			// Build query string. Order is not significant but stable
-			// helps tests + log grepping.
-			q := []string{}
+			q := url.Values{}
 			if flagActor != "" {
-				q = append(q, "actor="+flagActor)
+				q.Set("actor", flagActor)
 			}
 			if flagAction != "" {
-				q = append(q, "action="+flagAction)
+				q.Set("action", flagAction)
 			}
 			if flagRoomID != "" {
 				// SPEC-0001 Q10 + SPEC-0003 §4.4: filter by
 				// room id. The server populates audit.room_id
 				// for every room/message mutation.
-				q = append(q, "room_id="+flagRoomID)
+				q.Set("room_id", flagRoomID)
 			}
 			if flagSince != "" {
 				// Validate the timestamp: empty after parse -> error.
 				if _, err := time.Parse(time.RFC3339, flagSince); err != nil {
 					return &exitError{Code: 2, Err: fmt.Errorf("--since must be RFC3339, got %q: %w", flagSince, err)}
 				}
-				q = append(q, "since="+flagSince)
+				q.Set("since", flagSince)
 			}
 			if flagLimit > 0 {
-				q = append(q, fmt.Sprintf("limit=%d", flagLimit))
+				q.Set("limit", strconv.Itoa(flagLimit))
 			}
 			path := "/v1/audit"
 			if len(q) > 0 {
-				path += "?"
-				sep := ""
-				for _, s := range q {
-					path += sep + s
-					sep = "&"
-				}
+				path += "?" + q.Encode()
 			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				var resp listResponse

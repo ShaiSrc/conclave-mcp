@@ -261,7 +261,7 @@ func newInviteCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&role, "role", "member", "role: owner|writer|reader")
+	cmd.Flags().StringVar(&role, "role", "writer", "role: owner|writer|reader")
 	return cmd
 }
 

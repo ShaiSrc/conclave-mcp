@@ -78,7 +78,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0006)
+migrations/         numbered SQL migrations (0001..0007)
 ```
 
 The split between `internal/<service>` and `internal/server`

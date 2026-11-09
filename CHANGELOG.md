@@ -30,6 +30,23 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 * `conclave-mcp agent add <label>`: creates an agent key,
   invites it to the room, prints `export CONCLAVE_API_KEY=...`.
 
+### Fixed
+
+* `since` cursors could skip messages from the same second:
+  timestamps were compared as strings but written with
+  RFC3339Nano, which trims trailing zeros (`.1Z` sorted after
+  `.12Z`). `messages.ts` and `audit.ts` are now fixed width
+  (9 fraction digits); migration `0007_fixed_width_ts.sql` pads
+  existing rows. The server parses `since` as RFC 3339 with any
+  offset and answers 400 for anything else.
+* `messages list --since` and `audit list --since` now URL-encode
+  the value, so a `+01:00` offset is no longer sent as a space.
+* `rooms invite` defaults to `--role writer`; the old default
+  `member` was rejected by the server.
+* `messages inbox` and `hook` no longer hang when stdin is an
+  open pipe that never gets data; they read one JSON value and
+  give up after a second.
+
 ### Earlier in this cycle
 
 Makes the MCP server usable from Claude Code and adds what

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
@@ -44,18 +45,33 @@ type HookInput struct {
 	} `json:"tool_input"`
 }
 
+// hookInputWait bounds how long ReadHookInput waits for the first JSON
+// value. Claude Code writes it at once; a caller whose stdin is an
+// open pipe that never gets data (a script, an agent's Bash tool)
+// proceeds without hook input instead of hanging.
+const hookInputWait = time.Second
+
 // ReadHookInput parses hook JSON from in. It returns the zero value
-// when in is a terminal or does not carry hook JSON.
+// when in is a terminal, does not carry hook JSON, or stays silent for
+// hookInputWait. It reads one JSON value, so it does not wait for EOF.
 func ReadHookInput(in io.Reader) HookInput {
-	var h HookInput
 	if f, ok := in.(*os.File); ok {
 		if fi, err := f.Stat(); err != nil || fi.Mode()&os.ModeCharDevice != 0 {
-			return h
+			return HookInput{}
 		}
 	}
-	b, _ := io.ReadAll(io.LimitReader(in, hookLimit))
-	_ = json.Unmarshal(b, &h)
-	return h
+	done := make(chan HookInput, 1)
+	go func() {
+		var h HookInput
+		_ = json.NewDecoder(io.LimitReader(in, hookLimit)).Decode(&h)
+		done <- h
+	}()
+	select {
+	case h := <-done:
+		return h
+	case <-time.After(hookInputWait):
+		return HookInput{} // ponytail: the reader goroutine leaks until exit; fine for a one-shot CLI
+	}
 }
 
 // ContextOutput is the hook answer that adds text to the agent's context.

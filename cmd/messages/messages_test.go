@@ -246,3 +246,27 @@ func TestMapErr(t *testing.T) {
 		t.Errorf("api=%d", ec)
 	}
 }
+
+func TestList_SinceIsURLEscaped(t *testing.T) {
+	const since = "2026-11-07T11:00:00+01:00"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("since"); got != since {
+			t.Errorf("server got since=%q, want %q", got, since)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"messages": []any{}})
+	}))
+	defer srv.Close()
+	oldOC := openClient
+	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
+		return client.New(client.Options{Server: srv.URL, Token: "stub"})
+	}
+	defer func() { openClient = oldOC }()
+
+	sub := newListCmd()
+	_ = sub.Flags().Set("since", since)
+	sub.SetOut(&bytes.Buffer{})
+	sub.SetContext(context.Background())
+	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+		t.Fatal(err)
+	}
+}
