@@ -16,6 +16,10 @@ const (
 	markerStart = "<!-- conclave:start -->"
 	markerEnd   = "<!-- conclave:end -->"
 	hookCommand = "conclave-mcp hook"
+	// wakeCommand waits in the background and wakes an idle session
+	// (asyncRewake); it stops itself just before wakeTimeout.
+	wakeCommand = "conclave-mcp hook --wake 23h50m"
+	wakeTimeout = 86400 // seconds
 )
 
 // claudeBlock is the coordination protocol written into CLAUDE.md; %s
@@ -47,14 +51,17 @@ injected message (or use rooms.list).
 ` + markerEnd
 
 // hookEvents are the events `conclave-mcp hook` handles, with the
-// matcher for tool events.
-var hookEvents = []struct{ event, matcher string }{
-	{"SessionStart", ""},
-	{"UserPromptSubmit", ""},
-	{"PreToolUse", "Edit|Write|MultiEdit|NotebookEdit"},
-	{"PostToolUse", "*"},
-	{"Stop", ""},
-	{"SessionEnd", ""},
+// matcher for tool events; wake events also arm `hook --wake`.
+var hookEvents = []struct {
+	event, matcher string
+	wake           bool
+}{
+	{"SessionStart", "", true},
+	{"UserPromptSubmit", "", false},
+	{"PreToolUse", "Edit|Write|MultiEdit|NotebookEdit", false},
+	{"PostToolUse", "*", false},
+	{"Stop", "", true},
+	{"SessionEnd", "", false},
 }
 
 // WriteFiles creates or merges the repository files for room and
@@ -163,15 +170,21 @@ func mergeHooks(p string) (bool, error) {
 	changed := false
 	for _, ev := range hookEvents {
 		groups, _ := hooks[ev.event].([]any)
-		if hasConclave(groups) {
-			continue
+		if !hasConclave(groups) {
+			group := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hookCommand}}}
+			if ev.matcher != "" {
+				group["matcher"] = ev.matcher
+			}
+			groups = append(groups, group)
+			changed = true
 		}
-		group := map[string]any{"hooks": []any{map[string]any{"type": "command", "command": hookCommand}}}
-		if ev.matcher != "" {
-			group["matcher"] = ev.matcher
+		if ev.wake && !hasCommand(groups, "conclave-mcp hook --wake") {
+			groups = append(groups, map[string]any{"hooks": []any{map[string]any{
+				"type": "command", "command": wakeCommand, "asyncRewake": true, "timeout": wakeTimeout,
+			}}})
+			changed = true
 		}
-		hooks[ev.event] = append(groups, group)
-		changed = true
+		hooks[ev.event] = groups
 	}
 	if !changed {
 		return false, nil
@@ -180,16 +193,27 @@ func mergeHooks(p string) (bool, error) {
 	return true, writeJSONFile(p, m)
 }
 
-// hasConclave reports whether an event already runs conclave-mcp (this
-// hook, or the older `messages inbox` setup).
+// hasConclave reports whether an event already runs the conclave-mcp
+// hook (or the older `messages inbox` setup); the wake hook does not count.
 func hasConclave(groups []any) bool {
+	return hasCommandWhere(groups, func(cmd string) bool {
+		return (strings.Contains(cmd, "conclave-mcp hook") && !strings.Contains(cmd, "--wake")) ||
+			strings.Contains(cmd, "conclave-mcp messages inbox")
+	})
+}
+
+// hasCommand reports whether a hook command contains sub.
+func hasCommand(groups []any, sub string) bool {
+	return hasCommandWhere(groups, func(cmd string) bool { return strings.Contains(cmd, sub) })
+}
+
+func hasCommandWhere(groups []any, match func(string) bool) bool {
 	for _, g := range groups {
 		gm, _ := g.(map[string]any)
 		hs, _ := gm["hooks"].([]any)
 		for _, h := range hs {
 			hm, _ := h.(map[string]any)
-			if cmd, _ := hm["command"].(string); strings.Contains(cmd, "conclave-mcp hook") ||
-				strings.Contains(cmd, "conclave-mcp messages inbox") {
+			if cmd, _ := hm["command"].(string); match(cmd) {
 				return true
 			}
 		}

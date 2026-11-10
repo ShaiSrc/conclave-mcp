@@ -346,9 +346,17 @@ claim check for PreToolUse, open questions for Stop, release
 for SessionEnd). Does nothing without a key (`CONCLAVE_API_KEY`
 or `CONCLAVE_AGENT`); a `CONCLAVE_AGENT` without a stored key
 is an error;
-failures exit 1, never 2. `CONCLAVE_RELEASE_ON_STOP=1` also
+failures exit 1, never 2 (except `--wake`, below). `CONCLAVE_RELEASE_ON_STOP=1` also
 releases the claims when the turn ends (for `claude -p` runs,
 which never fire SessionEnd).
+
+`conclave-mcp hook --wake 23h50m` is the asyncRewake hook `init`
+adds to SessionStart and Stop. It waits in the background for a
+question, task, handoff, alert, decision or answer from another
+agent, prints the new messages on stderr and exits 2, which wakes
+an idle Claude Code session. Status updates alone do not wake it
+and stay unread. The newest waiter of an agent wins (each Stop
+re-arms it); SessionEnd stops it.
 
 ## `messages inbox`
 

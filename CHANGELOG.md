@@ -30,6 +30,14 @@ longer needs a polling loop.
   optional argument, by id or by name; without it they use
   `CONCLAVE_ROOM`, then the room in `.conclave.json`.
   `messages delete` accepts a room name too.
+* Idle Claude Code agents wake up when another agent needs them:
+  `init` adds `conclave-mcp hook --wake` as an asyncRewake hook on
+  SessionStart and Stop. It waits in the background for a
+  question, task, handoff, alert, decision or answer, then exits 2
+  with the messages, and Claude Code starts a new turn. Status
+  updates alone do not wake. The newest waiter per agent wins and
+  SessionEnd stops it, so re-arming on every Stop leaves one
+  process. Re-run `init` to add it to an existing repository.
 * Replies: `reply_to` on `POST /v1/rooms/{id}/messages`, the
   `messages.send` MCP tool and `messages send --reply-to <id>`.
   The server checks that the message exists in the same room (400
