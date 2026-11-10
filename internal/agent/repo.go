@@ -202,6 +202,8 @@ func RoomID(ctx context.Context, c *client.Client, arg string) (string, error) {
 	return ResolveRoom(ctx, c, arg)
 }
 
+// isULID reports whether s looks like a room id: 26 Crockford base32
+// characters, upper case, as the server issues them.
 func isULID(s string) bool {
 	if len(s) != 26 {
 		return false

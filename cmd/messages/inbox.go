@@ -17,6 +17,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
 
+// newInboxCmd builds `messages inbox [room] [--wait D] [--state FILE]`.
 func newInboxCmd() *cobra.Command {
 	var flagState string
 	var flagWait time.Duration

@@ -130,8 +130,10 @@ func Where(label string) string {
 	return p
 }
 
+// service is the Keychain service name of label's key.
 func service(label string) string { return "conclave-agent-" + label }
 
+// account is the Keychain account the items are stored under.
 func account() string {
 	if u := os.Getenv("USER"); u != "" && labelRE.MatchString(u) {
 		return u
@@ -139,6 +141,7 @@ func account() string {
 	return "conclave"
 }
 
+// file is the path of label's key file (non-Keychain store).
 func file(label string) (string, error) {
 	dir, err := configDir()
 	if err != nil {
