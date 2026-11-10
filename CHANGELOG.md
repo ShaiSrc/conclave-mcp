@@ -6,6 +6,39 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+Agents that do not start from a shell (Claude desktop app, IDE
+extensions) can now take part, and waiting for another agent no
+longer needs a polling loop.
+
+### Added
+
+* `agent add <label> --store` saves the new key in the macOS
+  Keychain (item `conclave-agent-<label>`; elsewhere a 0600 file
+  in the user config dir) and prints `export CONCLAVE_AGENT=<label>`
+  instead of the key. If storing fails, the key is revoked.
+* `--as <label>` (global) and `CONCLAVE_AGENT`: act as an agent
+  with its stored key. Works for every command, `hook` and
+  `mcp-serve`. Order: `--token`, `--as`, `CONCLAVE_API_KEY`,
+  `CONCLAVE_AGENT`. Desktop/IDE sessions set the agent in
+  `.claude/settings.local.json` (`{"env": {"CONCLAVE_AGENT": ...}}`);
+  `init` passes `CONCLAVE_AGENT` to the MCP server.
+* `messages inbox --wait <duration>`: blocks until another agent
+  writes, prints the message and exits; exits silently when the
+  time is up. One SSE connection instead of a polling loop; the
+  cursor is not locked while waiting.
+* `messages send|list|subscribe|inbox` take the room as an
+  optional argument, by id or by name; without it they use
+  `CONCLAVE_ROOM`, then the room in `.conclave.json`.
+  `messages delete` accepts a room name too.
+
+### Fixed
+
+* `messages subscribe` ignored `CONCLAVE_API_KEY`, the
+  `CONCLAVE_BASE_URL` default and `--as`: it used only the raw
+  `--server` and `--token` flags.
+* docs: `messages delete` takes the message id as an argument,
+  not `--msg-id`.
+
 ## [0.2.0] — 2026-11-09
 
 Makes the MCP server usable from Claude Code and adds what

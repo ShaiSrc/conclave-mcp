@@ -48,15 +48,18 @@ func NewCmd() *cobra.Command {
   SessionEnd  releases this agent's claims and posts a handoff
 
 The room is the repository's (.conclave.json, see conclave-mcp init).
-Without CONCLAVE_API_KEY it does nothing, so a committed
+The key comes from --token, --as, CONCLAVE_API_KEY or CONCLAVE_AGENT
+(a key stored by agent add --store). Without any it does nothing, so a committed
 .claude/settings.json does not bother teammates who do not use
 Conclave. Failures exit 1 (non-blocking); edits are allowed while
 the server is unreachable.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			token, _ := cmd.Flags().GetString("token")
-			if token == "" {
-				token = os.Getenv("CONCLAVE_API_KEY")
+			flagToken, _ := cmd.Flags().GetString("token")
+			flagAs, _ := cmd.Flags().GetString("as")
+			token, err := client.ResolveToken(flagToken, flagAs)
+			if err != nil {
+				return &Error{err}
 			}
 			if token == "" {
 				return nil

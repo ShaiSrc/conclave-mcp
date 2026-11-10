@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -195,6 +196,7 @@ func TestSessionEnd_ReleasesAndPostsHandoff(t *testing.T) {
 
 func TestCmd_SilentWithoutKey(t *testing.T) {
 	t.Setenv("CONCLAVE_API_KEY", "")
+	t.Setenv("CONCLAVE_AGENT", "")
 	cmd := NewCmd()
 	cmd.Flags().String("token", "", "")
 	cmd.Flags().String("server", "", "")
@@ -203,6 +205,22 @@ func TestCmd_SilentWithoutKey(t *testing.T) {
 	cmd.SetOut(&out)
 	if err := cmd.RunE(cmd, nil); err != nil || out.Len() != 0 {
 		t.Errorf("no key: want silent success, got err=%v out=%q", err, out.String())
+	}
+}
+
+func TestCmd_UnknownAgentIsANonBlockingError(t *testing.T) {
+	// CONCLAVE_AGENT names an agent but no key is stored for it: say
+	// so (exit 1, shown to the user) instead of silently doing nothing.
+	t.Setenv("CONCLAVE_API_KEY", "")
+	t.Setenv("CONCLAVE_AGENT", "no-such-agent-for-tests")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	cmd := NewCmd()
+	cmd.Flags().String("token", "", "")
+	cmd.Flags().String("server", "", "")
+	cmd.SetIn(strings.NewReader(`{"hook_event_name":"PreToolUse"}`))
+	var hookErr *Error
+	if err := cmd.RunE(cmd, nil); !errors.As(err, &hookErr) || !strings.Contains(err.Error(), "no-such-agent-for-tests") {
+		t.Errorf("want a hook error naming the agent, got %v", err)
 	}
 }
 

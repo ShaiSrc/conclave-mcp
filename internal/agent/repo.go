@@ -176,3 +176,42 @@ func ResolveRoom(ctx context.Context, c *client.Client, name string) (string, er
 	}
 	return "", fmt.Errorf("%w %q (an admin can add this agent: conclave-mcp agent add <label>)", ErrNoRoom, name)
 }
+
+// RoomID turns a command's room argument into a room id. A room id
+// (a ULID, as the server issues them) is used as is; anything else is
+// a room name. An empty arg means CONCLAVE_ROOM, then the room in the
+// .conclave.json of the repository in the working directory.
+// ponytail: a room *named* like a ULID is taken for an id.
+func RoomID(ctx context.Context, c *client.Client, arg string) (string, error) {
+	if arg == "" {
+		arg = os.Getenv("CONCLAVE_ROOM")
+	}
+	if arg == "" {
+		if wd, err := os.Getwd(); err == nil {
+			if repo, err := FindRepo(wd); err == nil {
+				arg = repo.Config.Room
+			}
+		}
+	}
+	if arg == "" {
+		return "", errors.New("no room: pass a room id or name, set CONCLAVE_ROOM, or run inside a repository set up with conclave-mcp init")
+	}
+	if isULID(arg) {
+		return arg, nil
+	}
+	return ResolveRoom(ctx, c, arg)
+}
+
+// isULID reports whether s looks like a room id: 26 Crockford base32
+// characters, upper case, as the server issues them.
+func isULID(s string) bool {
+	if len(s) != 26 {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune("0123456789ABCDEFGHJKMNPQRSTVWXYZ", r) {
+			return false
+		}
+	}
+	return true
+}

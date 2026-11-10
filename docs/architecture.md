@@ -71,8 +71,9 @@ internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
 internal/mcp        MCP tool definitions (16 tools)
 internal/claims     path claims service + storage
-internal/agent      repo/room resolution, state file, inbox (CLI side)
-internal/cli/client shared HTTP client for every subcommand
+internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
+internal/cli/client shared HTTP client for every subcommand (token resolution)
+internal/cli/keystore stored agent keys (macOS Keychain or 0600 files)
 internal/storage    SQLite connection pool + migration runner
 internal/config     env / flag config loading
 internal/logging    structured JSON logger
@@ -268,7 +269,9 @@ The most important ones:
 | `CONCLAVE_RATE_LIMIT_PER_MIN` | `600` | Per-key rate limit. |
 | `CONCLAVE_AUDIT_RETENTION` | `17520h` | Audit retention duration. |
 
-The CLI subcommands also read `CONCLAVE_API_KEY` and
+The CLI subcommands also read `CONCLAVE_API_KEY`,
+`CONCLAVE_AGENT` (an agent whose key `agent add --store` saved,
+see `internal/cli/keystore`), `CONCLAVE_ROOM` and
 `CONCLAVE_BASE_URL`. See [docs/cli-reference.md](cli-reference.md#global-flags).
 
 ## Deployment topology

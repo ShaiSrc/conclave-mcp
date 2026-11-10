@@ -2,10 +2,14 @@
 //
 // Per SPEC-0004 §5:
 //
-//	conclave-mcp messages send <room-id> [--content "..." | --content-file PATH | stdin]
-//	conclave-mcp messages list <room-id> [--since <ts>] [--limit N] [--format json|table]
-//	conclave-mcp messages delete <room-id> <msg-id>
-//	conclave-mcp messages subscribe <room-id> [--wait SECONDS] [--format json|table]
+//	conclave-mcp messages send [room] [--content "..." | --content-file PATH | stdin]
+//	conclave-mcp messages list [room] [--since <ts>] [--limit N] [--format json|table]
+//	conclave-mcp messages delete <room> <msg-id>
+//	conclave-mcp messages subscribe [room] [--wait SECONDS] [--format json|table]
+//	conclave-mcp messages inbox [room] [--wait DURATION]
+//
+// [room] is a room id or name; without it, CONCLAVE_ROOM, then the
+// room in the repository's .conclave.json (agent.RoomID).
 //
 // Messages are streamed, never typed twice: when --content-file is "-"
 // or no flag is given, the message body is read from stdin.
@@ -27,8 +31,28 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
+
+const roomHelp = `ROOM is a room id or a room name. Without it: $CONCLAVE_ROOM, then the
+room in the .conclave.json of the repository you are in.`
+
+// roomFor resolves the optional room argument (agent.RoomID).
+func roomFor(ctx context.Context, c *client.Client, args []string) (string, error) {
+	arg := ""
+	if len(args) > 0 {
+		arg = args[0]
+	}
+	id, err := agent.RoomID(ctx, c, arg)
+	if errors.Is(err, agent.ErrNoRoom) {
+		return "", &exitCodeError{code: 1, err: err}
+	}
+	if err != nil {
+		return "", mapErr(err)
+	}
+	return id, nil
+}
 
 // NewCmd builds the messages subcommand tree.
 func NewCmd() *cobra.Command {
@@ -86,7 +110,8 @@ type listResponse struct {
 var openClient = func(_ context.Context, cmd *cobra.Command) (*client.Client, error) {
 	tok, _ := cmd.Flags().GetString("token")
 	srv, _ := cmd.Flags().GetString("server")
-	return client.New(client.Options{Server: srv, Token: tok})
+	as, _ := cmd.Flags().GetString("as")
+	return client.New(client.Options{Server: srv, Token: tok, Agent: as})
 }
 
 // makeClientAndDo opens a client and runs the action with a
@@ -171,11 +196,11 @@ func newSendCmd() *cobra.Command {
 		flagFormat      string
 	)
 	cmd := &cobra.Command{
-		Use:   "send <room-id>",
+		Use:   "send [room]",
 		Short: "Send a message to a room",
-		Args:  cobra.ExactArgs(1),
+		Long:  "Send a message to a room.\n\n" + roomHelp,
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			roomID := args[0]
 			content, err := resolveContent(flagContent, flagContentFile)
 			if err != nil {
 				// --content and --content-file both set,
@@ -198,6 +223,10 @@ func newSendCmd() *cobra.Command {
 				req.Metadata = json.RawMessage(flagMetadata)
 			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				roomID, err := roomFor(ctx, c, args)
+				if err != nil {
+					return err
+				}
 				var resp sendResponse
 				status, err := c.Do(ctx, client.Request{
 					Method: "POST",
@@ -291,15 +320,14 @@ func newListCmd() *cobra.Command {
 		flagTrustOrigin string
 	)
 	cmd := &cobra.Command{
-		Use:   "list <room-id>",
+		Use:   "list [room]",
 		Short: "List messages in a room, oldest first, paginated by timestamp",
-		Args:  cobra.ExactArgs(1),
+		Long:  "List messages in a room, oldest first, paginated by timestamp.\n\n" + roomHelp,
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			roomID := args[0]
 			if flagTrustOrigin != "" && flagTrustOrigin != "internal" && flagTrustOrigin != "external" {
 				return fmt.Errorf("--trust-origin must be 'internal' or 'external'")
 			}
-			path := "/v1/rooms/" + url.PathEscape(roomID) + "/messages"
 			q := url.Values{}
 			if flagSince != "" {
 				q.Set("since", flagSince)
@@ -310,10 +338,15 @@ func newListCmd() *cobra.Command {
 			if flagTrustOrigin != "" {
 				q.Set("trust_origin", flagTrustOrigin)
 			}
-			if len(q) > 0 {
-				path += "?" + q.Encode()
-			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				roomID, err := roomFor(ctx, c, args)
+				if err != nil {
+					return err
+				}
+				path := "/v1/rooms/" + url.PathEscape(roomID) + "/messages"
+				if len(q) > 0 {
+					path += "?" + q.Encode()
+				}
 				var resp listResponse
 				status, err := c.Do(ctx, client.Request{Method: "GET", Path: path, Out: &resp})
 				if err != nil {
@@ -362,16 +395,20 @@ func renderMessageList(format string, resp listResponse, out io.Writer) error {
 // Owner only.
 func newDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "delete <room-id> <msg-id>",
+		Use:   "delete <room> <msg-id>",
 		Short: "Soft-delete a message (owner only)",
+		Long:  "Soft-delete a message (owner only). <room> is a room id or name.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			roomID := args[0]
 			msgID, err := strconv.ParseInt(args[1], 10, 64)
 			if err != nil || msgID <= 0 {
 				return fmt.Errorf("msg-id must be a positive integer")
 			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				roomID, err := roomFor(ctx, c, args[:1])
+				if err != nil {
+					return err
+				}
 				status, err := c.Do(ctx, client.Request{
 					Method: "DELETE",
 					Path:   fmt.Sprintf("/v1/rooms/%s/messages/%d", roomID, msgID),
@@ -407,26 +444,33 @@ func newSubscribeCmd() *cobra.Command {
 		flagFormat string
 	)
 	cmd := &cobra.Command{
-		Use:   "subscribe <room-id>",
+		Use:   "subscribe [room]",
 		Short: "Subscribe to a room and print new messages (SSE)",
 		Long: `Open an SSE connection to GET /v1/rooms/{id}/events and print
 arriving messages to STDOUT. The connection stays open for
 up to --wait seconds (default 60, max 300) or until the
 caller hits Ctrl-C. Polling via 'conclave-mcp messages list
-<room-id>' is the canonical fallback for scripts that
-cannot hold a streaming connection.`,
-		Args: cobra.ExactArgs(1),
+<room>' is the canonical fallback for scripts that
+cannot hold a streaming connection. To wait for the next message
+from another agent, use 'messages inbox --wait'.
+
+` + roomHelp,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			roomID := args[0]
 			if flagWait < 0 {
 				return fmt.Errorf("--wait must be >= 0")
 			}
 			if flagFormat != "" && flagFormat != "json" && flagFormat != "table" {
 				return fmt.Errorf("--format must be 'json' or 'table'")
 			}
-			tok, _ := cmd.Flags().GetString("token")
-			srv, _ := cmd.Flags().GetString("server")
-			return streamMessages(cmd.Context(), srv, tok, roomID, flagWait, flagFormat, cmd.OutOrStdout())
+			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				roomID, err := roomFor(ctx, c, args)
+				if err != nil {
+					return err
+				}
+				// The client resolved server and token (flags, --as, env).
+				return streamMessages(ctx, c.BaseURL, c.Token, roomID, flagWait, flagFormat, out)
+			})
 		},
 	}
 	cmd.Flags().IntVar(&flagWait, "wait", 60, "how long to keep the connection open (seconds, max 300)")

@@ -2,7 +2,8 @@
 // CLI subcommands to talk to a running server.
 //
 // Scope (per SPEC-0003 + SPEC-0004):
-//   - Bearer token auth (CONCLAVE_API_KEY env or --token flag)
+//   - Bearer token auth: --token, --as <agent> (stored key),
+//     CONCLAVE_API_KEY, CONCLAVE_AGENT (see ResolveToken)
 //   - Server URL from --server flag or CONCLAVE_SERVER env
 //   - JSON request/response with X-Request-Id propagation
 //   - 2xx -> return parsed body + status
@@ -24,6 +25,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/hermes/conclave-mcp/internal/cli/keystore"
 )
 
 // Default timeout for any single HTTP request.
@@ -52,13 +55,37 @@ func (nopLogger) Error(string, ...any) {}
 type Options struct {
 	Server  string // full URL like http://127.0.0.1:7432
 	Token   string // bearer token (without "Bearer " prefix)
+	Agent   string // --as: use this agent's stored key
 	Timeout time.Duration
 	Logger  ErrorLogger
 }
 
+// agentKey is a seam for tests.
+var agentKey = keystore.Get
+
+// ResolveToken picks the bearer token: --token, then the stored key of
+// --as <label>, then CONCLAVE_API_KEY, then the stored key of
+// CONCLAVE_AGENT. Flags beat env, a raw key beats a label. "" with a
+// nil error means nothing is configured.
+func ResolveToken(token, agent string) (string, error) {
+	if token != "" {
+		return token, nil
+	}
+	if agent == "" {
+		if t := os.Getenv("CONCLAVE_API_KEY"); t != "" {
+			return t, nil
+		}
+		agent = os.Getenv("CONCLAVE_AGENT")
+	}
+	if agent == "" {
+		return "", nil
+	}
+	return agentKey(agent)
+}
+
 // New constructs a Client. Empty Options fields fall back to env vars
-// (CONCLAVE_SERVER or CONCLAVE_BASE_URL for the URL, CONCLAVE_API_KEY
-// for the token) and DefaultTimeout. CONCLAVE_BASE_URL is the
+// (CONCLAVE_SERVER or CONCLAVE_BASE_URL for the URL, ResolveToken for
+// the token) and DefaultTimeout. CONCLAVE_BASE_URL is the
 // spec-mandated name (SPEC-0004 §3); CONCLAVE_SERVER is the
 // historical alias kept for backward compatibility.
 func New(opts Options) (*Client, error) {
@@ -75,12 +102,14 @@ func New(opts Options) (*Client, error) {
 		opts.Server = "http://127.0.0.1:7432"
 	}
 	opts.Server = strings.TrimRight(opts.Server, "/")
-	if opts.Token == "" {
-		opts.Token = os.Getenv("CONCLAVE_API_KEY")
+	token, err := ResolveToken(opts.Token, opts.Agent)
+	if err != nil {
+		return nil, err
 	}
-	if opts.Token == "" {
-		return nil, errors.New("api token required: pass --token or set CONCLAVE_API_KEY")
+	if token == "" {
+		return nil, errors.New("api token required: pass --token or --as <agent>, or set CONCLAVE_API_KEY or CONCLAVE_AGENT")
 	}
+	opts.Token = token
 	if opts.Timeout == 0 {
 		opts.Timeout = DefaultTimeout
 	}
