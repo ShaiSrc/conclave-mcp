@@ -384,8 +384,20 @@ func TestMessages_ReplyToIsCheckedAndKeptInMetadata(t *testing.T) {
 	other := seedRoom(t, db, owner, "other")
 	_, _ = db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, '2026-01-01T00:00:00.000000000Z', 'x', 'text/plain')`, other, owner)
 	var foreign int64
-	_ = db.QueryRow(`SELECT id FROM messages WHERE room_id = ?`, other).Scan(&foreign)
-	for _, bad := range []string{"0", "-1", "999999", itoa(foreign)} {
+	_ = db.QueryRowContext(context.Background(), `SELECT id FROM messages WHERE room_id = ?`, other).Scan(&foreign)
+	// metadata null with reply_to used to panic (nil map); big numbers
+	// in metadata must survive the merge unrounded.
+	if code, mv := send(`{"content":"x","reply_to":` + itoa(q.ID) + `,"metadata":null}`); code != http.StatusCreated || string(mv.Metadata) != `{"reply_to":`+itoa(q.ID)+`}` {
+		t.Errorf("metadata null: status %d, metadata %s", code, mv.Metadata)
+	}
+	if code, mv := send(`{"content":"x","reply_to":` + itoa(q.ID) + `,"metadata":{"big":9007199254740993}}`); code != http.StatusCreated || !strings.Contains(string(mv.Metadata), "9007199254740993") {
+		t.Errorf("big number: status %d, metadata %s", code, mv.Metadata)
+	}
+	_, gone := send(`{"content":"to be deleted"}`)
+	if _, err := db.Exec(`UPDATE messages SET deleted_at = '2026-01-01T00:00:00.000000000Z' WHERE id = ?`, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range []string{"0", "-1", "999999", itoa(foreign), itoa(gone.ID)} {
 		if code, _ := send(`{"content":"x","reply_to":` + bad + `}`); code != http.StatusBadRequest {
 			t.Errorf("reply_to %s: status %d, want 400", bad, code)
 		}

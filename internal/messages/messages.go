@@ -209,20 +209,25 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	if req.ReplyTo != nil {
 		var exists int
 		err := s.DB.QueryRowContext(r.Context(),
-			`SELECT 1 FROM messages WHERE id = ? AND room_id = ?`, *req.ReplyTo, roomID).Scan(&exists)
+			`SELECT 1 FROM messages WHERE id = ? AND room_id = ? AND deleted_at IS NULL`, *req.ReplyTo, roomID).Scan(&exists)
 		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: no message "+strconv.FormatInt(*req.ReplyTo, 10)+" in this room")
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: no message "+strconv.FormatInt(*req.ReplyTo, 10)+" in this room (or it was deleted)")
 			return
 		}
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "reply_to lookup")
 			return
 		}
-		meta := map[string]any{}
+		// RawMessage values keep the other fields byte for byte (no
+		// float64 rounding of big numbers).
+		var meta map[string]json.RawMessage
 		if metadata.Valid {
-			_ = json.Unmarshal([]byte(metadata.String), &meta) // validated above; null stays empty
+			_ = json.Unmarshal([]byte(metadata.String), &meta) // validated above
 		}
-		meta["reply_to"] = *req.ReplyTo
+		if meta == nil { // no metadata, or "null"
+			meta = map[string]json.RawMessage{}
+		}
+		meta["reply_to"] = json.RawMessage(strconv.FormatInt(*req.ReplyTo, 10))
 		b, _ := json.Marshal(meta)
 		metadata = sql.NullString{String: string(b), Valid: true}
 		req.Metadata = b
