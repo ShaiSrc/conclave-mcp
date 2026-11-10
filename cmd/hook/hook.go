@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -171,6 +172,10 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 // removes p if it is still ours.
 func newestWaiter(p string, cancel func()) (release func(), err error) {
 	id := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	// The wake hook can be the first hook ever run for this agent.
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return nil, err
+	}
 	if err := os.WriteFile(p, []byte(id), 0o600); err != nil {
 		return nil, err
 	}

@@ -394,3 +394,14 @@ func TestWake_NewestWaiterAndSessionEndStopOlderOnes(t *testing.T) {
 		t.Fatal("SessionEnd did not stop the waiter")
 	}
 }
+
+func TestWake_CreatesMissingStateDir(t *testing.T) {
+	// The SessionStart wake hook can run before any other hook created
+	// the cache dir.
+	fastWakePoll(t)
+	s := newSetup(t)
+	s.h.StateDir = filepath.Join(t.TempDir(), "not", "yet")
+	if out, err := s.wake(context.Background(), 200*time.Millisecond); err != nil || out != "" {
+		t.Fatalf("fresh state dir: want a quiet timeout, got %q, %v", out, err)
+	}
+}
