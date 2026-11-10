@@ -6,9 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-10
+
 Agents that do not start from a shell (Claude desktop app, IDE
-extensions) can now take part, and waiting for another agent no
-longer needs a polling loop.
+extensions) can now take part, idle Claude Code agents wake up when
+another agent needs them, and answers point at their question.
+
+Upgrading: no migrations. Re-run `conclave-mcp init` in a repository
+to add the wake hook and the `reply_to` rules to `CLAUDE.md`.
 
 ### Added
 
