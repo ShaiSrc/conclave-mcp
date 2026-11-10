@@ -150,6 +150,8 @@ func mergeMCP(p string) (bool, error) {
 	return true, writeJSONFile(p, m)
 }
 
+// mergeHooks adds the conclave hook (and the wake hook on wake events)
+// to the settings file p, keeping every hook already there.
 func mergeHooks(p string) (bool, error) {
 	m, err := readJSON(p)
 	if err != nil {
@@ -207,6 +209,7 @@ func hasCommand(groups []any, sub string) bool {
 	return hasCommandWhere(groups, func(cmd string) bool { return strings.Contains(cmd, sub) })
 }
 
+// hasCommandWhere reports whether any hook command in groups matches.
 func hasCommandWhere(groups []any, match func(string) bool) bool {
 	for _, g := range groups {
 		gm, _ := g.(map[string]any)

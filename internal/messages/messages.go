@@ -101,6 +101,8 @@ var allowedMessageTypes = map[string]struct{}{
 	"system":          {},
 }
 
+// send handles POST /rooms/{id}/messages: validates the body and
+// reply_to, stores the message and publishes it to subscribers.
 func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
