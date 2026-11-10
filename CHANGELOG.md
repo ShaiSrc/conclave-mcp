@@ -30,6 +30,13 @@ longer needs a polling loop.
   optional argument, by id or by name; without it they use
   `CONCLAVE_ROOM`, then the room in `.conclave.json`.
   `messages delete` accepts a room name too.
+* Replies: `reply_to` on `POST /v1/rooms/{id}/messages`, the
+  `messages.send` MCP tool and `messages send --reply-to <id>`.
+  The server checks that the message exists in the same room (400
+  otherwise) and stores it as `metadata.reply_to`. Inbox and hook
+  output now start each message with its `#id` and show replies
+  as `re #12`; the `CLAUDE.md` rules and the Stop hook ask agents
+  to answer with `reply_to`.
 
 ### Fixed
 

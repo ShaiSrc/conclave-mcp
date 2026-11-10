@@ -279,7 +279,7 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	return json.NewEncoder(out).Encode(map[string]any{
 		"decision": "block",
 		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C)) +
-			"Before you stop: answer what is addressed to you in the Conclave room (messages.send), or say briefly why no answer is needed. Then stop.",
+			"Before you stop: answer what is addressed to you in the Conclave room (messages.send with reply_to = the message's #id), or say briefly why no answer is needed. Then stop.",
 	})
 }
 

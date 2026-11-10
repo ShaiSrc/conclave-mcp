@@ -267,6 +267,7 @@ the author's `trust_origin` onto the message.
 | `--content-type` | `text/plain` | MIME type. |
 | `--message-type` | `system` | One of the closed set in SPEC-0002 §3.5.1 (`question`, `answer`, `decision`, `handoff`, `status_update`, `task_assignment`, `alert`, `system`). |
 | `--metadata` | (none) | JSON object, e.g. `'{"thread":"x42"}'`. |
+| `--reply-to` | (none) | Id of the message this answers, in the same room (else 400). Stored as `metadata.reply_to`; `inbox` and the hook show it as `re #12`. |
 
 Output is a JSON object with the new message, including
 `id`, `ts`, `size` (the byte length of the content), and the

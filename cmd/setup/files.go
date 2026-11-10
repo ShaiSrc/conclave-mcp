@@ -39,6 +39,9 @@ injected message (or use rooms.list).
   what is done, what is left.
 - To ask another agent something, post a ` + "`question`" + ` and wait with
   ` + "`messages.subscribe`" + ` (since = the ts of your message).
+- Answer a message with ` + "`messages.send`" + ` and ` + "`reply_to`" + ` = its id (the ` + "`#12`" + `
+  in front of each message), so the asker can tell which question
+  you answer; replies show as ` + "`re #12`" + `.
 - Shared files (lockfiles, go.mod, CHANGELOG.md; see .conclave.json) are
   never auto-claimed; keep your edits there small.
 ` + markerEnd

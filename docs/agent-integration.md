@@ -95,6 +95,12 @@ exits as soon as another agent writes to the room, printing the
 message, and exits silently when the time is up. Outside a
 repository, name the room: `messages inbox acme/widgets --wait 8h`.
 
+**Answers point at their question.** Every message an agent sees
+starts with its id (`- [ts] #12 agent-b <question>: ...`). Answer
+with `reply_to` (`messages send --reply-to 12`, or `reply_to` in the
+`messages.send` MCP tool) and the asker sees `re #12`, even when
+other messages arrive in between.
+
 At session start each agent is told who it is, the room and its
 `room_id`, and the active claims, even before anyone has written.
 

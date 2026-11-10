@@ -351,3 +351,43 @@ func TestMessages_ListBadSinceIs400(t *testing.T) {
 		t.Errorf("status %d, want 400", rec.Code)
 	}
 }
+
+func TestMessages_ReplyToIsCheckedAndKeptInMetadata(t *testing.T) {
+	r, db, owner, roomID := setupAs(t)
+	send := func(body string) (int, messageView) {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", strings.NewReader(body)))
+		var mv messageView
+		_ = json.Unmarshal(rec.Body.Bytes(), &mv)
+		return rec.Code, mv
+	}
+	code, q := send(`{"content":"review please","message_type":"task_assignment"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("question: status %d", code)
+	}
+	code, a := send(`{"content":"done","message_type":"answer","reply_to":` + itoa(q.ID) + `,"metadata":{"mr":"!6"}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("reply: status %d", code)
+	}
+	var meta map[string]any
+	_ = json.Unmarshal(a.Metadata, &meta)
+	if meta["reply_to"] != float64(q.ID) || meta["mr"] != "!6" {
+		t.Errorf("reply metadata = %s, want reply_to %d merged with mr", a.Metadata, q.ID)
+	}
+	// list returns the stored metadata too
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages", nil))
+	if !strings.Contains(rec.Body.String(), `"reply_to":`+itoa(q.ID)) {
+		t.Errorf("list lost reply_to: %s", rec.Body.String())
+	}
+
+	other := seedRoom(t, db, owner, "other")
+	_, _ = db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, '2026-01-01T00:00:00.000000000Z', 'x', 'text/plain')`, other, owner)
+	var foreign int64
+	_ = db.QueryRow(`SELECT id FROM messages WHERE room_id = ?`, other).Scan(&foreign)
+	for _, bad := range []string{"0", "-1", "999999", itoa(foreign)} {
+		if code, _ := send(`{"content":"x","reply_to":` + bad + `}`); code != http.StatusBadRequest {
+			t.Errorf("reply_to %s: status %d, want 400", bad, code)
+		}
+	}
+}

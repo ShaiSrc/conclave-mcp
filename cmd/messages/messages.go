@@ -194,6 +194,7 @@ func newSendCmd() *cobra.Command {
 		flagMessageType string
 		flagMetadata    string
 		flagFormat      string
+		flagReplyTo     int64
 	)
 	cmd := &cobra.Command{
 		Use:   "send [room]",
@@ -214,6 +215,7 @@ func newSendCmd() *cobra.Command {
 				ContentType string          `json:"content_type,omitempty"`
 				MessageType string          `json:"message_type,omitempty"`
 				Metadata    json.RawMessage `json:"metadata,omitempty"`
+				ReplyTo     *int64          `json:"reply_to,omitempty"`
 			}{
 				Content:     content,
 				ContentType: flagContentType,
@@ -221,6 +223,9 @@ func newSendCmd() *cobra.Command {
 			}
 			if flagMetadata != "" {
 				req.Metadata = json.RawMessage(flagMetadata)
+			}
+			if cmd.Flags().Changed("reply-to") {
+				req.ReplyTo = &flagReplyTo
 			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				roomID, err := roomFor(ctx, c, args)
@@ -264,6 +269,7 @@ func newSendCmd() *cobra.Command {
 	cmd.Flags().StringVar(&flagContentType, "content-type", "text/plain", "MIME type of the message body")
 	cmd.Flags().StringVar(&flagMessageType, "message-type", "", "intent tag (SPEC-0002 §3.5.1: question, answer, decision, handoff, status_update, task_assignment, alert, system)")
 	cmd.Flags().StringVar(&flagMetadata, "metadata", "", "raw JSON metadata to attach to the message")
+	cmd.Flags().Int64Var(&flagReplyTo, "reply-to", 0, "id of the message this answers (same room; stored as metadata.reply_to)")
 	cmd.Flags().StringVar(&flagFormat, "format", "", "output format: json (default is plaintext body + status line)")
 	return cmd
 }

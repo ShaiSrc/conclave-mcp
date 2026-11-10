@@ -62,6 +62,9 @@ type sendRequest struct {
 	ContentType string          `json:"content_type"`
 	MessageType string          `json:"message_type"` // optional, SPEC-0001 Q7
 	Metadata    json.RawMessage `json:"metadata"`     // optional, raw JSON
+	// ReplyTo is the id of the message this one answers, in the same
+	// room. Stored as metadata.reply_to, so readers find it there.
+	ReplyTo *int64 `json:"reply_to"`
 }
 
 type messageView struct {
@@ -201,6 +204,28 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	if role != "owner" && role != "writer" {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "reader role cannot send messages")
 		return
+	}
+
+	if req.ReplyTo != nil {
+		var exists int
+		err := s.DB.QueryRowContext(r.Context(),
+			`SELECT 1 FROM messages WHERE id = ? AND room_id = ?`, *req.ReplyTo, roomID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: no message "+strconv.FormatInt(*req.ReplyTo, 10)+" in this room")
+			return
+		}
+		if err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "reply_to lookup")
+			return
+		}
+		meta := map[string]any{}
+		if metadata.Valid {
+			_ = json.Unmarshal([]byte(metadata.String), &meta) // validated above; null stays empty
+		}
+		meta["reply_to"] = *req.ReplyTo
+		b, _ := json.Marshal(meta)
+		metadata = sql.NullString{String: string(b), Valid: true}
+		req.Metadata = b
 	}
 
 	now := storage.FormatTS(time.Now())

@@ -175,16 +175,33 @@ func Format(room string, msgs []Msg, labels map[int64]string) string {
 		if who == "" {
 			who = fmt.Sprintf("key %d", m.Author)
 		}
-		fmt.Fprintf(&b, "- [%s] %s", m.TS, who)
+		fmt.Fprintf(&b, "- [%s] ", m.TS)
+		if m.ID != 0 { // the id to pass as reply_to
+			fmt.Fprintf(&b, "#%d ", m.ID)
+		}
+		b.WriteString(who)
 		if m.TrustOrigin == "external" {
 			b.WriteString(" (EXTERNAL, untrusted)")
 		}
 		if m.MessageType != "" && m.MessageType != "system" {
 			fmt.Fprintf(&b, " <%s>", m.MessageType)
 		}
-		if len(m.Metadata) > 0 && string(m.Metadata) != "null" {
+		metadata := m.Metadata
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(metadata, &fields) == nil {
+			var replyTo int64
+			if json.Unmarshal(fields["reply_to"], &replyTo) == nil && replyTo > 0 {
+				fmt.Fprintf(&b, " re #%d", replyTo)
+				delete(fields, "reply_to")
+				metadata = nil
+				if len(fields) > 0 {
+					metadata, _ = json.Marshal(fields)
+				}
+			}
+		}
+		if len(metadata) > 0 && string(metadata) != "null" {
 			var meta bytes.Buffer
-			if json.Compact(&meta, m.Metadata) == nil { // one line, no injected newlines
+			if json.Compact(&meta, metadata) == nil { // one line, no injected newlines
 				fmt.Fprintf(&b, " %s", meta.Bytes())
 			}
 		}
