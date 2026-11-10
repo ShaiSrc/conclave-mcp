@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -174,5 +175,56 @@ func TestWriteFiles_RefusesToClobberUnexpectedTypes(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(settings); string(b) != orig {
 		t.Errorf("settings.json was modified:\n%s", b)
+	}
+}
+
+func useStore(t *testing.T, fail bool) map[string]string {
+	stored := map[string]string{}
+	old := storeKey
+	storeKey = func(label, key string) error {
+		if fail {
+			return errors.New("keychain locked")
+		}
+		stored[label] = key
+		return nil
+	}
+	t.Cleanup(func() { storeKey = old })
+	return stored
+}
+
+func TestAgentAdd_StoreKeepsKeyOffStdout(t *testing.T) {
+	api, _ := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+	useAPI(t, api.URL)
+	stored := useStore(t, false)
+	out, err := runAgentAdd(t, "agent-c", "--room", "acme/widgets", "--store")
+	if err != nil || out != "export CONCLAVE_AGENT=agent-c\n" {
+		t.Fatalf("out=%q err=%v", out, err)
+	}
+	if stored["agent-c"] != "tk_newkey" {
+		t.Errorf("stored = %v", stored)
+	}
+}
+
+func TestAgentAdd_StoreRejectsBadLabelBeforeCreatingAKey(t *testing.T) {
+	api, calls := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+	useAPI(t, api.URL)
+	useStore(t, false)
+	if _, err := runAgentAdd(t, "../evil", "--room", "acme/widgets", "--store"); err == nil {
+		t.Fatal("want an error for a bad label")
+	}
+	if strings.Contains(strings.Join(*calls, "\n"), "POST /v1/keys") {
+		t.Errorf("key created despite bad label: %v", *calls)
+	}
+}
+
+func TestAgentAdd_StoreFailureRevokesKey(t *testing.T) {
+	api, calls := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+	useAPI(t, api.URL)
+	useStore(t, true)
+	if out, err := runAgentAdd(t, "agent-c", "--room", "acme/widgets", "--store"); err == nil || out != "" {
+		t.Fatalf("want an error and nothing printed, got out=%q err=%v", out, err)
+	}
+	if !strings.Contains(strings.Join(*calls, "\n"), "DELETE /v1/keys/7") {
+		t.Errorf("unstored key not revoked: %v", *calls)
 	}
 }

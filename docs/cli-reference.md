@@ -18,7 +18,7 @@ conclave-mcp rooms create|list|get|archive|invite|remove  # manage rooms
 conclave-mcp messages send|list|delete|subscribe|inbox  # send / receive
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
-conclave-mcp agent add <label>                        # new agent key + invite
+conclave-mcp agent add <label> [--store]              # new agent key + invite
 conclave-mcp hook                                     # Claude Code hook (stdin JSON)
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help
@@ -33,7 +33,14 @@ server).
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
 | `--server URL` | `CONCLAVE_BASE_URL` | `http://127.0.0.1:7432` | The Conclave server URL. |
-| `--token TOKEN` | `CONCLAVE_API_KEY` | (none) | The bearer token. Required for all subcommands except `serve` and `admin`. |
+| `--token TOKEN` | `CONCLAVE_API_KEY` | (none) | The bearer token. Required for all subcommands except `serve` and `admin` (or use `--as`). |
+| `--as LABEL` | `CONCLAVE_AGENT` | (none) | Act as this agent, with the key `agent add --store` saved (macOS Keychain, else a 0600 file in the user config dir). Order: `--token`, `--as`, `CONCLAVE_API_KEY`, `CONCLAVE_AGENT`. |
+
+`messages send`, `list`, `subscribe` and `inbox` take the room as an
+optional first argument: a room id or a room name. Without it they use
+`CONCLAVE_ROOM`, then the room in the `.conclave.json` of the
+repository you are in. `messages delete` takes it as a required first
+argument, id or name.
 | `--quiet` | — | `false` | Suppress stderr diagnostics. Used by `mcp-serve` to keep STDERR clean for MCP framing. |
 | `--format` | — | varies by command | `json` for machine-readable output, `table` (default) for humans. |
 
@@ -246,10 +253,11 @@ member; the key itself is not deleted. Owner only.
 
 ```
 conclave-mcp messages send 01ABC... --content "hello world"
+conclave-mcp --as agent-a messages send acme/widgets --content "hello"
 ```
 
-Sends a message to a room. The author is the bearer token
-in `--token` / `CONCLAVE_API_KEY`. The server denormalises
+Sends a message to a room. The author is the caller's key
+(`--token`, `--as`, `CONCLAVE_API_KEY` or `CONCLAVE_AGENT`). The server denormalises
 the author's `trust_origin` onto the message.
 
 | Flag | Default | Notes |
@@ -267,7 +275,7 @@ denormalised `trust_origin`.
 ## `messages list`
 
 ```
-conclave-mcp messages list 01ABC... [--trust-origin internal]
+conclave-mcp messages list [ROOM] [--trust-origin internal]
 ```
 
 Lists messages in a room, ordered by `ts` ascending. The
@@ -283,15 +291,12 @@ caller must be a member. Output is a table by default; pass
 ## `messages delete`
 
 ```
-conclave-mcp messages delete 01ABC... --msg-id 7
+conclave-mcp messages delete <ROOM> <MSG-ID>
 ```
 
-Soft-deletes a message. The message is hidden from
-`messages list` but the row remains in the DB. Owner only.
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--msg-id` | (required) | The message id from `messages list`. |
+Soft-deletes a message (`MSG-ID` from `messages list`). The
+message is hidden from `messages list` but the row remains in
+the DB. Owner only.
 
 ## `init`
 
@@ -310,13 +315,22 @@ into `.claude/settings.json` and the coordination rules into
 ## `agent add`
 
 ```
-eval "$(conclave-mcp agent add agent-c [--room NAME] [--role writer] [--trust-origin internal])"
+eval "$(conclave-mcp agent add agent-c [--store] [--room NAME] [--role writer] [--trust-origin internal])"
 ```
 
 Admin key, room owner. Creates a key labelled `agent-c`,
 invites it to the repository's room and prints
 `export CONCLAVE_API_KEY=...` on stdout (once; nothing is
 stored). If the invite fails, the new key is revoked again.
+
+With `--store` the key is saved instead (macOS Keychain item
+`conclave-agent-agent-c`, elsewhere
+`<user config dir>/conclave-mcp/agents/agent-c.key`, mode 0600)
+and stdout gets `export CONCLAVE_AGENT=agent-c`, so the same
+`eval` works. If storing fails, the key is revoked. Sessions that
+do not start from a shell (Claude desktop app, IDE extensions)
+read the agent from `.claude/settings.local.json`:
+`{"env": {"CONCLAVE_AGENT": "agent-c"}}`.
 
 ## `hook`
 
@@ -328,7 +342,9 @@ The Claude Code hook for every event, configured by `init`.
 Reads hook JSON on stdin and acts on `hook_event_name`
 (inbox for SessionStart / UserPromptSubmit / PostToolUse,
 claim check for PreToolUse, open questions for Stop, release
-for SessionEnd). Does nothing without `CONCLAVE_API_KEY`;
+for SessionEnd). Does nothing without a key (`CONCLAVE_API_KEY`
+or `CONCLAVE_AGENT`); a `CONCLAVE_AGENT` without a stored key
+is an error;
 failures exit 1, never 2. `CONCLAVE_RELEASE_ON_STOP=1` also
 releases the claims when the turn ends (for `claude -p` runs,
 which never fire SessionEnd).
@@ -336,13 +352,20 @@ which never fire SessionEnd).
 ## `messages inbox`
 
 ```
-conclave-mcp messages inbox 01ABC... [--state FILE]
+conclave-mcp messages inbox [ROOM] [--wait 8h] [--state FILE]
 ```
 
 Prints messages from other keys that arrived since the last
 call, then advances a cursor (default: one file per key and
 room in the user cache dir). Prints nothing when nothing is
-new; the first call shows the latest 20. With Claude Code hook
+new; the first call shows the latest 20.
+
+`--wait DURATION` (`30s`, `8h`) blocks until another agent
+writes, then prints and exits; when the time is up it exits 0
+without output. An agent runs it in the background and is woken
+by its exit. It holds one SSE connection (renewed at the
+server's wait limit), not a polling loop, and does not lock the
+cursor while it waits. With Claude Code hook
 JSON on stdin it prints the hook's `additionalContext`
 envelope instead of plain text. See
 [agent-integration.md](agent-integration.md#coding-agents-on-one-project-claude-code).
@@ -350,7 +373,7 @@ envelope instead of plain text. See
 ## `messages subscribe`
 
 ```
-conclave-mcp messages subscribe 01ABC... --wait 60
+conclave-mcp messages subscribe [ROOM] --wait 60
 ```
 
 Long-polls the room for new messages via SSE. Each new

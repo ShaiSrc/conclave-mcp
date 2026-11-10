@@ -54,8 +54,8 @@ cd my-repo
 CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp init
 git add .conclave.json .mcp.json .claude/settings.json CLAUDE.md && git commit -m "chore: conclave"
 
-# per agent: create its key, invite it, start Claude with it
-eval "$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add agent-a)" && claude
+# per agent: create its key, invite it, store the key, start Claude as it
+eval "$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add agent-a --store)" && claude
 ```
 
 `init` finds or creates the room for the repository (named after
@@ -69,9 +69,31 @@ writes or merges four files, keeping whatever is already there:
 | `.claude/settings.json` | `conclave-mcp hook` for SessionStart, UserPromptSubmit, PreToolUse (Edit/Write/MultiEdit/NotebookEdit), PostToolUse, Stop, SessionEnd |
 | `CLAUDE.md` | the coordination rules, between `<!-- conclave:start -->` markers |
 
-`agent add <label>` prints `export CONCLAVE_API_KEY=...` once;
-the key is stored nowhere else. `CONCLAVE_BASE_URL` defaults to
-`http://127.0.0.1:7432`.
+`agent add <label> --store` saves the key (macOS Keychain, else a
+0600 file in the user config dir) and prints
+`export CONCLAVE_AGENT=<label>`; every `conclave-mcp` command, the
+hook and the MCP server then find the key by that label. Without
+`--store` it prints `export CONCLAVE_API_KEY=...` once and stores
+nothing. `CONCLAVE_BASE_URL` defaults to `http://127.0.0.1:7432`.
+
+**Claude desktop app and IDE sessions** do not start from your
+shell, so they never see an `export`. Give each such session its
+own worktree and put the agent into the worktree's
+`.claude/settings.local.json` (not committed):
+
+```json
+{"env": {"CONCLAVE_AGENT": "agent-a"}}
+```
+
+Hooks and the `conclave` MCP server then run as `agent-a`. Two
+sessions in the same checkout share that file, and with it one
+identity, so give each agent its own worktree.
+
+**Waiting for another agent** (a review, an answer): run
+`conclave-mcp messages inbox --wait 8h` in the background. It
+exits as soon as another agent writes to the room, printing the
+message, and exits silently when the time is up. Outside a
+repository, name the room: `messages inbox acme/widgets --wait 8h`.
 
 At session start each agent is told who it is, the room and its
 `room_id`, and the active claims, even before anyone has written.
@@ -111,7 +133,7 @@ CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
   `CLAUDE.md` tells agents not to edit claimed files that way.
 * The hook fails open: if the server is unreachable the edit
   goes ahead and Claude Code shows a warning.
-* Without `CONCLAVE_API_KEY` the hook does nothing, so teammates
+* Without a key (`CONCLAVE_API_KEY` or `CONCLAVE_AGENT`) the hook does nothing, so teammates
   who do not use Conclave are not affected by the committed
   `.claude/settings.json`.
 * The v0.1.x setup with `conclave-mcp messages inbox $ROOM` in

@@ -25,7 +25,7 @@ func newSubCmd() *cobra.Command {
 func TestSend_FromFlag(t *testing.T) {
 	var gotBody map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/rooms/r1/messages" {
+		if r.URL.Path != "/v1/rooms/01M72DWQRAZXY3X8HWGJ0QZGNW/messages" {
 			t.Errorf("path=%s", r.URL.Path)
 		}
 		if r.Method != "POST" {
@@ -33,7 +33,7 @@ func TestSend_FromFlag(t *testing.T) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": 1, "room_id": "r1", "content_type": "text/plain",
+			"id": 1, "room_id": "01M72DWQRAZXY3X8HWGJ0QZGNW", "content_type": "text/plain",
 			"size": 5, "created_at": "2026-01-01T00:00:00Z", "content": "hello",
 		})
 	}))
@@ -52,7 +52,7 @@ func TestSend_FromFlag(t *testing.T) {
 	sub.SetOut(&buf)
 	sub.SetErr(&buf)
 	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+	if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if gotBody["content"] != "hello" {
@@ -69,7 +69,7 @@ func TestSend_FromStdin(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"id": 1, "room_id": "r1", "content_type": "text/plain",
+			"id": 1, "room_id": "01M72DWQRAZXY3X8HWGJ0QZGNW", "content_type": "text/plain",
 			"size": 5, "created_at": "2026-01-01T00:00:00Z", "content": "stdin-payload",
 		})
 	}))
@@ -89,7 +89,7 @@ func TestSend_FromStdin(t *testing.T) {
 	sub.SetOut(&buf)
 	sub.SetErr(&buf)
 	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+	if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if gotBody["content"] != "stdin-payload\n" {
@@ -108,7 +108,7 @@ func TestSend_ConflictingFlags(t *testing.T) {
 	sub.SetOut(&bytes.Buffer{})
 	sub.SetErr(&bytes.Buffer{})
 	sub.SetContext(context.Background())
-	err := sub.RunE(sub, []string{"r1"})
+	err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"})
 	if ExitCode(err) != 2 {
 		t.Errorf("ExitCode=%d (err=%v)", ExitCode(err), err)
 	}
@@ -134,7 +134,7 @@ func TestSend_413IsExit1(t *testing.T) {
 	sub.SetOut(&buf)
 	sub.SetErr(&buf)
 	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1"}); ExitCode(err) != 1 {
+	if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); ExitCode(err) != 1 {
 		t.Fatalf("ExitCode=%d (err=%v)", ExitCode(err), err)
 	}
 }
@@ -146,8 +146,8 @@ func TestList_TableOutput(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"messages": []map[string]any{
-				{"id": 1, "room_id": "r1", "content_type": "text/plain", "size": 5, "created_at": "2026-01-01T00:00:00Z"},
-				{"id": 2, "room_id": "r1", "content_type": "text/markdown", "size": 12, "created_at": "2026-01-02T00:00:00Z"},
+				{"id": 1, "room_id": "01M72DWQRAZXY3X8HWGJ0QZGNW", "content_type": "text/plain", "size": 5, "created_at": "2026-01-01T00:00:00Z"},
+				{"id": 2, "room_id": "01M72DWQRAZXY3X8HWGJ0QZGNW", "content_type": "text/markdown", "size": 12, "created_at": "2026-01-02T00:00:00Z"},
 			},
 			"next_since": "m2",
 		})
@@ -170,7 +170,7 @@ func TestList_TableOutput(t *testing.T) {
 	sub.SetOut(&buf)
 	sub.SetErr(&buf)
 	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+	if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	if !strings.Contains(buf.String(), "1") || !strings.Contains(buf.String(), "2") {
@@ -181,7 +181,7 @@ func TestList_TableOutput(t *testing.T) {
 func TestList_JSONOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"messages":   []map[string]any{{"id": int64(1), "room_id": "r1"}},
+			"messages":   []map[string]any{{"id": int64(1), "room_id": "01M72DWQRAZXY3X8HWGJ0QZGNW"}},
 			"next_since": "m1",
 		})
 	}))
@@ -200,7 +200,7 @@ func TestList_JSONOutput(t *testing.T) {
 	sub.SetOut(&buf)
 	sub.SetErr(&buf)
 	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+	if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); err != nil {
 		t.Fatalf("err: %v", err)
 	}
 	var got []msgView
@@ -266,7 +266,7 @@ func TestList_SinceIsURLEscaped(t *testing.T) {
 	_ = sub.Flags().Set("since", since)
 	sub.SetOut(&bytes.Buffer{})
 	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+	if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); err != nil {
 		t.Fatal(err)
 	}
 }

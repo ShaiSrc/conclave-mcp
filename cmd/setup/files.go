@@ -133,6 +133,7 @@ func mergeMCP(p string) (bool, error) {
 		"env": map[string]any{
 			"CONCLAVE_BASE_URL": "${CONCLAVE_BASE_URL:-http://127.0.0.1:7432}",
 			"CONCLAVE_API_KEY":  "${CONCLAVE_API_KEY:-}",
+			"CONCLAVE_AGENT":    "${CONCLAVE_AGENT:-}",
 		},
 	}
 	m["mcpServers"] = servers

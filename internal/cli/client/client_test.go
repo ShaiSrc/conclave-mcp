@@ -13,6 +13,7 @@ import (
 
 func TestNew_RequiresToken(t *testing.T) {
 	t.Setenv("CONCLAVE_API_KEY", "")
+	t.Setenv("CONCLAVE_AGENT", "")
 	_, err := New(Options{Server: "http://x"})
 	if err == nil {
 		t.Fatal("expected error when no token")
@@ -150,5 +151,50 @@ func TestIsNotFound(t *testing.T) {
 	}
 	if IsNotFound(&APIError{Status: 400}) {
 		t.Error("IsNotFound(400) true")
+	}
+}
+
+func TestResolveToken_Order(t *testing.T) {
+	old := agentKey
+	agentKey = func(label string) (string, error) {
+		if label == "missing" {
+			return "", errors.New("no stored key")
+		}
+		return "stored-" + label, nil
+	}
+	t.Cleanup(func() { agentKey = old })
+
+	cases := []struct {
+		name, flagToken, flagAs, envKey, envAgent, want string
+		wantErr                                         bool
+	}{
+		{name: "nothing", want: ""},
+		{name: "--token wins", flagToken: "t", flagAs: "a", envKey: "e", envAgent: "b", want: "t"},
+		{name: "--as beats env key", flagAs: "a", envKey: "e", want: "stored-a"},
+		{name: "env key beats env agent", envKey: "e", envAgent: "b", want: "e"},
+		{name: "env agent", envAgent: "b", want: "stored-b"},
+		{name: "missing stored key", flagAs: "missing", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("CONCLAVE_API_KEY", tc.envKey)
+			t.Setenv("CONCLAVE_AGENT", tc.envAgent)
+			got, err := ResolveToken(tc.flagToken, tc.flagAs)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Fatalf("ResolveToken = %q, %v; want %q (err %v)", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNew_UsesAgentKey(t *testing.T) {
+	old := agentKey
+	agentKey = func(label string) (string, error) { return "stored-" + label, nil }
+	t.Cleanup(func() { agentKey = old })
+	t.Setenv("CONCLAVE_API_KEY", "")
+	t.Setenv("CONCLAVE_AGENT", "")
+	c, err := New(Options{Agent: "peer"})
+	if err != nil || c.Token != "stored-peer" {
+		t.Fatalf("New = %+v, %v", c, err)
 	}
 }

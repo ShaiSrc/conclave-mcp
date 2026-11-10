@@ -64,7 +64,8 @@ type listResponse struct {
 var openClient = func(_ context.Context, cmd *cobra.Command) (*client.Client, error) {
 	tok, _ := cmd.Flags().GetString("token")
 	srv, _ := cmd.Flags().GetString("server")
-	return client.New(client.Options{Server: srv, Token: tok})
+	as, _ := cmd.Flags().GetString("as")
+	return client.New(client.Options{Server: srv, Token: tok, Agent: as})
 }
 
 // exitError lets subcommands request a specific non-zero exit code

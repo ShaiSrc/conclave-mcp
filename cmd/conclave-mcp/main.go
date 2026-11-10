@@ -51,6 +51,7 @@ func newRootCmd() *cobra.Command {
 	// Global flags shared by every CLI subcommand that talks to a server.
 	root.PersistentFlags().String("server", "", "conclave-mcp server URL (env CONCLAVE_BASE_URL, default http://127.0.0.1:7432)")
 	root.PersistentFlags().String("token", "", "bearer token (env CONCLAVE_API_KEY)")
+	root.PersistentFlags().String("as", "", "act as this agent, with its key from `agent add --store` (env CONCLAVE_AGENT)")
 	root.PersistentFlags().Bool("quiet", false, "suppress stderr diagnostics (mcp-serve only)")
 	return root
 }
