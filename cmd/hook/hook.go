@@ -149,7 +149,7 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	release, err := newestWaiter(statePath+wakeSuffix, cancel)
+	release, err := newestWaiter(statePath+wakeSuffix, in.SessionID, cancel)
 	if err != nil {
 		return err
 	}
@@ -167,11 +167,13 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 }
 
 // newestWaiter records this process as the agent's waiter in p and
-// cancels when another one takes over (or p is removed). release
-// removes p if it is still ours. Writes and removals of p hold p's
-// lock, so an exiting waiter cannot delete a newer one's marker.
-func newestWaiter(p string, cancel func()) (release func(), err error) {
-	id := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+// cancels when another one takes over (or p is removed). The marker
+// starts with the session id, so SessionEnd stops only its own
+// session's waiter. release removes p if it is still ours. Writes and
+// removals of p hold p's lock, so an exiting waiter cannot delete a
+// newer one's marker.
+func newestWaiter(p, session string, cancel func()) (release func(), err error) {
+	id := session + " " + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
 	// LockState also creates the state dir: the wake hook can be the
 	// first hook ever run for this agent.
 	unlock, err := agent.LockState(p)
@@ -212,11 +214,16 @@ func newestWaiter(p string, cancel func()) (release func(), err error) {
 	}, nil
 }
 
-// stopWaiter makes the agent's waiter (if any) exit.
-func stopWaiter(p string) {
-	if unlock, err := agent.LockState(p); err == nil {
+// stopWaiter makes session's waiter exit; a newer session's waiter
+// (same agent, same repository) keeps running.
+func stopWaiter(p, session string) {
+	unlock, err := agent.LockState(p)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	if b, _ := os.ReadFile(p); strings.HasPrefix(string(b), session+" ") {
 		_ = os.Remove(p)
-		unlock()
 	}
 }
 
@@ -257,7 +264,7 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 		err = h.stop(ctx, in, repo, &st, out)
 	case "SessionEnd":
 		err = h.sessionEnd(ctx, &st)
-		stopWaiter(statePath + wakeSuffix)
+		stopWaiter(statePath+wakeSuffix, in.SessionID)
 	}
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {

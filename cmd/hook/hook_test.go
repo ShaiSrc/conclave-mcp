@@ -321,8 +321,12 @@ func TestInbox_ParallelHooksInjectOnce(t *testing.T) {
 }
 
 func (s *setup) wake(ctx context.Context, d time.Duration) (string, error) {
+	return s.wakeIn(ctx, "s1", d)
+}
+
+func (s *setup) wakeIn(ctx context.Context, session string, d time.Duration) (string, error) {
 	var errOut bytes.Buffer
-	err := s.h.Wake(ctx, agent.HookInput{Event: "Stop", Cwd: s.repo}, d, &errOut)
+	err := s.h.Wake(ctx, agent.HookInput{Event: "Stop", Cwd: s.repo, SessionID: session}, d, &errOut)
 	return errOut.String(), err
 }
 
@@ -384,7 +388,7 @@ func TestWake_NewestWaiterAndSessionEndStopOlderOnes(t *testing.T) {
 	}
 
 	time.Sleep(200 * time.Millisecond)
-	s.run(map[string]any{"hook_event_name": "SessionEnd"})
+	s.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": "s1"})
 	select {
 	case err := <-second:
 		if err != nil {
@@ -403,5 +407,31 @@ func TestWake_CreatesMissingStateDir(t *testing.T) {
 	s.h.StateDir = filepath.Join(t.TempDir(), "not", "yet")
 	if out, err := s.wake(context.Background(), 200*time.Millisecond); err != nil || out != "" {
 		t.Fatalf("fresh state dir: want a quiet timeout, got %q, %v", out, err)
+	}
+}
+
+func TestWake_SessionEndStopsOnlyItsOwnSessionsWaiter(t *testing.T) {
+	// Same agent, two sessions in one repo: the older session ending
+	// must not stop the newer session's waiter.
+	fastWakePoll(t)
+	s := newSetup(t)
+	s.run(map[string]any{"hook_event_name": "SessionStart"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := s.wakeIn(ctx, "new", 30*time.Second); done <- err }()
+	time.Sleep(200 * time.Millisecond)
+
+	s.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": "old"})
+	select {
+	case err := <-done:
+		t.Fatalf("the old session's end stopped the new session's waiter (err %v)", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	s.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": "new"})
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the new session's end did not stop its waiter")
 	}
 }

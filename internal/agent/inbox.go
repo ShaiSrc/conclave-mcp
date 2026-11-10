@@ -36,6 +36,7 @@ const (
 // HookInput is the part of Claude Code's hook JSON we use.
 type HookInput struct {
 	Event          string `json:"hook_event_name"`
+	SessionID      string `json:"session_id"`
 	Cwd            string `json:"cwd"`
 	ToolName       string `json:"tool_name"`
 	StopHookActive bool   `json:"stop_hook_active"`
