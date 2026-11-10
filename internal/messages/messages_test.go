@@ -397,6 +397,16 @@ func TestMessages_ReplyToIsCheckedAndKeptInMetadata(t *testing.T) {
 	if _, err := db.Exec(`UPDATE messages SET deleted_at = '2026-01-01T00:00:00.000000000Z' WHERE id = ?`, gone.ID); err != nil {
 		t.Fatal(err)
 	}
+	// reply_to inside metadata gets the same check as the field.
+	if code, _ := send(`{"content":"x","metadata":{"reply_to":999999}}`); code != http.StatusBadRequest {
+		t.Errorf("metadata.reply_to 999999: status %d, want 400", code)
+	}
+	if code, _ := send(`{"content":"x","metadata":{"reply_to":"abc"}}`); code != http.StatusBadRequest {
+		t.Errorf(`metadata.reply_to "abc": status %d, want 400`, code)
+	}
+	if code, mv := send(`{"content":"x","metadata":{"reply_to":` + itoa(q.ID) + `,"k":1}}`); code != http.StatusCreated || !strings.Contains(string(mv.Metadata), `"k":1`) {
+		t.Errorf("valid metadata.reply_to: status %d, metadata %s", code, mv.Metadata)
+	}
 	for _, bad := range []string{"0", "-1", "999999", itoa(foreign), itoa(gone.ID)} {
 		if code, _ := send(`{"content":"x","reply_to":` + bad + `}`); code != http.StatusBadRequest {
 			t.Errorf("reply_to %s: status %d, want 400", bad, code)

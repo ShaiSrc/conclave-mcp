@@ -15,7 +15,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -169,14 +168,19 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 
 // newestWaiter records this process as the agent's waiter in p and
 // cancels when another one takes over (or p is removed). release
-// removes p if it is still ours.
+// removes p if it is still ours. Writes and removals of p hold p's
+// lock, so an exiting waiter cannot delete a newer one's marker.
 func newestWaiter(p string, cancel func()) (release func(), err error) {
 	id := strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
-	// The wake hook can be the first hook ever run for this agent.
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+	// LockState also creates the state dir: the wake hook can be the
+	// first hook ever run for this agent.
+	unlock, err := agent.LockState(p)
+	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(p, []byte(id), 0o600); err != nil {
+	err = os.WriteFile(p, []byte(id), 0o600)
+	unlock()
+	if err != nil {
 		return nil, err
 	}
 	done := make(chan struct{})
@@ -197,10 +201,23 @@ func newestWaiter(p string, cancel func()) (release func(), err error) {
 	}()
 	return func() {
 		close(done)
+		unlock, err := agent.LockState(p)
+		if err != nil {
+			return
+		}
+		defer unlock()
 		if b, _ := os.ReadFile(p); string(b) == id {
 			_ = os.Remove(p)
 		}
 	}, nil
+}
+
+// stopWaiter makes the agent's waiter (if any) exit.
+func stopWaiter(p string) {
+	if unlock, err := agent.LockState(p); err == nil {
+		_ = os.Remove(p)
+		unlock()
+	}
 }
 
 // Run dispatches on in.Event and writes the hook's JSON answer to out.
@@ -240,7 +257,7 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 		err = h.stop(ctx, in, repo, &st, out)
 	case "SessionEnd":
 		err = h.sessionEnd(ctx, &st)
-		_ = os.Remove(statePath + wakeSuffix) // stops a waiting `hook --wake`
+		stopWaiter(statePath + wakeSuffix)
 	}
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {

@@ -206,6 +206,20 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A reply_to inside metadata gets the same check as the field (the
+	// field wins when both are set).
+	if req.ReplyTo == nil && metadata.Valid {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(metadata.String), &fields)
+		if raw, ok := fields["reply_to"]; ok {
+			var id int64
+			if err := json.Unmarshal(raw, &id); err != nil {
+				writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to must be a message id")
+				return
+			}
+			req.ReplyTo = &id
+		}
+	}
 	if req.ReplyTo != nil {
 		var exists int
 		err := s.DB.QueryRowContext(r.Context(),
