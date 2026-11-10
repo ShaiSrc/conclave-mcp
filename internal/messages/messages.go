@@ -62,6 +62,9 @@ type sendRequest struct {
 	ContentType string          `json:"content_type"`
 	MessageType string          `json:"message_type"` // optional, SPEC-0001 Q7
 	Metadata    json.RawMessage `json:"metadata"`     // optional, raw JSON
+	// ReplyTo is the id of the message this one answers, in the same
+	// room. Stored as metadata.reply_to, so readers find it there.
+	ReplyTo *int64 `json:"reply_to"`
 }
 
 type messageView struct {
@@ -98,6 +101,8 @@ var allowedMessageTypes = map[string]struct{}{
 	"system":          {},
 }
 
+// send handles POST /rooms/{id}/messages: validates the body and
+// reply_to, stores the message and publishes it to subscribers.
 func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
@@ -201,6 +206,47 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	if role != "owner" && role != "writer" {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "reader role cannot send messages")
 		return
+	}
+
+	// A reply_to inside metadata gets the same check as the field (the
+	// field wins when both are set).
+	if req.ReplyTo == nil && metadata.Valid {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal([]byte(metadata.String), &fields)
+		if raw, ok := fields["reply_to"]; ok {
+			var id int64
+			if err := json.Unmarshal(raw, &id); err != nil {
+				writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to must be a message id")
+				return
+			}
+			req.ReplyTo = &id
+		}
+	}
+	if req.ReplyTo != nil {
+		var exists int
+		err := s.DB.QueryRowContext(r.Context(),
+			`SELECT 1 FROM messages WHERE id = ? AND room_id = ? AND deleted_at IS NULL`, *req.ReplyTo, roomID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: no message "+strconv.FormatInt(*req.ReplyTo, 10)+" in this room (or it was deleted)")
+			return
+		}
+		if err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "reply_to lookup")
+			return
+		}
+		// RawMessage values keep the other fields byte for byte (no
+		// float64 rounding of big numbers).
+		var meta map[string]json.RawMessage
+		if metadata.Valid {
+			_ = json.Unmarshal([]byte(metadata.String), &meta) // validated above
+		}
+		if meta == nil { // no metadata, or "null"
+			meta = map[string]json.RawMessage{}
+		}
+		meta["reply_to"] = json.RawMessage(strconv.FormatInt(*req.ReplyTo, 10))
+		b, _ := json.Marshal(meta)
+		metadata = sql.NullString{String: string(b), Valid: true}
+		req.Metadata = b
 	}
 
 	now := storage.FormatTS(time.Now())

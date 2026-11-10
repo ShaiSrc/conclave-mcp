@@ -407,3 +407,27 @@ func TestClaimsTools(t *testing.T) {
 		t.Errorf("release: got %q isError=%v", text, isErr)
 	}
 }
+
+func TestSendTool_ForwardsReplyTo(t *testing.T) {
+	var gotBody map[string]any
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"id":2,"metadata":{"reply_to":1}}`)
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "tk_test")
+	if text, isErr := toolText(t, s, "messages.send", `{"room_id":"R","content":"done","reply_to":1}`); isErr {
+		t.Fatalf("send: %s", text)
+	}
+	if gotBody["reply_to"] != float64(1) {
+		t.Errorf("reply_to not forwarded: %v", gotBody)
+	}
+	for _, tool := range tools {
+		if tool.name == "messages.send" {
+			if _, ok := tool.props["reply_to"]; !ok {
+				t.Error("messages.send schema lacks reply_to")
+			}
+		}
+	}
+}

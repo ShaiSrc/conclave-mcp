@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,8 +34,10 @@ type Error struct{ Err error }
 func (e *Error) Error() string { return e.Err.Error() }
 func (e *Error) Unwrap() error { return e.Err }
 
+// NewCmd builds `conclave-mcp hook [--wake DURATION]`.
 func NewCmd() *cobra.Command {
-	return &cobra.Command{
+	var flagWake time.Duration
+	cmd := &cobra.Command{
 		Use:   "hook",
 		Short: "Claude Code hook for every event (inbox, claims, Stop, SessionEnd)",
 		Long: `Reads Claude Code hook JSON on stdin and acts on hook_event_name:
@@ -46,6 +49,12 @@ func NewCmd() *cobra.Command {
       claims the file, or denies the edit if another agent holds it
   Stop        has the agent handle open questions first (once)
   SessionEnd  releases this agent's claims and posts a handoff
+
+With --wake DURATION (an asyncRewake hook on SessionStart and Stop) it
+waits in the background for a question, task, handoff, alert, decision
+or answer from another agent, prints the new messages on stderr and
+exits 2, which wakes an idle Claude session. The newest waiter of an
+agent wins; SessionEnd stops it. Status updates alone do not wake.
 
 The room is the repository's (.conclave.json, see conclave-mcp init).
 The key comes from --token, --as, CONCLAVE_API_KEY or CONCLAVE_AGENT
@@ -70,12 +79,22 @@ the server is unreachable.`,
 				return &Error{err}
 			}
 			h := &Hook{C: c, Token: token, Now: time.Now, ReleaseOnStop: os.Getenv("CONCLAVE_RELEASE_ON_STOP") == "1"}
-			if err := h.Run(cmd.Context(), agent.ReadHookInput(cmd.InOrStdin()), cmd.OutOrStdout()); err != nil {
+			in := agent.ReadHookInput(cmd.InOrStdin())
+			if flagWake > 0 {
+				err := h.Wake(cmd.Context(), in, flagWake, cmd.ErrOrStderr())
+				if err != nil && !errors.Is(err, ErrWake) {
+					return &Error{err}
+				}
+				return err
+			}
+			if err := h.Run(cmd.Context(), in, cmd.OutOrStdout()); err != nil {
 				return &Error{err}
 			}
 			return nil
 		},
 	}
+	cmd.Flags().DurationVar(&flagWake, "wake", 0, "wait up to this long for a message that needs this agent, then exit 2 (asyncRewake hook)")
+	return cmd
 }
 
 // Hook handles one hook invocation.
@@ -92,6 +111,123 @@ type Hook struct {
 	ReleaseOnStop bool
 }
 
+// statePath is this agent's cursor and claim state for repo.
+func (h *Hook) statePath(repo agent.Repo) string {
+	sum := sha256.Sum256([]byte(repo.Root))
+	return agent.StatePath(h.StateDir, h.Token, "repo-"+hex.EncodeToString(sum[:6]))
+}
+
+// ErrWake means `hook --wake` printed messages for the agent; main
+// exits 2, which makes Claude Code wake the (possibly idle) session.
+var ErrWake = errors.New("conclave: new messages for the agent")
+
+const wakeSuffix = ".wake"
+
+// wakePoll is how often a waiter checks that it is still the newest.
+var wakePoll = 2 * time.Second
+
+// Wake runs as an asyncRewake hook (SessionStart, Stop). It waits up
+// to wait for a message that asks something of this agent or answers
+// it, writes the new messages to w and returns ErrWake. Status
+// updates alone do not wake it and stay unread. The newest waiter of
+// an agent wins: starting one, or SessionEnd, makes older ones exit
+// quietly, so each Stop can re-arm without piling up processes.
+func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration, w io.Writer) error {
+	cwd := in.Cwd
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	repo, err := agent.FindRepo(cwd)
+	if err != nil {
+		return nil
+	}
+	statePath := h.statePath(repo)
+	st := agent.LoadState(statePath)
+	if st.RoomID == "" {
+		if st.RoomID, err = agent.ResolveRoom(ctx, h.C, repo.RoomName()); err != nil {
+			return err
+		}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	release, err := newestWaiter(statePath+wakeSuffix, in.SessionID, cancel)
+	if err != nil {
+		return err
+	}
+	defer release()
+	news, err := agent.WaitFor(ctx, h.C, st.RoomID, statePath, wait, agent.Wakes)
+	if err != nil || len(news) == 0 {
+		if ctx.Err() != nil {
+			return nil // superseded or stopped
+		}
+		return err
+	}
+	fmt.Fprint(w, agent.Format(h.roomLabel(repo, &st), news, agent.Labels(ctx, h.C))+
+		"Handle what is addressed to you: answer with messages.send and reply_to = the message's #id.\n")
+	return ErrWake
+}
+
+// newestWaiter records this process as the agent's waiter in p and
+// cancels when another one takes over (or p is removed). The marker
+// starts with the session id, so SessionEnd stops only its own
+// session's waiter. release removes p if it is still ours. Writes and
+// removals of p hold p's lock, so an exiting waiter cannot delete a
+// newer one's marker.
+func newestWaiter(p, session string, cancel func()) (release func(), err error) {
+	id := session + " " + strconv.Itoa(os.Getpid()) + "-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	// LockState also creates the state dir: the wake hook can be the
+	// first hook ever run for this agent.
+	unlock, err := agent.LockState(p)
+	if err != nil {
+		return nil, err
+	}
+	err = os.WriteFile(p, []byte(id), 0o600)
+	unlock()
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() {
+		t := time.NewTicker(wakePoll)
+		defer t.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-t.C:
+				if b, _ := os.ReadFile(p); string(b) != id {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		unlock, err := agent.LockState(p)
+		if err != nil {
+			return
+		}
+		defer unlock()
+		if b, _ := os.ReadFile(p); string(b) == id {
+			_ = os.Remove(p)
+		}
+	}, nil
+}
+
+// stopWaiter makes session's waiter exit; a newer session's waiter
+// (same agent, same repository) keeps running.
+func stopWaiter(p, session string) {
+	unlock, err := agent.LockState(p)
+	if err != nil {
+		return
+	}
+	defer unlock()
+	if b, _ := os.ReadFile(p); strings.HasPrefix(string(b), session+" ") {
+		_ = os.Remove(p)
+	}
+}
+
 // Run dispatches on in.Event and writes the hook's JSON answer to out.
 func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error {
 	if in.Event == "" {
@@ -105,8 +241,7 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 	if err != nil {
 		return nil // not in a git repository: nothing to coordinate
 	}
-	sum := sha256.Sum256([]byte(repo.Root))
-	statePath := agent.StatePath(h.StateDir, h.Token, "repo-"+hex.EncodeToString(sum[:6]))
+	statePath := h.statePath(repo)
 	unlock, err := agent.LockState(statePath)
 	if err != nil {
 		return err
@@ -130,6 +265,7 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 		err = h.stop(ctx, in, repo, &st, out)
 	case "SessionEnd":
 		err = h.sessionEnd(ctx, &st)
+		stopWaiter(statePath+wakeSuffix, in.SessionID)
 	}
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusNotFound {
@@ -279,7 +415,7 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	return json.NewEncoder(out).Encode(map[string]any{
 		"decision": "block",
 		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C)) +
-			"Before you stop: answer what is addressed to you in the Conclave room (messages.send), or say briefly why no answer is needed. Then stop.",
+			"Before you stop: answer what is addressed to you in the Conclave room (messages.send with reply_to = the message's #id), or say briefly why no answer is needed. Then stop.",
 	})
 }
 

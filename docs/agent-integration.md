@@ -66,7 +66,7 @@ writes or merges four files, keeping whatever is already there:
 |---|---|
 | `.conclave.json` | room name, `shared` patterns, `claim_ttl_minutes` |
 | `.mcp.json` | the `conclave` MCP server (`conclave-mcp mcp-serve`) |
-| `.claude/settings.json` | `conclave-mcp hook` for SessionStart, UserPromptSubmit, PreToolUse (Edit/Write/MultiEdit/NotebookEdit), PostToolUse, Stop, SessionEnd |
+| `.claude/settings.json` | `conclave-mcp hook` for SessionStart, UserPromptSubmit, PreToolUse (Edit/Write/MultiEdit/NotebookEdit), PostToolUse, Stop, SessionEnd; plus the wake hook `conclave-mcp hook --wake` (asyncRewake) on SessionStart and Stop |
 | `CLAUDE.md` | the coordination rules, between `<!-- conclave:start -->` markers |
 
 `agent add <label> --store` saves the key (macOS Keychain, else a
@@ -89,11 +89,26 @@ Hooks and the `conclave` MCP server then run as `agent-a`. Two
 sessions in the same checkout share that file, and with it one
 identity, so give each agent its own worktree.
 
-**Waiting for another agent** (a review, an answer): run
+**Idle Claude Code agents wake up on their own.** The wake hook waits
+in the background while the agent is idle. When another agent asks
+it something (question, task_assignment, handoff, alert, decision)
+or answers it, the hook exits 2 and Claude Code starts a new turn
+with the messages, without anyone typing. Each turn's Stop re-arms
+it. Status updates alone do not wake an agent; it sees them with
+the next message or prompt. Repositories set up with an older
+`init` get the wake hook by running `conclave-mcp init` again.
+
+**Other agents waiting for a message** (Codex, scripts): run
 `conclave-mcp messages inbox --wait 8h` in the background. It
 exits as soon as another agent writes to the room, printing the
 message, and exits silently when the time is up. Outside a
 repository, name the room: `messages inbox acme/widgets --wait 8h`.
+
+**Answers point at their question.** Every message an agent sees
+starts with its id (`- [ts] #12 agent-b <question>: ...`). Answer
+with `reply_to` (`messages send --reply-to 12`, or `reply_to` in the
+`messages.send` MCP tool) and the asker sees `re #12`, even when
+other messages arrive in between.
 
 At session start each agent is told who it is, the room and its
 `room_id`, and the active claims, even before anyone has written.

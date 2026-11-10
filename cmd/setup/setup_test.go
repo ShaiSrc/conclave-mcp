@@ -60,9 +60,14 @@ func TestWriteFiles_CreatesThenMergesIdempotently(t *testing.T) {
 	if pre := hooks["PreToolUse"].([]any); len(pre) != 2 || settings["model"] != "x" {
 		t.Errorf("PreToolUse must keep the Bash hook and add ours once: %v", pre)
 	}
-	for _, ev := range []string{"SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "SessionEnd"} {
-		if g, _ := hooks[ev].([]any); len(g) != 1 {
-			t.Errorf("%s: want one conclave hook, got %v", ev, hooks[ev])
+	for ev, want := range map[string]int{"SessionStart": 2, "UserPromptSubmit": 1, "PostToolUse": 1, "Stop": 2, "SessionEnd": 1} {
+		if g, _ := hooks[ev].([]any); len(g) != want {
+			t.Errorf("%s: want %d conclave hook groups, got %v", ev, want, hooks[ev])
+		}
+	}
+	for _, ev := range []string{"SessionStart", "Stop"} {
+		if !hasWake(hooks[ev].([]any)) {
+			t.Errorf("%s: no asyncRewake `hook --wake` entry: %v", ev, hooks[ev])
 		}
 	}
 	md, _ := os.ReadFile(filepath.Join(root, "CLAUDE.md"))
@@ -226,5 +231,37 @@ func TestAgentAdd_StoreFailureRevokesKey(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(*calls, "\n"), "DELETE /v1/keys/7") {
 		t.Errorf("unstored key not revoked: %v", *calls)
+	}
+}
+
+func hasWake(groups []any) bool {
+	for _, g := range groups {
+		for _, h := range g.(map[string]any)["hooks"].([]any) {
+			hm := h.(map[string]any)
+			if strings.Contains(hm["command"].(string), "conclave-mcp hook --wake") && hm["asyncRewake"] == true && hm["timeout"] != nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func TestWriteFiles_AddsWakeHookToAnOlderSetup(t *testing.T) {
+	// A repository set up by v0.2 has the plain hook only; re-running
+	// init adds the wake hook and leaves the rest alone.
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"conclave-mcp hook"}]}]}}`
+	if err := os.WriteFile(filepath.Join(root, ".claude", "settings.json"), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := WriteFiles(root, "acme/widgets"); err != nil {
+		t.Fatal(err)
+	}
+	stop := readJSONFile(t, filepath.Join(root, ".claude", "settings.json"))["hooks"].(map[string]any)["Stop"].([]any)
+	if len(stop) != 2 || !hasWake(stop) {
+		t.Errorf("Stop after re-running init: %v", stop)
 	}
 }

@@ -94,6 +94,22 @@ func TestFormat_ContentCannotForgeLines(t *testing.T) {
 	}
 }
 
+func TestFormat_ShowsIDAndReplyTo(t *testing.T) {
+	out := Format("r1", []Msg{
+		{ID: 12, Author: 9, TS: "t1", MessageType: "task_assignment", Content: "review please"},
+		{ID: 13, Author: 9, TS: "t2", MessageType: "answer", Content: "done",
+			Metadata: json.RawMessage(`{"reply_to":12,"mr":"!6"}`)},
+	}, map[int64]string{9: "peer"})
+	for _, want := range []string{"- [t1] #12 peer <task_assignment>: review please", `- [t2] #13 peer <answer> re #12 {"mr":"!6"}: done`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, `"reply_to"`) {
+		t.Errorf("reply_to shown twice:\n%s", out)
+	}
+}
+
 func TestStateRoundTrip(t *testing.T) {
 	p := StatePath(t.TempDir(), "tk_ABCDEFGHrest", "R")
 	if filepath.Base(p) != "inbox-ABCDEFGH-R.json" {

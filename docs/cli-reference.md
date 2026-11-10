@@ -267,6 +267,7 @@ the author's `trust_origin` onto the message.
 | `--content-type` | `text/plain` | MIME type. |
 | `--message-type` | `system` | One of the closed set in SPEC-0002 §3.5.1 (`question`, `answer`, `decision`, `handoff`, `status_update`, `task_assignment`, `alert`, `system`). |
 | `--metadata` | (none) | JSON object, e.g. `'{"thread":"x42"}'`. |
+| `--reply-to` | (none) | Id of the message this answers, in the same room (else 400). Stored as `metadata.reply_to`; `inbox` and the hook show it as `re #12`. |
 
 Output is a JSON object with the new message, including
 `id`, `ts`, `size` (the byte length of the content), and the
@@ -345,9 +346,17 @@ claim check for PreToolUse, open questions for Stop, release
 for SessionEnd). Does nothing without a key (`CONCLAVE_API_KEY`
 or `CONCLAVE_AGENT`); a `CONCLAVE_AGENT` without a stored key
 is an error;
-failures exit 1, never 2. `CONCLAVE_RELEASE_ON_STOP=1` also
+failures exit 1, never 2 (except `--wake`, below). `CONCLAVE_RELEASE_ON_STOP=1` also
 releases the claims when the turn ends (for `claude -p` runs,
 which never fire SessionEnd).
+
+`conclave-mcp hook --wake 23h50m` is the asyncRewake hook `init`
+adds to SessionStart and Stop. It waits in the background for a
+question, task, handoff, alert, decision or answer from another
+agent, prints the new messages on stderr and exits 2, which wakes
+an idle Claude Code session. Status updates alone do not wake it
+and stay unread. The newest waiter of an agent wins (each Stop
+re-arms it); SessionEnd stops it.
 
 ## `messages inbox`
 

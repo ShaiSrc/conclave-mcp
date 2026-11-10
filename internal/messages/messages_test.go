@@ -351,3 +351,65 @@ func TestMessages_ListBadSinceIs400(t *testing.T) {
 		t.Errorf("status %d, want 400", rec.Code)
 	}
 }
+
+func TestMessages_ReplyToIsCheckedAndKeptInMetadata(t *testing.T) {
+	r, db, owner, roomID := setupAs(t)
+	send := func(body string) (int, messageView) {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", strings.NewReader(body)))
+		var mv messageView
+		_ = json.Unmarshal(rec.Body.Bytes(), &mv)
+		return rec.Code, mv
+	}
+	code, q := send(`{"content":"review please","message_type":"task_assignment"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("question: status %d", code)
+	}
+	code, a := send(`{"content":"done","message_type":"answer","reply_to":` + itoa(q.ID) + `,"metadata":{"mr":"!6"}}`)
+	if code != http.StatusCreated {
+		t.Fatalf("reply: status %d", code)
+	}
+	var meta map[string]any
+	_ = json.Unmarshal(a.Metadata, &meta)
+	if meta["reply_to"] != float64(q.ID) || meta["mr"] != "!6" {
+		t.Errorf("reply metadata = %s, want reply_to %d merged with mr", a.Metadata, q.ID)
+	}
+	// list returns the stored metadata too
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages", nil))
+	if !strings.Contains(rec.Body.String(), `"reply_to":`+itoa(q.ID)) {
+		t.Errorf("list lost reply_to: %s", rec.Body.String())
+	}
+
+	other := seedRoom(t, db, owner, "other")
+	_, _ = db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, '2026-01-01T00:00:00.000000000Z', 'x', 'text/plain')`, other, owner)
+	var foreign int64
+	_ = db.QueryRowContext(context.Background(), `SELECT id FROM messages WHERE room_id = ?`, other).Scan(&foreign)
+	// metadata null with reply_to used to panic (nil map); big numbers
+	// in metadata must survive the merge unrounded.
+	if code, mv := send(`{"content":"x","reply_to":` + itoa(q.ID) + `,"metadata":null}`); code != http.StatusCreated || string(mv.Metadata) != `{"reply_to":`+itoa(q.ID)+`}` {
+		t.Errorf("metadata null: status %d, metadata %s", code, mv.Metadata)
+	}
+	if code, mv := send(`{"content":"x","reply_to":` + itoa(q.ID) + `,"metadata":{"big":9007199254740993}}`); code != http.StatusCreated || !strings.Contains(string(mv.Metadata), "9007199254740993") {
+		t.Errorf("big number: status %d, metadata %s", code, mv.Metadata)
+	}
+	_, gone := send(`{"content":"to be deleted"}`)
+	if _, err := db.Exec(`UPDATE messages SET deleted_at = '2026-01-01T00:00:00.000000000Z' WHERE id = ?`, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+	// reply_to inside metadata gets the same check as the field.
+	if code, _ := send(`{"content":"x","metadata":{"reply_to":999999}}`); code != http.StatusBadRequest {
+		t.Errorf("metadata.reply_to 999999: status %d, want 400", code)
+	}
+	if code, _ := send(`{"content":"x","metadata":{"reply_to":"abc"}}`); code != http.StatusBadRequest {
+		t.Errorf(`metadata.reply_to "abc": status %d, want 400`, code)
+	}
+	if code, mv := send(`{"content":"x","metadata":{"reply_to":` + itoa(q.ID) + `,"k":1}}`); code != http.StatusCreated || !strings.Contains(string(mv.Metadata), `"k":1`) {
+		t.Errorf("valid metadata.reply_to: status %d, metadata %s", code, mv.Metadata)
+	}
+	for _, bad := range []string{"0", "-1", "999999", itoa(foreign), itoa(gone.ID)} {
+		if code, _ := send(`{"content":"x","reply_to":` + bad + `}`); code != http.StatusBadRequest {
+			t.Errorf("reply_to %s: status %d, want 400", bad, code)
+		}
+	}
+}

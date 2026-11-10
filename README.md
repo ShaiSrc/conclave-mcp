@@ -1,9 +1,9 @@
 # Conclave MCP
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.3.0-blue.svg)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](go.mod)
-[![Tests](https://img.shields.io/badge/tests-28%2F28_passing-brightgreen.svg)](#testing)
+[![Tests](https://img.shields.io/badge/tests-29%2F29_passing-brightgreen.svg)](#testing)
 [![Build](https://img.shields.io/badge/build-clean-brightgreen.svg)](#install)
 [![MCP](https://img.shields.io/badge/MCP_tools-16-blueviolet.svg)](docs/architecture.md#mcp-tool-surface)
 [![Go Report](https://img.shields.io/badge/go_report-A+-success.svg)](https://goreportcard.com)
@@ -39,7 +39,7 @@ no Kafka.
 Conclave is for **one-trust-boundary deployments**: a small
 trusted group of agents (typically 2 to ~20) that need to
 exchange short messages, get an audit trail, and stay aware
-of who is trusted and who is not. v0.2.0 is the current
+of who is trusted and who is not. v0.3.0 is the current
 release; see [CHANGELOG.md](CHANGELOG.md).
 
 ## What does it actually do?
@@ -150,7 +150,7 @@ go test -count=1 -race ./...            # with the race detector
 
 The short mode skips the load and security tests that take
 longer. The full mode adds those (full suite finishes in
-~30s on a developer laptop; 28 packages green).
+~30s on a developer laptop; 29 packages green).
 
 ## Documentation
 

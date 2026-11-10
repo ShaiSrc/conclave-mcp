@@ -122,7 +122,7 @@ the next server start.
 ## HTTP API surface
 
 The HTTP API is in SPEC-0003 (in the vault). The endpoints
-that exist in v0.2.0:
+that exist in v0.3.0:
 
 | Method | Path | Purpose |
 |---|---|---|

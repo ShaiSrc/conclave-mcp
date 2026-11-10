@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os/exec"
@@ -30,7 +31,46 @@ type fake struct {
 	released  bool
 }
 
+// add appends a message from another agent; open event streams see it.
+func (f *fake) add(m agent.Msg) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.msgs = append(f.msgs, m)
+}
+
+// events streams the messages added after the subscription (SSE).
+func (f *fake) events(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	n := len(f.msgs)
+	f.mu.Unlock()
+	w.Header().Set("Content-Type", "text/event-stream")
+	fmt.Fprint(w, ": ok\n\n")
+	w.(http.Flusher).Flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(20 * time.Millisecond):
+		}
+		f.mu.Lock()
+		var next []agent.Msg
+		if len(f.msgs) > n {
+			next, n = append(next, f.msgs[n:]...), len(f.msgs)
+		}
+		f.mu.Unlock()
+		for _, m := range next {
+			b, _ := json.Marshal(m)
+			fmt.Fprintf(w, "event: message.created\ndata: %s\n\n", b)
+			w.(http.Flusher).Flush()
+		}
+	}
+}
+
 func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/v1/rooms/R/events" {
+		f.events(w, r)
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var body map[string]any
@@ -277,5 +317,121 @@ func TestInbox_ParallelHooksInjectOnce(t *testing.T) {
 	wg.Wait()
 	if n != 1 {
 		t.Errorf("message injected %d times, want exactly 1", n)
+	}
+}
+
+func (s *setup) wake(ctx context.Context, d time.Duration) (string, error) {
+	return s.wakeIn(ctx, "s1", d)
+}
+
+func (s *setup) wakeIn(ctx context.Context, session string, d time.Duration) (string, error) {
+	var errOut bytes.Buffer
+	err := s.h.Wake(ctx, agent.HookInput{Event: "Stop", Cwd: s.repo, SessionID: session}, d, &errOut)
+	return errOut.String(), err
+}
+
+func fastWakePoll(t *testing.T) {
+	old := wakePoll
+	wakePoll = 20 * time.Millisecond
+	t.Cleanup(func() { wakePoll = old })
+}
+
+func TestWake_QuestionWakesStatusDoesNot(t *testing.T) {
+	fastWakePoll(t)
+	s := newSetup(t)
+	s.run(map[string]any{"hook_event_name": "SessionStart"})
+	s.f.add(agent.Msg{ID: 5, Author: 2, TS: "t5", MessageType: "status_update", Content: "fyi: tests green"})
+
+	if out, err := s.wake(context.Background(), 300*time.Millisecond); err != nil || out != "" {
+		t.Fatalf("status update only: want no wake, got %q, %v", out, err)
+	}
+
+	time.AfterFunc(200*time.Millisecond, func() {
+		s.f.add(agent.Msg{ID: 6, Author: 2, TS: "t6", MessageType: "question", Content: "which file?"})
+	})
+	start := time.Now()
+	out, err := s.wake(context.Background(), 10*time.Second)
+	if !errors.Is(err, ErrWake) {
+		t.Fatalf("question: want ErrWake, got %v (out %q)", err, out)
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Errorf("woke after %v, want right after the question", time.Since(start))
+	}
+	for _, want := range []string{"fyi: tests green", "#6 agent-b <question>", "which file?", "reply_to"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("wake text lacks %q:\n%s", want, out)
+		}
+	}
+	if got := s.run(map[string]any{"hook_event_name": "UserPromptSubmit"}); got != "" {
+		t.Errorf("delivered messages came again on the next prompt: %s", got)
+	}
+}
+
+func TestWake_NewestWaiterAndSessionEndStopOlderOnes(t *testing.T) {
+	fastWakePoll(t)
+	s := newSetup(t)
+	s.run(map[string]any{"hook_event_name": "SessionStart"})
+
+	first := make(chan error, 1)
+	go func() { _, err := s.wake(context.Background(), 30*time.Second); first <- err }()
+	time.Sleep(200 * time.Millisecond)
+	second := make(chan error, 1)
+	go func() { _, err := s.wake(context.Background(), 30*time.Second); second <- err }()
+
+	select {
+	case err := <-first:
+		if err != nil {
+			t.Errorf("superseded waiter: want a quiet exit, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the older waiter kept running after a newer one started")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+	s.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": "s1"})
+	select {
+	case err := <-second:
+		if err != nil {
+			t.Errorf("waiter after SessionEnd: want a quiet exit, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("SessionEnd did not stop the waiter")
+	}
+}
+
+func TestWake_CreatesMissingStateDir(t *testing.T) {
+	// The SessionStart wake hook can run before any other hook created
+	// the cache dir.
+	fastWakePoll(t)
+	s := newSetup(t)
+	s.h.StateDir = filepath.Join(t.TempDir(), "not", "yet")
+	if out, err := s.wake(context.Background(), 200*time.Millisecond); err != nil || out != "" {
+		t.Fatalf("fresh state dir: want a quiet timeout, got %q, %v", out, err)
+	}
+}
+
+func TestWake_SessionEndStopsOnlyItsOwnSessionsWaiter(t *testing.T) {
+	// Same agent, two sessions in one repo: the older session ending
+	// must not stop the newer session's waiter.
+	fastWakePoll(t)
+	s := newSetup(t)
+	s.run(map[string]any{"hook_event_name": "SessionStart"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := s.wakeIn(ctx, "new", 30*time.Second); done <- err }()
+	time.Sleep(200 * time.Millisecond)
+
+	s.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": "old"})
+	select {
+	case err := <-done:
+		t.Fatalf("the old session's end stopped the new session's waiter (err %v)", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	s.run(map[string]any{"hook_event_name": "SessionEnd", "session_id": "new"})
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the new session's end did not stop its waiter")
 	}
 }

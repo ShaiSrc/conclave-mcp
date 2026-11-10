@@ -270,3 +270,40 @@ func TestList_SinceIsURLEscaped(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSend_ReplyTo(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 2})
+	}))
+	defer srv.Close()
+	oldOC := openClient
+	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
+		return client.New(client.Options{Server: srv.URL, Token: "stub"})
+	}
+	defer func() { openClient = oldOC }()
+	send := func(flags map[string]string) {
+		gotBody = nil
+		sub := newSendCmd()
+		for k, v := range flags {
+			if err := sub.Flags().Set(k, v); err != nil {
+				t.Fatal(err)
+			}
+		}
+		sub.SetOut(&bytes.Buffer{})
+		sub.SetContext(context.Background())
+		if err := sub.RunE(sub, []string{"01M72DWQRAZXY3X8HWGJ0QZGNW"}); err != nil {
+			t.Fatalf("err: %v", err)
+		}
+	}
+	send(map[string]string{"content": "done", "reply-to": "12"})
+	if gotBody["reply_to"] != float64(12) {
+		t.Errorf("--reply-to 12: body=%v", gotBody)
+	}
+	send(map[string]string{"content": "plain"})
+	if _, ok := gotBody["reply_to"]; ok {
+		t.Errorf("no --reply-to: body has reply_to: %v", gotBody)
+	}
+}

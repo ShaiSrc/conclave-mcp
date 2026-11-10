@@ -75,6 +75,11 @@ func main() {
 	}
 	// Hook failures always exit 1: exit 2 would make Claude Code block
 	// the user's prompt or the tool call.
+	// hook --wake exits 2 on purpose: an asyncRewake hook that exits 2
+	// wakes Claude; the messages are already on stderr.
+	if errors.Is(err, hook.ErrWake) {
+		os.Exit(2)
+	}
 	var hookErr *hook.Error
 	if errors.As(err, &hookErr) {
 		fmt.Fprintln(os.Stderr, "conclave-mcp hook:", err)
