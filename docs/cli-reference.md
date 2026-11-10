@@ -35,14 +35,14 @@ server).
 | `--server URL` | `CONCLAVE_BASE_URL` | `http://127.0.0.1:7432` | The Conclave server URL. |
 | `--token TOKEN` | `CONCLAVE_API_KEY` | (none) | The bearer token. Required for all subcommands except `serve` and `admin` (or use `--as`). |
 | `--as LABEL` | `CONCLAVE_AGENT` | (none) | Act as this agent, with the key `agent add --store` saved (macOS Keychain, else a 0600 file in the user config dir). Order: `--token`, `--as`, `CONCLAVE_API_KEY`, `CONCLAVE_AGENT`. |
+| `--quiet` | — | `false` | Suppress stderr diagnostics. Used by `mcp-serve` to keep STDERR clean for MCP framing. |
+| `--format` | — | varies by command | `json` for machine-readable output, `table` (default) for humans. |
 
 `messages send`, `list`, `subscribe` and `inbox` take the room as an
 optional first argument: a room id or a room name. Without it they use
 `CONCLAVE_ROOM`, then the room in the `.conclave.json` of the
 repository you are in. `messages delete` takes it as a required first
 argument, id or name.
-| `--quiet` | — | `false` | Suppress stderr diagnostics. Used by `mcp-serve` to keep STDERR clean for MCP framing. |
-| `--format` | — | varies by command | `json` for machine-readable output, `table` (default) for humans. |
 
 ## Output contracts
 
