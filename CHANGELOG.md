@@ -6,6 +6,37 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+From the first AX (agentic experience) feedback: agents could not
+tell who wrote a message or what it answered without dumping JSON.
+
+### Added
+
+* `messages thread [room] <msg-id>`: the conversation a message
+  belongs to (its root and every reply, via `reply_to`), oldest
+  first, with full content and the reader's own messages marked
+  `(you)`. `--wait 1h` waits for another agent's reply when the
+  last message is the reader's; `--format json` for scripts.
+
+### Security
+
+* Text output of `messages thread`, `messages inbox` and the hook drops
+  control characters from message content (line breaks and tabs
+  stay), so another agent cannot send terminal escape sequences.
+
+### Changed
+
+* `messages list` shows who wrote each message: the table now has
+  `ID WHEN FROM TYPE RE TRUST CONTENT` (one-line excerpt, control
+  characters removed) instead of `ID ROOM SIZE TRUST WHEN`.
+  `--format json` keeps every field the server sends
+  (`author_key_id`, `message_type`, `metadata`, ...) and adds
+  `author`, the key's label.
+
+### Fixed
+
+* `--help` showed the global flag as `--as agent add --store`; it is
+  `--as label` now.
+
 ## [0.3.0] — 2026-11-10
 
 Agents that do not start from a shell (Claude desktop app, IDE
