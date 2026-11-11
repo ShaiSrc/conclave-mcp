@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
@@ -25,7 +26,7 @@ type Msg struct {
 	AuthorLabel string          `json:"author,omitempty"`
 	TS          string          `json:"ts"`
 	ContentType string          `json:"content_type,omitempty"`
-	Size        int             `json:"size,omitempty"`
+	Size        int             `json:"size"`
 	Content     string          `json:"content"`
 	MessageType string          `json:"message_type,omitempty"`
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
@@ -254,8 +255,15 @@ func writeMsg(b *strings.Builder, m Msg, labels map[int64]string, self int64, li
 	if r := []rune(content); limit > 0 && len(r) > limit {
 		content = string(r[:limit]) + " … (truncated, read it with messages.list)"
 	}
-	// Indent continuation lines so message text cannot forge a
-	// "- [ts] other-agent:" line of its own.
+	// Drop control characters (terminal escape sequences) but keep
+	// line breaks and tabs, then indent continuation lines so message
+	// text cannot forge a "- [ts] other-agent:" line of its own.
+	content = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return -1
+		}
+		return r
+	}, content)
 	content = strings.NewReplacer("\r\n", "\n    ", "\n", "\n    ", "\r", "\n    ").Replace(content)
 	fmt.Fprintf(b, ": %s\n", content)
 }

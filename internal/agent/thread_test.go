@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -50,5 +51,22 @@ func TestReplyTo(t *testing.T) {
 		if got := ReplyTo(Msg{Metadata: json.RawMessage(meta)}); got != 0 {
 			t.Errorf("ReplyTo(%q) = %d, want 0", meta, got)
 		}
+	}
+}
+
+func TestFormatThread_DropsControlCharsKeepsLines(t *testing.T) {
+	out := FormatThread("r", []Msg{{ID: 1, Author: 2, Content: "a\x1b[31mb\x07\nc\td"}}, nil, 0)
+	if strings.ContainsAny(out, "\x1b\x07") {
+		t.Errorf("control characters in output: %q", out)
+	}
+	if !strings.Contains(out, ": a[31mb\n    c\td\n") {
+		t.Errorf("want line break and tab kept: %q", out)
+	}
+}
+
+func TestMsgJSONKeepsZeroSize(t *testing.T) {
+	b, _ := json.Marshal(Msg{ID: 1})
+	if !strings.Contains(string(b), `"size":0`) {
+		t.Errorf("size dropped: %s", b)
 	}
 }

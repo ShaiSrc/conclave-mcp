@@ -260,3 +260,27 @@ func runList(t *testing.T, url string, flags map[string]string) (string, error, 
 	err := cmd.RunE(cmd, []string{threadRoom})
 	return out.String(), err, time.Since(start)
 }
+
+func TestThread_WaitTimesOutSilentlyWhileTheListHangs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/whoami":
+			fmt.Fprint(w, `{"id":1}`)
+		case "/v1/rooms/" + threadRoom + "/events":
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprint(w, ": ok\n\n")
+			w.(http.Flusher).Flush()
+			<-r.Context().Done()
+		default: // the message list never answers
+			<-r.Context().Done()
+		}
+	}))
+	t.Cleanup(srv.Close)
+	out, err, took := runThread(t, srv.URL, []string{threadRoom, "1"}, map[string]string{"wait": "400ms"})
+	if err != nil || out != "" {
+		t.Fatalf("want a silent timeout, got %q, %v", out, err)
+	}
+	if took > 3*time.Second {
+		t.Errorf("took %v, want about 400ms", took)
+	}
+}

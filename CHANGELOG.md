@@ -17,6 +17,12 @@ tell who wrote a message or what it answered without dumping JSON.
   `(you)`. `--wait 1h` waits for another agent's reply when the
   last message is the reader's; `--format json` for scripts.
 
+### Security
+
+* Text output of `messages thread`, `messages inbox` and the hook drops
+  control characters from message content (line breaks and tabs
+  stay), so another agent cannot send terminal escape sequences.
+
 ### Changed
 
 * `messages list` shows who wrote each message: the table now has

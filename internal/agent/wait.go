@@ -64,6 +64,10 @@ func Await(ctx context.Context, c *client.Client, roomID string, wait time.Durat
 			}
 		}
 		self, done, err := check(ctx)
+		if err != nil && wait > 0 && ctx.Err() != nil {
+			stream.Close()
+			return false, nil // time ran out during the check
+		}
 		if err != nil || done || wait <= 0 {
 			stream.Close()
 			return done, err
