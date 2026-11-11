@@ -181,3 +181,20 @@ func TestRootCmd_AsFlagHelpNamesTheLabel(t *testing.T) {
 		t.Errorf("help should show --as label:\n%s", out.String())
 	}
 }
+
+func TestRootCmd_PromptKeepsAnExplicitServer(t *testing.T) {
+	t.Setenv("CONCLAVE_BASE_URL", "http://elsewhere:1")
+	for _, server := range []string{"http://127.0.0.1:9000", "http://127.0.0.1:7432"} {
+		var out bytes.Buffer
+		root := newRootCmd()
+		root.SetOut(&out)
+		root.SetErr(&bytes.Buffer{})
+		root.SetArgs([]string{"--server", server, "prompt", "a1", "acme/widgets"})
+		if err := root.Execute(); err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(out.String(), "conclave-mcp --server "+server+" --as a1 messages inbox acme/widgets") {
+			t.Errorf("--server %s not kept:\n%s", server, out.String())
+		}
+	}
+}
