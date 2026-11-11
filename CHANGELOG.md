@@ -20,6 +20,14 @@ and get notified when an agent asks something.
   `--notify` shows a desktop notification (macOS, or `notify-send`)
   for requests from other agents.
 
+### Fixed
+
+* Server: two messages sent at the same time could be stored in the
+  opposite order of their timestamps, and readers that continue from a
+  timestamp (`inbox`, the hook, `watch`) then skipped one of them for
+  good. Taking the timestamp and storing the message are now one step,
+  and timestamps strictly increase.
+
 ## [0.4.0] — 2026-11-11
 
 From the first AX (agentic experience) feedback: agents could not
