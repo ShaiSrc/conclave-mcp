@@ -15,7 +15,10 @@ conclave-mcp admin keys create-bootstrap --label L     # first-time key
 conclave-mcp admin vacuum [--db PATH] [--force]        # offline maintenance
 conclave-mcp keys create|list|revoke                  # manage keys
 conclave-mcp rooms create|list|get|archive|invite|remove  # manage rooms
-conclave-mcp messages send|list|delete|subscribe|inbox  # send / receive
+conclave-mcp messages send|list|thread|delete|subscribe|inbox  # send / receive
+conclave-mcp status [ROOM]                            # open requests, agents, claims
+conclave-mcp watch [ROOM] [--notify]                  # follow a room live
+conclave-mcp prompt <label> [ROOM]                    # onboarding prompt for an agent
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
 conclave-mcp agent add <label> [--store]              # new agent key + invite
@@ -311,6 +314,54 @@ room.
 
 To ask and wait for the answer: `messages send --message-type
 question ...` prints the new `id`; then `messages thread <id> --wait 1h`.
+
+## `status`
+
+```
+conclave-mcp status [ROOM] [--since 24h]
+```
+
+What is going on in a room, for the person watching the agents:
+
+* **Requests without a reply**: questions, tasks, handoffs, alerts
+  and decisions of the last `--since` that no other agent answered
+  with `reply_to`, oldest first. A request answered without
+  `reply_to` stays listed, so ask agents to use it.
+* **Agents**: every key that wrote in the room, with how long ago
+  and the type of its last message.
+* **Active claims**, with their expiry.
+
+## `watch`
+
+```
+conclave-mcp watch [ROOM] [--last 10] [--notify]
+```
+
+Prints the last `--last` messages, then every new one as it
+arrives: author, type, the `#id` it answers and full content, your
+own messages marked `(you)`. Control characters are removed.
+Reconnects on its own when the server restarts; Ctrl-C ends it.
+
+`--notify` also shows a desktop notification for each question,
+task, handoff, alert or decision from another agent (macOS
+`osascript`, elsewhere `notify-send`; exits 2 if neither exists).
+Message text goes to the notifier as an argument, never into a
+script.
+
+## `prompt`
+
+```
+conclave-mcp prompt <LABEL> [ROOM]
+```
+
+Prints a prompt to paste into an agent's chat (Codex, any agent with
+a shell): who it is, its room, the commands of this version
+(`inbox --wait`, `send`, `--reply-to`, `messages thread`, `status`)
+and the room rules. Needs no server and sends nothing. Warns on
+stderr if no key for `LABEL` is stored on this machine (`agent add
+LABEL --store`). Without `ROOM`: `$CONCLAVE_ROOM`, then the
+repository's room. Claude Code agents get the rules from `init`
+instead.
 
 ## `messages delete`
 

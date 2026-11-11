@@ -72,3 +72,23 @@ func TestMsgJSONKeepsZeroSize(t *testing.T) {
 		t.Errorf("size dropped: %s", b)
 	}
 }
+
+func TestUnanswered(t *testing.T) {
+	q := func(id, author int64, typ string, to int64) Msg {
+		m := reply(id, to)
+		m.Author, m.MessageType = author, typ
+		return m
+	}
+	msgs := []Msg{
+		q(1, 2, "question", 0),        // open
+		q(2, 1, "question", 0),        // answered by #3
+		q(3, 2, "answer", 2),          //
+		q(4, 2, "task_assignment", 0), // only its author replied: still open
+		q(5, 2, "status_update", 4),   //
+		q(6, 1, "status_update", 0),   // not a request
+		q(7, 1, "alert", 0),           // open
+	}
+	if got := ids(Unanswered(msgs)); !reflect.DeepEqual(got, []int64{1, 4, 7}) {
+		t.Errorf("Unanswered = %v, want [1 4 7]", got)
+	}
+}
