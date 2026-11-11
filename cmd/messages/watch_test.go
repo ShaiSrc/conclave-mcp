@@ -24,8 +24,11 @@ type syncBuf struct {
 	b  bytes.Buffer
 }
 
+// Write appends p under the lock.
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
-func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
+
+// String returns what was written so far.
+func (s *syncBuf) String() string { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
 // watchAPI: two old messages. Once watch is subscribed, #3 (agent-b's
 // question) and #4 (our alert) are stored, but the stream carries
