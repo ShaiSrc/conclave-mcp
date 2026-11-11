@@ -40,7 +40,9 @@ type Service struct {
 	// stampMu makes taking a timestamp and inserting one step, and
 	// lastTS keeps timestamps strictly increasing, so ts order is
 	// insert order and a reader's `since` cursor never passes a
-	// message that is not stored yet.
+	// message that is not stored yet. lastTS starts from the newest
+	// stored ts, so a restart with a clock that went back keeps the
+	// order too.
 	// ponytail: one lock for all rooms; per-room locks if send
 	// throughput ever matters.
 	stampMu sync.Mutex
@@ -263,6 +265,12 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.stampMu.Lock()
+	if s.lastTS.IsZero() { // first send since start: continue after what is stored
+		var newest sql.NullString
+		if err := s.DB.QueryRowContext(r.Context(), `SELECT MAX(ts) FROM messages`).Scan(&newest); err == nil && newest.Valid {
+			s.lastTS, _ = time.Parse(time.RFC3339Nano, newest.String)
+		}
+	}
 	t := clock().UTC()
 	if !t.After(s.lastTS) {
 		t = s.lastTS.Add(time.Nanosecond) // ts has nanosecond precision

@@ -489,3 +489,18 @@ func TestMessages_TimestampsAreUniqueWithinOneInstant(t *testing.T) {
 		t.Errorf("timestamps: %v, want strictly increasing", ts)
 	}
 }
+
+func TestMessages_TimestampsStayAboveStoredOnesAfterARestart(t *testing.T) {
+	// A fresh Service (a restarted server) whose clock is behind the
+	// newest stored message must still stamp after it.
+	r, db, keyID, roomID := setupAs(t)
+	const stored = "2099-01-01T00:00:00.000000000Z"
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, trust_origin)
+		VALUES (?, ?, ?, 'from before the restart', 'text/plain', 'system', 'internal')`, roomID, keyID, stored); err != nil {
+		t.Fatal(err)
+	}
+	sendAs(t, r, roomID, "after")
+	if ts := tsByID(t, db, roomID); len(ts) != 2 || !(ts[1] > stored) {
+		t.Errorf("timestamps: %v, want the new one after %s", ts, stored)
+	}
+}
