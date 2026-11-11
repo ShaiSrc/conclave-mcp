@@ -92,3 +92,12 @@ func TestUnanswered(t *testing.T) {
 		t.Errorf("Unanswered = %v, want [1 4 7]", got)
 	}
 }
+
+func TestWhoIsOneCleanLine(t *testing.T) {
+	if got := Who(Msg{Author: 1}, map[int64]string{1: "a\x1b[31m\nb"}); got != "a [31m b" {
+		t.Errorf("Who = %q", got)
+	}
+	if got := OneLine(" x\t\ny\x07 "); got != "x y" {
+		t.Errorf("OneLine = %q", got)
+	}
+}

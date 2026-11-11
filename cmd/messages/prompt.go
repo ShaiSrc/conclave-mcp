@@ -99,11 +99,19 @@ the repository you are in.`,
 			if _, err := storedKey(label); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "conclave-mcp: no stored key for %s on this machine; create it with: conclave-mcp agent add %s --store\n", label, label)
 			}
+			cm := "conclave-mcp "
+			server, _ := cmd.Flags().GetString("server") // root's persistent flag
+			if server == "" {
+				server = os.Getenv("CONCLAVE_BASE_URL")
+			}
+			if server != "" && server != "http://127.0.0.1:7432" {
+				cm += "--server " + shellQuote(server) + " "
+			}
 			return promptText.Execute(cmd.OutOrStdout(), map[string]string{
 				"Label": label,
 				"Room":  room,
 				"Q":     shellQuote(room),
-				"CM":    "conclave-mcp --as " + label,
+				"CM":    cm + "--as " + label,
 			})
 		},
 	}

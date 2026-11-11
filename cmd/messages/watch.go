@@ -18,23 +18,29 @@ import (
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
 
-// watchRetry is the pause before reconnecting after an error.
-var watchRetry = 5 * time.Second
+// watchRetry is the pause before reconnecting after an error;
+// notifyTimeout bounds one notification.
+var (
+	watchRetry    = 5 * time.Second
+	notifyTimeout = 10 * time.Second
+)
 
 // notify shows a desktop notification. Title and body go to the
 // notifier as arguments, never into a script, so message text cannot
 // run anything.
-var notify = func(title, body string) error {
+var notify = func(ctx context.Context, title, body string) error {
 	if err := canNotify(); err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(ctx, notifyTimeout)
+	defer cancel()
 	if runtime.GOOS == "darwin" {
-		return exec.Command("osascript",
+		return exec.CommandContext(ctx, "osascript",
 			"-e", "on run argv",
 			"-e", "display notification (item 2 of argv) with title (item 1 of argv)",
 			"-e", "end run", title, body).Run()
 	}
-	return exec.Command("notify-send", "--", title, body).Run()
+	return exec.CommandContext(ctx, "notify-send", "--", title, body).Run()
 }
 
 // canNotify reports whether this machine has a notifier.
@@ -103,7 +109,7 @@ agent.
 					fmt.Fprint(out, agent.Line(m, labels, me.SelfID))
 					if live && flagNotify && agent.Actionable(m) && m.Author != me.SelfID {
 						title := fmt.Sprintf("Conclave: %s <%s>", agent.Who(m, labels), m.MessageType)
-						if err := notify(title, excerpt(m.Content, 200)); err != nil {
+						if err := notify(ctx, title, excerpt(m.Content, 200)); err != nil {
 							fmt.Fprintf(errOut, "conclave-mcp watch: notification failed: %v\n", err)
 						}
 					}
@@ -116,7 +122,7 @@ agent.
 				}
 				fmt.Fprintf(errOut, "Watching room %s, Ctrl-C to stop.\n", roomName(ctx, c, roomID))
 				for {
-					err := follow(ctx, c, roomID, since, func(m agent.Msg) { show(m, true) })
+					err := follow(ctx, c, roomID, func() string { return since }, func(m agent.Msg) { show(m, true) })
 					if ctx.Err() != nil {
 						return nil
 					}
@@ -137,27 +143,27 @@ agent.
 	return cmd
 }
 
-// follow subscribes once, reads what arrived since `since`, then
-// hands every new message to show until the stream ends (the server
-// ends it after its wait limit; the caller subscribes again).
-func follow(ctx context.Context, c *client.Client, roomID, since string, show func(agent.Msg)) error {
+// follow subscribes once and shows what is stored after since(),
+// again after every event, until the stream ends (the server ends it
+// after its wait limit; the caller subscribes again). An event is
+// only a trigger: the server drops events for a slow reader, so the
+// messages always come from storage, which has no gaps.
+func follow(ctx context.Context, c *client.Client, roomID string, since func() string, show func(agent.Msg)) error {
 	stream, err := agent.Subscribe(ctx, c, roomID, 5*time.Minute)
 	if err != nil {
 		return err
 	}
 	defer stream.Close()
-	missed, err := agent.ListAll(ctx, c, roomID, since)
-	if err != nil {
-		return err
-	}
-	for _, m := range missed {
-		show(m)
-	}
 	for {
-		m, ok, err := stream.Next()
-		if !ok {
+		msgs, err := agent.ListAll(ctx, c, roomID, since())
+		if err != nil {
 			return err
 		}
-		show(m)
+		for _, m := range msgs {
+			show(m)
+		}
+		if _, ok, err := stream.Next(); !ok {
+			return err
+		}
 	}
 }

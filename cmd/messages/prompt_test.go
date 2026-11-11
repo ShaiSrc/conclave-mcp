@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-func runPrompt(t *testing.T, args []string, stored bool) (string, string, error) {
+func runPrompt(t *testing.T, args []string, stored bool, server ...string) (string, string, error) {
 	t.Helper()
 	old := storedKey
 	storedKey = func(string) (string, error) {
@@ -19,6 +19,10 @@ func runPrompt(t *testing.T, args []string, stored bool) (string, string, error)
 	t.Cleanup(func() { storedKey = old })
 	var out, errOut bytes.Buffer
 	cmd := NewPromptCmd()
+	cmd.Flags().String("server", "", "") // a persistent flag of the root command
+	if len(server) > 0 {
+		_ = cmd.Flags().Set("server", server[0])
+	}
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 	err := cmd.RunE(cmd, args)
@@ -67,5 +71,22 @@ func TestPrompt_RoomFromEnvAndBadLabel(t *testing.T) {
 	}
 	if _, _, err := runPrompt(t, []string{"../x", "r"}, true); err == nil {
 		t.Error("want an error for a bad label")
+	}
+}
+
+func TestPrompt_KeepsAnExplicitServer(t *testing.T) {
+	t.Setenv("CONCLAVE_BASE_URL", "")
+	out, _, err := runPrompt(t, []string{"a1", "r"}, true, "http://127.0.0.1:9000")
+	if err != nil || !strings.Contains(out, "conclave-mcp --server http://127.0.0.1:9000 --as a1 messages inbox r --wait 8h") {
+		t.Fatalf("server not kept (%v):\n%s", err, out)
+	}
+	out, _, _ = runPrompt(t, []string{"a1", "r"}, true)
+	if strings.Contains(out, "--server") {
+		t.Errorf("default server should not be spelled out:\n%s", out)
+	}
+	t.Setenv("CONCLAVE_BASE_URL", "http://host with space:1")
+	out, _, _ = runPrompt(t, []string{"a1", "r"}, true)
+	if !strings.Contains(out, "--server 'http://host with space:1' --as a1") {
+		t.Errorf("env server not kept and quoted:\n%s", out)
 	}
 }

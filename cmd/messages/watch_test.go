@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -25,10 +27,17 @@ type syncBuf struct {
 func (s *syncBuf) Write(p []byte) (int, error) { s.mu.Lock(); defer s.mu.Unlock(); return s.b.Write(p) }
 func (s *syncBuf) String() string              { s.mu.Lock(); defer s.mu.Unlock(); return s.b.String() }
 
-// watchAPI: two old messages; the event stream then delivers a
-// question from agent-b (#3) and a status update from us (#4).
+// watchAPI: two old messages. Once watch is subscribed, #3 (agent-b's
+// question) and #4 (our alert) are stored, but the stream carries
+// only #4's event, as when the server drops events for a slow reader.
 func watchAPI(t *testing.T) string {
 	t.Helper()
+	var mu sync.Mutex
+	stored := []string{
+		`{"id":1,"author_key_id":2,"ts":"2026-11-11T10:00:00Z","message_type":"question","content":"old one"}`,
+		`{"id":2,"author_key_id":1,"ts":"2026-11-11T10:01:00Z","content":"old two"}`,
+	}
+	tsOf := func(m string) string { return m[strings.Index(m, `"ts":"`)+6 : strings.Index(m, `"ts":"`)+26] }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/whoami":
@@ -36,20 +45,29 @@ func watchAPI(t *testing.T) string {
 		case "/v1/keys":
 			fmt.Fprint(w, `{"keys":[{"id":1,"label":"agent-a"},{"id":2,"label":"agent-b"}]}`)
 		case "/v1/rooms/" + threadRoom + "/messages":
-			if r.URL.Query().Get("since") != "" {
-				fmt.Fprint(w, `{"messages":[]}`)
-				return
+			since := r.URL.Query().Get("since")
+			mu.Lock()
+			var out []string
+			for _, m := range stored {
+				if tsOf(m) > since {
+					out = append(out, m)
+				}
 			}
-			fmt.Fprint(w, `{"messages":[
-				{"id":1,"author_key_id":2,"ts":"2026-11-11T10:00:00Z","message_type":"question","content":"old one"},
-				{"id":2,"author_key_id":1,"ts":"2026-11-11T10:01:00Z","content":"old two"}]}`)
+			mu.Unlock()
+			fmt.Fprintf(w, `{"messages":[%s]}`, strings.Join(out, ","))
 		case "/v1/rooms/" + threadRoom + "/events":
 			w.Header().Set("Content-Type", "text/event-stream")
 			fmt.Fprint(w, ": ok\n\n")
-			// #2 again: already shown, must not repeat.
-			fmt.Fprint(w, "event: message.created\ndata: {\"id\":2,\"author_key_id\":1,\"ts\":\"2026-11-11T10:01:00Z\",\"content\":\"old two\"}\n\n")
-			fmt.Fprint(w, "event: message.created\ndata: {\"id\":3,\"author_key_id\":2,\"ts\":\"2026-11-11T10:02:00Z\",\"message_type\":\"question\",\"content\":\"Port\\nwhich one?\",\"metadata\":{\"reply_to\":2}}\n\n")
-			fmt.Fprint(w, "event: message.created\ndata: {\"id\":4,\"author_key_id\":1,\"ts\":\"2026-11-11T10:03:00Z\",\"message_type\":\"alert\",\"content\":\"mine\"}\n\n")
+			w.(http.Flusher).Flush()
+			time.Sleep(200 * time.Millisecond) // after watch's catch-up read
+			mu.Lock()
+			if len(stored) == 2 {
+				stored = append(stored,
+					`{"id":3,"author_key_id":2,"ts":"2026-11-11T10:02:00Z","message_type":"question","content":"Port\nwhich one?","metadata":{"reply_to":2}}`,
+					`{"id":4,"author_key_id":1,"ts":"2026-11-11T10:03:00Z","message_type":"alert","content":"mine"}`)
+			}
+			mu.Unlock()
+			fmt.Fprint(w, "event: message.created\ndata: {\"id\":4,\"author_key_id\":1,\"ts\":\"2026-11-11T10:03:00Z\"}\n\n")
 			w.(http.Flusher).Flush()
 			<-r.Context().Done()
 		default:
@@ -69,7 +87,7 @@ func TestWatch_BacklogThenLiveWithNotifications(t *testing.T) {
 	}
 	var mu sync.Mutex
 	var notes []string
-	notify = func(title, body string) error {
+	notify = func(_ context.Context, title, body string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		notes = append(notes, title+" | "+body)
@@ -113,5 +131,25 @@ func TestWatch_BacklogThenLiveWithNotifications(t *testing.T) {
 	defer mu.Unlock()
 	if len(notes) != 1 || !strings.Contains(notes[0], "agent-b") || !strings.Contains(notes[0], "question") || !strings.Contains(notes[0], "Port which one?") {
 		t.Errorf("want one notification for #3 only, got %q", notes)
+	}
+}
+
+func TestNotify_IsBounded(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"osascript", "notify-send"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := notifyTimeout
+	notifyTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { notifyTimeout = old })
+	start := time.Now()
+	if err := notify(context.Background(), "t", "b"); err == nil {
+		t.Error("want an error from a notifier that hangs")
+	}
+	if took := time.Since(start); took > 3*time.Second {
+		t.Errorf("notify blocked for %v", took)
 	}
 }
