@@ -8,6 +8,7 @@ import (
 	"testing"
 )
 
+// reply is message id, answering to (0: a new thread).
 func reply(id, to int64) Msg {
 	m := Msg{ID: id}
 	if to != 0 {
@@ -16,6 +17,7 @@ func reply(id, to int64) Msg {
 	return m
 }
 
+// ids lists the messages' ids.
 func ids(ms []Msg) []int64 {
 	var out []int64
 	for _, m := range ms {

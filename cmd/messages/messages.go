@@ -376,6 +376,8 @@ func newListCmd() *cobra.Command {
 	return cmd
 }
 
+// renderMessageList writes msgs as a table (author labels from
+// labels) or as a JSON array with every field plus the author label.
 func renderMessageList(format string, msgs []agent.Msg, labels map[int64]string, out io.Writer) error {
 	switch format {
 	case "json":

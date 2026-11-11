@@ -67,6 +67,8 @@ func threadAPI(t *testing.T) (url string, release chan struct{}) {
 	return srv.URL, release
 }
 
+// runThread runs `messages thread` against url and returns its
+// output, error and duration.
 func runThread(t *testing.T, url string, args []string, flags map[string]string) (string, error, time.Duration) {
 	t.Helper()
 	oldOC := openClient
@@ -240,6 +242,7 @@ func TestList_JSONKeepsAllFields(t *testing.T) {
 	}
 }
 
+// runList runs `messages list` in threadRoom against url.
 func runList(t *testing.T, url string, flags map[string]string) (string, error, time.Duration) {
 	t.Helper()
 	oldOC := openClient

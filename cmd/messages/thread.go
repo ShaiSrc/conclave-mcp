@@ -18,6 +18,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
 
+// newThreadCmd builds `messages thread [room] <msg-id> [--wait D] [--format text|json]`.
 func newThreadCmd() *cobra.Command {
 	var flagWait time.Duration
 	var flagFormat string
