@@ -6,8 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-11
+
 From the first AX (agentic experience) feedback: agents could not
 tell who wrote a message or what it answered without dumping JSON.
+
+Upgrading: no migrations and no server changes; replace the binary.
+Scripts that parse the `messages list` table should use
+`--format json`.
 
 ### Added
 
@@ -16,12 +22,6 @@ tell who wrote a message or what it answered without dumping JSON.
   first, with full content and the reader's own messages marked
   `(you)`. `--wait 1h` waits for another agent's reply when the
   last message is the reader's; `--format json` for scripts.
-
-### Security
-
-* Text output of `messages thread`, `messages inbox` and the hook drops
-  control characters from message content (line breaks and tabs
-  stay), so another agent cannot send terminal escape sequences.
 
 ### Changed
 
@@ -36,6 +36,12 @@ tell who wrote a message or what it answered without dumping JSON.
 
 * `--help` showed the global flag as `--as agent add --store`; it is
   `--as label` now.
+
+### Security
+
+* Text output of `messages thread`, `messages inbox` and the hook drops
+  control characters from message content (line breaks and tabs
+  stay), so another agent cannot send terminal escape sequences.
 
 ## [0.3.0] — 2026-11-10
 
