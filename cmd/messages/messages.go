@@ -7,6 +7,7 @@
 //	conclave-mcp messages delete <room> <msg-id>
 //	conclave-mcp messages subscribe [room] [--wait SECONDS] [--format json|table]
 //	conclave-mcp messages inbox [room] [--wait DURATION]
+//	conclave-mcp messages thread [room] <msg-id> [--wait DURATION] [--format text|json]
 //
 // [room] is a room id or name; without it, CONCLAVE_ROOM, then the
 // room in the repository's .conclave.json (agent.RoomID).
@@ -27,7 +28,9 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"text/tabwriter"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -66,6 +69,7 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newDeleteCmd())
 	cmd.AddCommand(newSubscribeCmd())
 	cmd.AddCommand(newInboxCmd())
+	cmd.AddCommand(newThreadCmd())
 	return cmd
 }
 
@@ -101,8 +105,8 @@ type sendResponse struct {
 }
 
 type listResponse struct {
-	Messages  []msgView `json:"messages"`
-	NextSince string    `json:"next_since"`
+	Messages  []agent.Msg `json:"messages"`
+	NextSince string      `json:"next_since"`
 }
 
 // openClient is a seam for tests. The default opens from cmd flags;
@@ -361,7 +365,7 @@ func newListCmd() *cobra.Command {
 				if status != http.StatusOK {
 					return fmt.Errorf("expected 200, got %d", status)
 				}
-				return renderMessageList(flagFormat, resp, out)
+				return renderMessageList(flagFormat, resp.Messages, agent.Labels(ctx, c), out)
 			})
 		},
 	}
@@ -372,27 +376,53 @@ func newListCmd() *cobra.Command {
 	return cmd
 }
 
-func renderMessageList(format string, resp listResponse, out io.Writer) error {
+func renderMessageList(format string, msgs []agent.Msg, labels map[int64]string, out io.Writer) error {
 	switch format {
 	case "json":
 		// Per CLI tests, --format=json emits just the
 		// messages array. The listResponse wrapper is an
 		// HTTP-level concept; the CLI surface is a flat
 		// list of messages for piping into `jq`.
+		for i := range msgs {
+			msgs[i].AuthorLabel = labels[msgs[i].Author]
+		}
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
-		return enc.Encode(resp.Messages)
+		return enc.Encode(msgs)
 	case "table", "":
 		w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "ID	ROOM	SIZE	TRUST	WHEN")
-		for _, m := range resp.Messages {
-			fmt.Fprintf(w, "%d	%s	%d	%s	%s\n",
-				m.ID, m.RoomID, m.Size, m.TrustOrigin, m.TS)
+		fmt.Fprintln(w, "ID\tWHEN\tFROM\tTYPE\tRE\tTRUST\tCONTENT")
+		for _, m := range msgs {
+			typ, re := "-", "-"
+			if m.MessageType != "" {
+				typ = m.MessageType
+			}
+			if r := agent.ReplyTo(m); r > 0 {
+				re = fmt.Sprintf("#%d", r)
+			}
+			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				m.ID, m.TS, agent.Who(m, labels), typ, re, m.TrustOrigin, excerpt(m.Content, 50))
 		}
 		return w.Flush()
 	default:
 		return fmt.Errorf("unknown --format %q (want json or table)", format)
 	}
+}
+
+// excerpt is s on one line, without control characters (no escape
+// sequences from other agents reach the terminal), cut after n runes.
+// The full text: messages thread, or --format json.
+func excerpt(s string, n int) string {
+	s = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)), " ")
+	if r := []rune(s); len(r) > n {
+		return string(r[:n-1]) + "…"
+	}
+	return s
 }
 
 // ---------- delete ----------

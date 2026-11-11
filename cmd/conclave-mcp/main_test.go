@@ -167,3 +167,17 @@ func TestRootCmd_RoomsExitCodePropagates(t *testing.T) {
 		t.Errorf("rooms.ExitCode(err)=%d, want 2 (err=%v)", got, err)
 	}
 }
+
+func TestRootCmd_AsFlagHelpNamesTheLabel(t *testing.T) {
+	var out bytes.Buffer
+	root := newRootCmd()
+	root.SetOut(&out)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	// A backticked phrase in a flag's usage becomes its value name.
+	if !strings.Contains(out.String(), "--as label") {
+		t.Errorf("help should show --as label:\n%s", out.String())
+	}
+}

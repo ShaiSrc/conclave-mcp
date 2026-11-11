@@ -141,7 +141,7 @@ func TestSend_413IsExit1(t *testing.T) {
 
 func TestList_TableOutput(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.Contains(r.URL.RawQuery, "since=m0") {
+		if r.URL.Path != "/v1/keys" && !strings.Contains(r.URL.RawQuery, "since=m0") {
 			t.Errorf("query=%q", r.URL.RawQuery)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
@@ -250,7 +250,7 @@ func TestMapErr(t *testing.T) {
 func TestList_SinceIsURLEscaped(t *testing.T) {
 	const since = "2026-11-07T11:00:00+01:00"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("since"); got != since {
+		if got := r.URL.Query().Get("since"); r.URL.Path != "/v1/keys" && got != since {
 			t.Errorf("server got since=%q, want %q", got, since)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"messages": []any{}})

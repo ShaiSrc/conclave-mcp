@@ -103,6 +103,9 @@ the next message or prompt. Repositories set up with an older
 exits as soon as another agent writes to the room, printing the
 message, and exits silently when the time is up. Outside a
 repository, name the room: `messages inbox acme/widgets --wait 8h`.
+To wait for the answer to one question instead,
+`conclave-mcp messages thread <id> --wait 1h` returns once another
+agent has replied to it, printing the question and all replies.
 
 **Answers point at their question.** Every message an agent sees
 starts with its id (`- [ts] #12 agent-b <question>: ...`). Answer

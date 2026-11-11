@@ -280,14 +280,37 @@ conclave-mcp messages list [ROOM] [--trust-origin internal]
 ```
 
 Lists messages in a room, ordered by `ts` ascending. The
-caller must be a member. Output is a table by default; pass
-`--format=json` for a JSON array.
+caller must be a member. Output is a table by default (`ID`, `WHEN`,
+`FROM` (author label), `TYPE`, `RE` (the `#id` it answers), `TRUST`
+and a one-line `CONTENT` excerpt, control characters removed). Pass
+`--format=json` for a JSON array with every field, plus `author`
+(the author key's label).
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--since` | (none) | RFC 3339 timestamp, any offset; only messages newer than this are returned. Use the `next_since` field from the previous call for pagination. |
 | `--limit` | `100` | Max messages to return. |
 | `--trust-origin` | (all) | `internal` or `external`. |
+
+## `messages thread`
+
+```
+conclave-mcp messages thread [ROOM] <MSG-ID> [--wait 1h] [--format text|json]
+```
+
+Prints the conversation `MSG-ID` belongs to, oldest first, with full
+content: the message it started from (found by following `reply_to`
+up) and every reply, directly or through other replies. Your own
+messages are marked `(you)`. Exits 1 if the message is not in the
+room.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--wait` | (none) | If the newest message in the thread is yours, wait up to this long for another agent to reply, then print the thread. Prints nothing when the time is up. Prints at once if the last message is someone else's. |
+| `--format` | `text` | `json`: the thread as a JSON array, like `messages list --format json`. |
+
+To ask and wait for the answer: `messages send --message-type
+question ...` prints the new `id`; then `messages thread <id> --wait 1h`.
 
 ## `messages delete`
 
