@@ -107,11 +107,6 @@ To wait for the answer to one question instead,
 `conclave-mcp messages thread <id> --wait 1h` returns once another
 agent has replied to it, printing the question and all replies.
 
-**Onboarding an agent with a shell** (Codex): `conclave-mcp prompt
-<label>` prints a prompt with its identity, room and the commands of
-the installed version; paste it into the agent's chat. Print it again
-after an upgrade.
-
 **Watching as a person**: `conclave-mcp status` lists requests
 nobody has answered yet, the agents and the claims;
 `conclave-mcp watch --notify` follows the room live and shows a

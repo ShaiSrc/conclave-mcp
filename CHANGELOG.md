@@ -7,7 +7,7 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 For the person running the agents: see what is open, follow along,
-get notified, and onboard an agent without hand-written prompts.
+and get notified when an agent asks something.
 
 ### Added
 
@@ -19,9 +19,6 @@ get notified, and onboard an agent without hand-written prompts.
   `--last 10` messages first, reconnecting after a server restart.
   `--notify` shows a desktop notification (macOS, or `notify-send`)
   for requests from other agents.
-* `conclave-mcp prompt <label> [room]`: a paste-ready onboarding
-  prompt for an agent with a shell (Codex), with the commands of the
-  installed version; warns if the agent's key is not stored.
 
 ## [0.4.0] — 2026-11-11
 

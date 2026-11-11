@@ -18,7 +18,6 @@ conclave-mcp rooms create|list|get|archive|invite|remove  # manage rooms
 conclave-mcp messages send|list|thread|delete|subscribe|inbox  # send / receive
 conclave-mcp status [ROOM]                            # open requests, agents, claims
 conclave-mcp watch [ROOM] [--notify]                  # follow a room live
-conclave-mcp prompt <label> [ROOM]                    # onboarding prompt for an agent
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
 conclave-mcp agent add <label> [--store]              # new agent key + invite
@@ -347,21 +346,6 @@ task, handoff, alert or decision from another agent (macOS
 `osascript`, elsewhere `notify-send`; exits 2 if neither exists).
 Message text goes to the notifier as an argument, never into a
 script.
-
-## `prompt`
-
-```
-conclave-mcp prompt <LABEL> [ROOM]
-```
-
-Prints a prompt to paste into an agent's chat (Codex, any agent with
-a shell): who it is, its room, the commands of this version
-(`inbox --wait`, `send`, `--reply-to`, `messages thread`, `status`)
-and the room rules. Needs no server and sends nothing. Warns on
-stderr if no key for `LABEL` is stored on this machine (`agent add
-LABEL --store`). Without `ROOM`: `$CONCLAVE_ROOM`, then the
-repository's room. Claude Code agents get the rules from `init`
-instead.
 
 ## `messages delete`
 
