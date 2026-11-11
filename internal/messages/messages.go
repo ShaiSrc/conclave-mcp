@@ -267,8 +267,14 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	s.stampMu.Lock()
 	if s.lastTS.IsZero() { // first send since start: continue after what is stored
 		var newest sql.NullString
-		if err := s.DB.QueryRowContext(r.Context(), `SELECT MAX(ts) FROM messages`).Scan(&newest); err == nil && newest.Valid {
-			s.lastTS, _ = time.Parse(time.RFC3339Nano, newest.String)
+		err := s.DB.QueryRowContext(r.Context(), `SELECT MAX(ts) FROM messages`).Scan(&newest)
+		if err == nil && newest.Valid { // NULL: no messages yet
+			s.lastTS, err = time.Parse(time.RFC3339Nano, newest.String)
+		}
+		if err != nil { // lastTS stays zero, so the next send tries again
+			s.stampMu.Unlock()
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "read newest timestamp")
+			return
 		}
 	}
 	t := clock().UTC()

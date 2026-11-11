@@ -504,3 +504,22 @@ func TestMessages_TimestampsStayAboveStoredOnesAfterARestart(t *testing.T) {
 		t.Errorf("timestamps: %v, want the new one after %s", ts, stored)
 	}
 }
+
+func TestMessages_SendFailsWhenTheNewestTimestampCannotBeRead(t *testing.T) {
+	// Without the stored high-water mark a lagging clock could stamp
+	// before it; refuse the send instead of risking a skipped message.
+	r, db, keyID, roomID := setupAs(t)
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, trust_origin)
+		VALUES (?, ?, 'not a time', 'broken', 'text/plain', 'system', 'internal')`, roomID, keyID); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", bytes.NewBufferString(`{"content":"x"}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rec.Code)
+	}
+	if n := len(tsByID(t, db, roomID)); n != 1 {
+		t.Errorf("%d messages stored, want only the broken one", n)
+	}
+}
