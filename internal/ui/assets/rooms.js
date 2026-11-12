@@ -40,6 +40,11 @@ export async function roomsPage(view) {
   // GET /v1/rooms lists active rooms only. Per room just the last 24 h,
   // at most LIST_PAGES pages (marked when there may be more); a room that
   // fails shows its error in its row.
+  // This render is current while its view is attached AND the address is
+  // still the one it started with (taken before the first await): render()
+  // keeps the old view attached while the next page loads.
+  const route = location.hash;
+  const current = () => view.isConnected && location.hash === route;
   const rooms = (await api('GET', '/v1/rooms')).rooms || [];
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const rows = rooms.map(r => h('tr', {},
@@ -85,8 +90,8 @@ export async function roomsPage(view) {
   // page, or leaving and coming back (a new view) all detach it for good.
   // Requests already in flight finish into detached rows.
   setTimeout(() => {
-    mapLimit(rooms.map((_, i) => i), i => (view.isConnected ? fill(rooms[i], i) : null))
-      .catch(err => { if (err.status === 401) rerender(); });
+    mapLimit(rooms.map((_, i) => i), i => (current() ? fill(rooms[i], i) : null))
+      .catch(err => { if (err.status === 401 && current()) rerender(); });
   }, 0);
 }
 
