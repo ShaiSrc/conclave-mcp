@@ -37,7 +37,7 @@ principal that part 2 needs.
 | Offline commands (`admin vacuum`, `admin keys create-bootstrap`, `admin ui-reset`) | They need the service stopped; the CLI keeps them. |
 | `init`, hooks, `--store` | They configure a repository or a local key store, not the server. |
 | Remote access (non-loopback) | Passkeys need a secure context; plain HTTP is only secure on `localhost`. TLS setups can come later. |
-| A password fallback | Passkeys sync through the platform key store; `ui reset` covers loss. |
+| A password fallback | Passkeys sync through the platform key store; `admin ui-reset` covers loss. |
 
 ## Decisions
 
