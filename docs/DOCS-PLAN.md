@@ -13,6 +13,7 @@ is the entry point for anyone asking "where do I find X?".
 * **docs/agent-integration.md** — how to wire an agent to Conclave.
 * **docs/architecture.md** — high-level data flow + package map.
 * **docs/trust-model.md** — internal vs external, who classifies, consequences.
+* **docs/web-ui.md** — the web admin UI: setup, reset, security model.
 * **docs/adr/** — Architecture Decision Records (mirrored from the
   Obsidian vault; the vault is the source of truth, see
   `docs/adr/README.md`).
@@ -46,6 +47,7 @@ mirrored in the repo, open an issue and ask.
 | docs/agent-integration.md | Agent authors wiring their agent to Conclave. |
 | docs/architecture.md | Anyone wanting to understand the codebase. |
 | docs/trust-model.md | Operators thinking about trust classification policy. |
+| docs/web-ui.md | Operators using the web admin UI. |
 | docs/adr/* | Contributors asking "why was X done this way?". |
 | docs/runbook.md | Operators running a production deployment. |
 | packaging/* | Operators deploying via Docker or behind a reverse proxy. |

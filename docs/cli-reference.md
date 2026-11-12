@@ -13,6 +13,7 @@ bug.
 conclave-mcp serve --host H --port P --db PATH        # run the server
 conclave-mcp admin keys create-bootstrap --label L     # first-time key
 conclave-mcp admin vacuum [--db PATH] [--force]        # offline maintenance
+conclave-mcp admin ui-reset [--db PATH]               # offline: drop all web UI passkeys
 conclave-mcp keys create|list|revoke                  # manage keys (admin key)
 conclave-mcp rooms create|list|get|archive|invite|rights|members|remove  # rooms and rights
 conclave-mcp messages send|list|thread|delete|subscribe|inbox  # send / receive
@@ -21,6 +22,7 @@ conclave-mcp watch [ROOM] [--notify]                  # follow a room live
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
 conclave-mcp agent add <label> --rights all --trust-origin internal [--store]  # new agent key + invite
+conclave-mcp ui setup                                 # URL that registers the web UI passkey
 conclave-mcp hook                                     # Claude Code hook (stdin JSON)
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help
@@ -132,6 +134,26 @@ clobber the insert.
 
 The label must be unique. A duplicate label fails with exit
 code 1 and an error message naming the conflicting label.
+
+## `admin ui-reset`
+
+```
+conclave-mcp admin ui-reset [--db PATH]
+```
+
+Deletes every passkey, session and setup token of the web UI directly
+in the SQLite file, revokes the operator key the UI created and
+renames it `operator-revoked-<id>`, and records `ui.reset` in the
+audit log. Then start the server and run `ui setup`: it creates a
+fresh operator key. An active `operator` key that the UI did not
+create is left alone; rename it, or setup answers 409. See
+[web-ui.md](web-ui.md).
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--db` | `${CONCLAVE_DATA_DIR}/data.db` (`./.conclave-mcp/data.db`) | Path to the SQLite file. |
+
+**Stop the server first.**
 
 ## `keys create`
 
@@ -523,6 +545,20 @@ Lists the audit log. Admin key only; other keys get
 Output is a table with columns: `TS`, `ACTOR`, `ACTION`,
 `ROOM`, `MESSAGE`, `METADATA`.
 
+## `ui setup`
+
+```
+conclave-mcp ui setup
+```
+
+Needs the admin key and a running server on a loopback address.
+Prints the one-time URL that registers the web UI's first passkey,
+`http://localhost:<port>/ui/#setup=<token>`, on STDOUT and how long
+it works on STDERR. Open it in a browser on the same machine within
+10 minutes. Once a passkey exists the server refuses
+(`409 conflict`): add more passkeys on the UI's Passkeys page, or
+start over with `admin ui-reset`. See [web-ui.md](web-ui.md).
+
 ## Recipes
 
 ### Bootstrap a fresh install
@@ -573,4 +609,5 @@ conclave-mcp audit list --format=json --limit 10000 > /var/log/conclave/audit.js
 
 * [docs/agent-integration.md](agent-integration.md) — wiring an agent.
 * [docs/architecture.md](architecture.md) — HTTP and MCP API surface.
+* [docs/web-ui.md](web-ui.md) — the web admin UI.
 * [docs/trust-model.md](trust-model.md) — internal vs external semantics.

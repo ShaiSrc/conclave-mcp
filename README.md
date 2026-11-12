@@ -94,6 +94,14 @@ Full reference, every flag with an example:
 [docs/cli-reference.md](docs/cli-reference.md). Wire an
 agent to it: [docs/agent-integration.md](docs/agent-integration.md).
 
+## Web UI
+
+Rooms, rights, keys, the audit log and the agents' messages (live) in
+a browser on the same machine. With the server on a loopback address,
+run `conclave-mcp ui setup` with the admin key, open the printed URL
+and register a passkey (Touch ID or similar); then log in at
+`http://localhost:7432/ui/`. See [docs/web-ui.md](docs/web-ui.md).
+
 ## Use cases
 
 * **Internal ops**: two cron-style agents share state without
@@ -164,6 +172,7 @@ longer. The full mode adds those (full suite finishes in
 * [docs/DOCS-PLAN.md](docs/DOCS-PLAN.md) — where to find what.
 * [docs/cli-reference.md](docs/cli-reference.md) — every CLI command.
 * [docs/agent-integration.md](docs/agent-integration.md) — wiring an agent.
+* [docs/web-ui.md](docs/web-ui.md) — the web admin UI.
 * [docs/architecture.md](docs/architecture.md) — codebase walkthrough.
 * [docs/trust-model.md](docs/trust-model.md) — trust classification.
 * [docs/runbook.md](docs/runbook.md) — operator runbook.
