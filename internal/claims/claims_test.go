@@ -98,7 +98,7 @@ func TestNormalizeAndOverlaps(t *testing.T) {
 			t.Errorf("Normalize(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", ".", "/etc/passwd", "../x", "a/../../x", "a\nb.go", "a\rb", "a\tb", "a\x1b[0mb"} {
+	for _, bad := range []string{"", ".", "/etc/passwd", "../x", "a/../../x", "a\nb.go", "a\rb", "a\tb", "a\x1b[0mb", "a.go\n", "\ta.go", " a.go\r"} {
 		if _, err := Normalize(bad); err == nil {
 			t.Errorf("Normalize(%q) accepted", bad)
 		}

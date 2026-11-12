@@ -80,12 +80,12 @@ var errControlPath = errors.New("paths must not contain control characters (newl
 // Normalize returns the stored form of a claim path: '/'-separated,
 // cleaned and relative, with a trailing '/' for directories.
 func Normalize(p string) (string, error) {
+	if strings.ContainsFunc(p, unicode.IsControl) { // before TrimSpace, which would drop a trailing "\n"
+		return "", errControlPath
+	}
 	p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
 	if p == "" || strings.HasPrefix(p, "/") {
 		return "", errBadPath
-	}
-	if strings.ContainsFunc(p, unicode.IsControl) {
-		return "", errControlPath
 	}
 	dir := strings.HasSuffix(p, "/")
 	c := path.Clean(p)
