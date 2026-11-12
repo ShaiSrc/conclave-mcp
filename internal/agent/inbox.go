@@ -247,7 +247,11 @@ func Format(room string, msgs []Msg, labels map[int64]string) string {
 // that put the note at the top of a larger output themselves.
 func FormatBody(room string, msgs []Msg, labels map[int64]string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Conclave room %s: %d new message(s) from other agents. %s\n", room, len(msgs), dataSentence(msgs))
+	from := " from other agents"
+	if HasOperator(msgs) {
+		from = "" // one of them is the operator's
+	}
+	fmt.Fprintf(&b, "Conclave room %s: %d new message(s)%s. %s\n", room, len(msgs), from, dataSentence(msgs))
 	for _, m := range msgs {
 		writeMsg(&b, m, labels, 0, maxRunes)
 	}
