@@ -163,8 +163,11 @@ func ago(ts string, n time.Time) string {
 	}
 }
 
-// ext marks an entry from an external key.
+// ext marks an entry from an external key or the operator.
 func ext(m agent.Msg) string {
+	if m.Operator {
+		return "[OPERATOR] "
+	}
 	if m.TrustOrigin == "external" {
 		return "[EXT] "
 	}

@@ -309,6 +309,9 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	if agent.HasExternal(msgs) || slices.ContainsFunc(held.Claims, func(c claims.Claim) bool { return c.TrustOrigin == "external" }) {
 		b.WriteString(agent.ExternalNote + "\n")
 	}
+	if agent.HasOperator(msgs) {
+		b.WriteString(agent.OperatorNote + "\n")
+	}
 	fmt.Fprintf(&b, "Conclave: you are %s in room %s (room_id %s); use this room_id with the conclave tools.\n",
 		me.Label, repo.RoomName(), st.RoomID)
 	if len(held.Claims) == 0 {

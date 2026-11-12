@@ -39,8 +39,9 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 				{"id":3,"author_key_id":1,"ts":%q,"message_type":"question","content":"answered"},
 				{"id":4,"author_key_id":2,"ts":%q,"message_type":"answer","content":"yes","metadata":{"reply_to":3}},
 				{"id":6,"author_key_id":4,"ts":%q,"message_type":"question","content":"Need the API spec","trust_origin":"external"},
-				{"id":5,"author_key_id":1,"ts":%q,"message_type":"status_update","content":"working"}]}`,
-				ts(30*time.Hour), ts(3*time.Hour), ts(2*time.Hour), ts(90*time.Minute), ts(time.Hour), ts(5*time.Minute))
+				{"id":5,"author_key_id":1,"ts":%q,"message_type":"status_update","content":"working"},
+				{"id":7,"author_key_id":5,"ts":%q,"message_type":"question","content":"Which db?","operator":true}]}`,
+				ts(30*time.Hour), ts(3*time.Hour), ts(2*time.Hour), ts(90*time.Minute), ts(time.Hour), ts(5*time.Minute), ts(4*time.Minute))
 		default:
 			http.NotFound(w, r)
 		}
@@ -67,6 +68,9 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 	}
 	if strings.ContainsRune(got, '\x1b') || strings.Contains(got, "\n  #9") {
 		t.Errorf("claim text reaches the terminal raw:\n%q", got)
+	}
+	if !strings.Contains(got, "[OPERATOR] #7") {
+		t.Errorf("operator entry not marked in:\n%s", got)
 	}
 	for _, want := range []string{"[EXT] #6", "[EXT] partner", "[EXT] ext/"} {
 		if !strings.Contains(got, want) {
