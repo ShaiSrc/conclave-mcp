@@ -46,3 +46,12 @@ func TestFromRoleAndStorage(t *testing.T) {
 		t.Errorf("FromStorage(\"\") = %#v, want an empty non-nil Set", e)
 	}
 }
+
+func TestSplit(t *testing.T) {
+	if got := Split(" read, handoff ,"); len(got) != 2 || got[0] != "read" || got[1] != "handoff" {
+		t.Errorf("Split = %q", got)
+	}
+	if got := Split(""); got == nil || len(got) != 0 {
+		t.Errorf("Split(\"\") = %#v, want an empty non-nil slice (sent as [])", got)
+	}
+}

@@ -163,3 +163,15 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 		"error": map[string]any{"code": code, "message": msg, "request_id": r.Header.Get("X-Request-Id")},
 	})
 }
+
+// Split turns the CLI form "read, handoff" into ["read" "handoff"] and
+// "" into [] (never nil, so it is sent as []); Parse checks the names.
+func Split(s string) []string {
+	out := []string{}
+	for _, r := range strings.Split(s, ",") {
+		if r = strings.TrimSpace(r); r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
+}

@@ -140,7 +140,7 @@ func TestAgentAdd_PrintsExportAndInvites(t *testing.T) {
 	if err != nil || out != "export CONCLAVE_API_KEY=tk_newkey\n" {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
-	if !strings.Contains(strings.Join(*calls, "\n"), `POST /v1/rooms/R/invite {"key_id":7,"role":"writer"}`) {
+	if !strings.Contains(strings.Join(*calls, "\n"), `POST /v1/rooms/R/invite {"key_id":7,"rights":[]}`) {
 		t.Errorf("invite not sent as expected: %v", *calls)
 	}
 	if !strings.Contains(strings.Join(*calls, "\n"), `POST /v1/keys {"label":"agent-c","trust_origin":"external"}`) {
@@ -266,5 +266,25 @@ func TestWriteFiles_AddsWakeHookToAnOlderSetup(t *testing.T) {
 	stop := readJSONFile(t, filepath.Join(root, ".claude", "settings.json"))["hooks"].(map[string]any)["Stop"].([]any)
 	if len(stop) != 2 || !hasWake(stop) {
 		t.Errorf("Stop after re-running init: %v", stop)
+	}
+}
+
+func TestAgentAdd_SendsRights(t *testing.T) {
+	api, calls := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+	useAPI(t, api.URL)
+	if _, err := runAgentAdd(t, "agent-c", "--room", "acme/widgets", "--rights", "read,handoff", "--trust-origin", "internal"); err != nil {
+		t.Fatal(err)
+	}
+	all := strings.Join(*calls, "\n")
+	for _, want := range []string{
+		`POST /v1/keys {"label":"agent-c","trust_origin":"internal"}`,
+		`POST /v1/rooms/R/invite {"key_id":7,"rights":["read","handoff"]}`,
+	} {
+		if !strings.Contains(all, want) {
+			t.Errorf("missing %s in %v", want, *calls)
+		}
+	}
+	if _, err := runAgentAdd(t, "agent-d", "--room", "acme/widgets", "--role", "writer"); err == nil {
+		t.Error("--role must be gone")
 	}
 }
