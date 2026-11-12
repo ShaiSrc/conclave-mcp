@@ -17,7 +17,6 @@
 - Claim TTL default 1800 s, max 86400 s. Heartbeat interval min(5 min, ttl/3).
 - Stop blocks once (`stop_hook_active`) on new messages of type question, task_assignment, handoff, alert, decision.
 - Room name: `.conclave.json` `room`, else `owner/repo` from origin, else dir name.
-- Commits use `ShaiDev <86626805+ShaiSrc@users.noreply.github.com>` (global git config) and end with `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
 
 ## File map
 
