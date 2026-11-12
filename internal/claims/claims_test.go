@@ -17,11 +17,11 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
-// env: keys 1 agent-a (owner), 2 agent-b (writer), 3 reader (reader),
-// 4 outsider (no member) in room "R"; the clock is pinned.
+// env: keys 1 agent-a (admin key, every right), 2 agent-b (every right), 3 reader (read), 4 outsider (no member) in room "R"; the clock is pinned.
 type env struct {
 	svc *Service
 	now time.Time
@@ -44,7 +44,8 @@ func newEnv(t *testing.T) *env {
 		`INSERT INTO api_keys(id, label, hash, prefix, created_at) VALUES
 		 (1,'agent-a','x','pa000001',?),(2,'agent-b','x','pb000002',?),(3,'reader','x','pc000003',?),(4,'outsider','x','pd000004',?)`,
 		`INSERT INTO rooms(id, name, owner_key_id, created_at) VALUES ('R','repo',1,?)`,
-		`INSERT INTO room_members(room_id, key_id, role, joined_at) VALUES ('R',1,'owner',?),('R',2,'writer',?),('R',3,'reader',?)`,
+		fmt.Sprintf(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES
+		 ('R',1,'owner',?,'%[1]s'),('R',2,'writer',?,'%[1]s'),('R',3,'reader',?,'read')`, rights.All().Storage()),
 	} {
 		args := make([]any, strings.Count(q, "?"))
 		for i := range args {
@@ -61,10 +62,14 @@ func newEnv(t *testing.T) *env {
 }
 
 func (e *env) do(caller int64, method, path, body string) (int, map[string]any) {
+	var scopes []string
+	if caller == 1 {
+		scopes = []string{auth.ScopeAdmin}
+	}
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: caller})
+			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: caller, Scopes: scopes})
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
@@ -159,7 +164,7 @@ func TestClaim_ExpiredClaimFreesPath(t *testing.T) {
 	}
 }
 
-func TestRelease_OwnAndOwnerForce(t *testing.T) {
+func TestRelease_OwnAndAdminForce(t *testing.T) {
 	e := newEnv(t)
 	e.do(1, "POST", "/rooms/R/claims", `{"paths":["a.go","b.go"]}`)
 	e.do(2, "POST", "/rooms/R/claims", `{"paths":["c.go"]}`)
@@ -168,7 +173,7 @@ func TestRelease_OwnAndOwnerForce(t *testing.T) {
 	}
 	for _, c := range []struct{ body, want string }{
 		{`{"paths":["a.go"]}`, "[a.go]"},
-		{`{"key_id":2}`, "[c.go]"}, // owner may release others' claims
+		{`{"key_id":2}`, "[c.go]"}, // an admin key may release others' claims
 		{``, "[b.go]"},             // empty body: all own claims
 	} {
 		if _, out := e.do(1, "POST", "/rooms/R/claims/release", c.body); fmt.Sprint(out["released"]) != c.want {
@@ -186,6 +191,8 @@ func TestAccess(t *testing.T) {
 		want         int
 	}{
 		{3, "POST", "/rooms/R/claims", `{"paths":["a.go"]}`, 403}, // reader
+		{3, "POST", "/rooms/R/claims/heartbeat", "", 403},         // reader: no claim right
+		{3, "POST", "/rooms/R/claims/release", "", 403},
 		{3, "GET", "/rooms/R/claims", "", 200},
 		{4, "GET", "/rooms/R/claims", "", 404}, // not a member
 		{1, "POST", "/rooms/R/claims", `{"paths":["../x"]}`, 400},

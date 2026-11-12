@@ -220,3 +220,11 @@ func TestVerify_CacheStillHonoursRevocationAndRehash(t *testing.T) {
 		t.Errorf("after revoke: got %v, want ErrInvalid", err)
 	}
 }
+
+func TestIsAdmin(t *testing.T) {
+	admin := context.WithValue(context.Background(), ClaimsKey{}, Claims{KeyID: 1, Scopes: []string{ScopeAdmin}})
+	agent := context.WithValue(context.Background(), ClaimsKey{}, Claims{KeyID: 2})
+	if !IsAdmin(admin) || IsAdmin(agent) || IsAdmin(context.Background()) {
+		t.Error("IsAdmin: want true only for claims with the admin scope")
+	}
+}

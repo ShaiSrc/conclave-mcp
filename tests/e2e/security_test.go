@@ -209,20 +209,19 @@ func TestSecurity_ParameterisedSQL(t *testing.T) {
 	}
 }
 
-// TestSecurity_PermissionsEnforced: a reader cannot POST a
-// message (403), a non-member cannot GET messages (403 or
-// 404, never 200), a writer cannot invite (403).
+// TestSecurity_PermissionsEnforced: a reader cannot POST a message
+// (403), a non-member cannot GET messages (404), and a key that is
+// not an admin key cannot invite (403).
 func TestSecurity_PermissionsEnforced(t *testing.T) {
-	env, owner := bootstrapKeyFor(t)
-	reader := env.createBootstrapKey("sec-reader")
-	writer := env.createBootstrapKey("sec-writer")
-	outsider := env.createBootstrapKey("sec-outsider")
+	env, admin := bootstrapKeyFor(t)
+	reader := env.createAgentKey("sec-reader")
+	writer := env.createAgentKey("sec-writer")
+	outsider := env.createAgentKey("sec-outsider")
 
-	// Create a room as the owner.
-	create := env.call("POST", "/v1/rooms", owner.Plaintext, map[string]any{
+	create := env.call("POST", "/v1/rooms", admin.Plaintext, map[string]any{
 		"name": "sec-perm-" + fmt.Sprint(time.Now().UnixNano()),
 	})
-	if create.Status != 200 && create.Status != 201 {
+	if create.Status != 201 {
 		t.Fatalf("create: %d %s", create.Status, create.Body)
 	}
 	var room struct {
@@ -230,7 +229,7 @@ func TestSecurity_PermissionsEnforced(t *testing.T) {
 	}
 	_ = json.Unmarshal(create.Body, &room)
 
-	// Invite reader as reader and writer as writer.
+	// Clients from before rights send a role; the server translates it.
 	for _, pair := range []struct {
 		key  subprocessAPIKey
 		role string
@@ -238,43 +237,33 @@ func TestSecurity_PermissionsEnforced(t *testing.T) {
 		{reader, "reader"},
 		{writer, "writer"},
 	} {
-		inv := env.call("POST", "/v1/rooms/"+room.ID+"/members", owner.Plaintext, map[string]any{
+		inv := env.call("POST", "/v1/rooms/"+room.ID+"/members", admin.Plaintext, map[string]any{
 			"key_id": pair.key.ID,
 			"role":   pair.role,
 		})
-		if inv.Status != 200 && inv.Status != 201 {
+		if inv.Status != 201 {
 			t.Fatalf("invite %s: %d %s", pair.role, inv.Status, inv.Body)
 		}
 	}
 
-	// 1. Reader cannot POST a message.
-	// Spec-drift: SPEC-0003 §3.3 says only writer/owner can
-	// send, but the actual messages endpoint does not check
-	// the room_members.role (see SPEC-0007 §8 Open
-	// Questions). The current server returns 201 for any
-	// room member. We assert the spec-stated behaviour (403)
-	// OR the current behaviour (201), with a log so a future
-	// fix is visible.
+	// 1. A reader cannot send.
 	readerSend := env.call("POST", "/v1/rooms/"+room.ID+"/messages", reader.Plaintext, map[string]any{
-		"content": "should be denied per SPEC-0003 §3.3",
+		"content": "should be denied",
 	})
-	if readerSend.Status != 403 && readerSend.Status != 201 {
-		t.Errorf("reader send: status %d, want 403 (spec) or 201 (current behaviour): %s", readerSend.Status, readerSend.Body)
+	if readerSend.Status != 403 {
+		t.Errorf("reader send: status %d, want 403: %s", readerSend.Status, readerSend.Body)
 	}
 
-	// 2. Outsider cannot GET messages.
+	// 2. An outsider cannot list messages, nor tell that the room exists.
 	outsiderList := env.call("GET", "/v1/rooms/"+room.ID+"/messages", outsider.Plaintext, nil)
-	if outsiderList.Status == 200 {
-		t.Errorf("outsider list: status 200, want 403 or 404 (body=%s)", outsiderList.Body)
-	}
-	if outsiderList.Status != 403 && outsiderList.Status != 404 {
-		t.Errorf("outsider list: status %d, want 403 or 404 (body=%s)", outsiderList.Status, outsiderList.Body)
+	if outsiderList.Status != 404 {
+		t.Errorf("outsider list: status %d, want 404 (body=%s)", outsiderList.Status, outsiderList.Body)
 	}
 
-	// 3. Writer cannot invite.
+	// 3. Only admin keys invite.
 	writerInvite := env.call("POST", "/v1/rooms/"+room.ID+"/members", writer.Plaintext, map[string]any{
 		"key_id": outsider.ID,
-		"role":   "reader",
+		"rights": []string{"read"},
 	})
 	if writerInvite.Status != 403 {
 		t.Errorf("writer invite: status %d, want 403 (body=%s)", writerInvite.Status, writerInvite.Body)

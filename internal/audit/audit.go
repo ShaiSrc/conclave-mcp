@@ -7,11 +7,7 @@
 //	GET /v1/audit?actor=<key_id>&action=<kind>&since=<ts>&limit=<n>
 //
 // Filters are AND-combined. Results are ordered by ts DESC.
-// Admin-only: requires audit:read scope on the caller's API key.
-// v0.1 does not yet implement scopes (SPEC-0001 §3 A3 defers them);
-// in this commit the endpoint is restricted to a hard-coded
-// admin key id, replaced by the real scope check in a follow-up
-// task.
+// Admin keys only; other keys get 403.
 package audit
 
 import (
@@ -26,6 +22,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -57,6 +54,10 @@ type entryView struct {
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
+	if !auth.IsAdmin(r.Context()) {
+		writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
+		return
+	}
 	q := r.URL.Query()
 	actor := q.Get("actor")    // key id (decimal)
 	action := q.Get("action")  // e.g. "room.create"

@@ -23,8 +23,8 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 	ts := func(ago time.Duration) string { return fixed.Add(-ago).Format(time.RFC3339Nano) }
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/keys":
-			fmt.Fprint(w, `{"keys":[{"id":1,"label":"agent-a"},{"id":2,"label":"agent-b"},{"id":3,"label":"old","revoked_at":"x"}]}`)
+		case "/v1/rooms/" + threadRoom + "/members":
+			fmt.Fprint(w, `{"members":[{"key_id":1,"label":"agent-a"},{"key_id":2,"label":"agent-b"},{"key_id":4,"label":"partner"}]}`)
 		case "/v1/rooms/" + threadRoom:
 			fmt.Fprint(w, `{"id":"`+threadRoom+`","name":"acme/widgets"}`)
 		case "/v1/rooms/" + threadRoom + "/claims":
@@ -37,8 +37,9 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 				{"id":2,"author_key_id":2,"ts":%q,"message_type":"question","content":"Which port?"},
 				{"id":3,"author_key_id":1,"ts":%q,"message_type":"question","content":"answered"},
 				{"id":4,"author_key_id":2,"ts":%q,"message_type":"answer","content":"yes","metadata":{"reply_to":3}},
+				{"id":6,"author_key_id":4,"ts":%q,"message_type":"question","content":"Need the API spec","trust_origin":"external"},
 				{"id":5,"author_key_id":1,"ts":%q,"message_type":"status_update","content":"working"}]}`,
-				ts(30*time.Hour), ts(3*time.Hour), ts(2*time.Hour), ts(90*time.Minute), ts(5*time.Minute))
+				ts(30*time.Hour), ts(3*time.Hour), ts(2*time.Hour), ts(90*time.Minute), ts(time.Hour), ts(5*time.Minute))
 		default:
 			http.NotFound(w, r)
 		}
@@ -65,6 +66,14 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 	}
 	if strings.ContainsRune(got, '\x1b') || strings.Contains(got, "\n  #9") {
 		t.Errorf("claim text reaches the terminal raw:\n%q", got)
+	}
+	for _, want := range []string{"[EXT] #6", "[EXT] partner"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("external entry not marked, missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[EXT] #2") || strings.Contains(got, "[EXT] agent-") {
+		t.Errorf("internal entries must not be marked:\n%s", got)
 	}
 	for _, not := range []string{"too old", "answered", "old "} {
 		if strings.Contains(got, not) {

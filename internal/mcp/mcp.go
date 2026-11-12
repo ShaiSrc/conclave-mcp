@@ -28,6 +28,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/hermes/conclave-mcp/internal/agent"
 )
 
 // Server is the MCP transport. It wraps an *http.Client pointed at
@@ -221,25 +223,30 @@ func enum(desc string, vals ...string) map[string]any {
 }
 
 var (
-	roomIDProp      = str("Room id (ULID) from rooms.list or rooms.create.")
-	keyIDProp       = num("API key id from keys.list.")
+	roomIDProp = str("Room id (ULID) from rooms.list or rooms.create.")
+	keyIDProp  = num("API key id, from rooms.members (admin keys: keys.list).")
+	rightsProp = map[string]any{"type": "array", "items": map[string]any{"type": "string"},
+		"description": `Rights: "read", "claim", message types ("question", "answer", "decision", "handoff", "status_update", "task_assignment", "alert", "system"), or "all" / "none". Default none.`}
 	sinceProp       = str("Return only messages after this ts. Pass back next_since from the previous call.")
 	trustOriginProp = enum("Trust origin.", "internal", "external")
 )
 
 var tools = []tool{
-	{"rooms.list", "List rooms the caller is a member of.",
+	{"rooms.list", "List the rooms the caller is a member of (an admin key sees every room).",
 		map[string]any{"visibility": enum("Filter by visibility.", "public", "private")}, nil},
-	{"rooms.create", "Create a new room; the caller becomes owner.",
+	{"rooms.create", "Create a new room. Admin only.",
 		map[string]any{"name": str("Room name, 1..128 chars."), "description": str("Optional, <= 1024 chars."),
 			"visibility": enum("Default private.", "public", "private")}, []string{"name"}},
-	{"rooms.delete", "Archive (soft-delete) a room. Owner only.",
+	{"rooms.delete", "Archive (soft-delete) a room. Admin only.",
 		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
-	{"rooms.invite", "Invite an API key to a room. Owner only.",
-		map[string]any{"room_id": roomIDProp, "key_id": keyIDProp, "role": enum("Member role.", "owner", "writer", "reader")},
-		[]string{"room_id", "key_id", "role"}},
-	{"rooms.remove", "Remove an API key from a room. Owner only.",
+	{"rooms.invite", "Invite an API key to a room with the given rights; without rights the key can do nothing. A key already in another room is refused unless allow_multi_room is true. Admin only.",
+		map[string]any{"room_id": roomIDProp, "key_id": keyIDProp, "rights": rightsProp,
+			"allow_multi_room": map[string]any{"type": "boolean", "description": "Allow a key that is already in another room."}},
+		[]string{"room_id", "key_id"}},
+	{"rooms.remove", "Remove an API key from a room. Admin only.",
 		map[string]any{"room_id": roomIDProp, "key_id": keyIDProp}, []string{"room_id", "key_id"}},
+	{"rooms.members", "List a room's members: key_id, label, trust_origin (admin keys also see rights). Use it to find another agent's key_id. Needs the read right.",
+		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
 	{"messages.send", "Send a message to a room. The server stamps author_key_id and the author's trust_origin; the sender cannot override them.",
 		map[string]any{"room_id": roomIDProp, "content": str("Message body, <= 256 KiB."),
 			"content_type": enum("Default text/plain.", "text/plain", "text/markdown", "application/json"),
@@ -247,21 +254,21 @@ var tools = []tool{
 			"metadata":     map[string]any{"type": "object", "description": "Free-form JSON, e.g. {\"files\": [\"src/auth/\"]}."},
 			"reply_to":     num("Id of the message this answers (same room). Stored as metadata.reply_to.")},
 		[]string{"room_id", "content"}},
-	{"messages.list", "List messages in a room, oldest first, paginated by sinceProp.",
+	{"messages.list", "List messages in a room, oldest first, paginated by since. " + agent.ExternalNote,
 		map[string]any{"room_id": roomIDProp, "since": sinceProp, "limit": num("Max messages, default 50, max 500."), "trust_origin": trustOriginProp},
 		[]string{"room_id"}},
-	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With sinceProp: returns at once if anything newer than sinceProp exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as sinceProp.",
+	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With since: returns at once if anything newer than since exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as since. " + agent.ExternalNote,
 		map[string]any{"room_id": roomIDProp, "since": sinceProp, "wait": num("Seconds to block, default 60, max 300.")},
 		[]string{"room_id"}},
-	{"messages.delete", "Soft-delete a message. Owner only.",
+	{"messages.delete", "Soft-delete a message. Admin only.",
 		map[string]any{"room_id": roomIDProp, "msg_id": num("Message id.")}, []string{"room_id", "msg_id"}},
-	{"keys.list", "List API keys (id, label, trust_origin). Use it to find the key_id of another agent.",
+	{"keys.list", "List API keys (id, label, trust_origin). Admin only; to find another agent's key_id use rooms.members.",
 		map[string]any{}, nil},
 	{"keys.create", "Create a new API key; returns the plaintext once. Admin key only.",
 		map[string]any{"label": str("Unique label, 1..128 chars."), "trust_origin": trustOriginProp}, []string{"label"}},
 	{"keys.revoke", "Revoke an API key. Admin key only.",
 		map[string]any{"id": keyIDProp}, []string{"id"}},
-	{"audit.list", "List audit log entries with filters.",
+	{"audit.list", "List audit log entries with filters. Admin only.",
 		map[string]any{"actor": str("Actor key id."), "action": str("e.g. room.create."), "room_id": roomIDProp,
 			"since": str("ISO-8601 ts."), "limit": num("Max entries.")}, nil},
 	{"claims.list", "List active file claims in a room: which agent holds which repo-relative path, until when.",
@@ -272,7 +279,7 @@ var tools = []tool{
 			"note":        str("What you are doing, shown to the other agents."),
 			"ttl_minutes": num("Default 30, max 1440.")},
 		[]string{"room_id", "paths"}},
-	{"claims.release", "Release your claims in a room: the given paths, or all of them when paths is omitted. Do this when you finish an area. The room owner may pass key_id to release another agent's claims.",
+	{"claims.release", "Release your claims in a room: the given paths, or all of them when paths is omitted. Do this when you finish an area. An admin key may pass key_id to release another agent's claims.",
 		map[string]any{"room_id": roomIDProp,
 			"paths":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"key_id": keyIDProp},
@@ -320,13 +327,12 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}
 		return s.httpPost(ctx, "/v1/rooms/"+p.RoomID+"/archive", json.RawMessage("{}"))
 	case "rooms.invite":
-		// SPEC-0003 §3.3 + ADR-0007 §Open questions. The
-		// HTTP endpoint is POST /v1/rooms/{id}/invite with
-		// body {key_id, role}. We forward verbatim.
+		// POST /v1/rooms/{id}/invite with {key_id, rights,
+		// allow_multi_room}, forwarded verbatim; the server checks
+		// the rights and that the caller is an admin key.
 		var p struct {
 			RoomID string `json:"room_id"`
 			KeyID  int64  `json:"key_id"`
-			Role   string `json:"role"`
 		}
 		_ = json.Unmarshal(args, &p)
 		if p.RoomID == "" {
@@ -335,12 +341,9 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		if p.KeyID == 0 {
 			return nil, errors.New("rooms.invite requires key_id")
 		}
-		if p.Role != "owner" && p.Role != "writer" && p.Role != "reader" {
-			return nil, errors.New("rooms.invite role must be 'owner', 'writer', or 'reader'")
-		}
 		return s.httpPost(ctx, "/v1/rooms/"+p.RoomID+"/invite", args)
 	case "rooms.remove":
-		// DELETE /v1/rooms/{id}/members/{key_id}. Owner only.
+		// DELETE /v1/rooms/{id}/members/{key_id}. Admin only.
 		var p struct {
 			RoomID string `json:"room_id"`
 			KeyID  int64  `json:"key_id"`
@@ -353,6 +356,15 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			return nil, errors.New("rooms.remove requires key_id")
 		}
 		return s.httpDelete(ctx, "/v1/rooms/"+p.RoomID+"/members/"+itoaInt64(p.KeyID))
+	case "rooms.members":
+		var p struct {
+			RoomID string `json:"room_id"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.RoomID == "" {
+			return nil, errors.New("rooms.members requires room_id")
+		}
+		return s.httpGet(ctx, "/v1/rooms/"+p.RoomID+"/members")
 	case "messages.send":
 		// args should be {room_id, content, content_type?,
 		// message_type?, metadata?}. The HTTP body shape is

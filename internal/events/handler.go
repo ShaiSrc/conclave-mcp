@@ -13,9 +13,10 @@
 //
 // The handler:
 //
-//   - Authenticates the caller and asserts room membership
-//     (404 to non-members — same shape as the rest of the
-//     /v1/rooms/{id}* family).
+//   - Authenticates the caller and requires the read right (404 to
+//     non-members, as the rest of /v1/rooms/{id}*; 403 missing_right
+//     without read; admin keys pass), and checks read again before
+//     each delivered message.
 //   - Streams new messages as they arrive. A subscriber that
 //     reconnects with ?since=<ts> starts at the live
 //     boundary; the broker does not replay old events (use
@@ -35,7 +36,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -44,6 +44,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 )
 
 // Subscriber is the subset of *Broker the handler needs.
@@ -96,28 +97,12 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := chi.URLParam(r, "id")
 
-	// Membership check (404 to non-members — same as the
-	// rest of /v1/rooms/{id}*). One row, archived + nothing
-	// else matters for the access check; the live stream
-	// itself filters by room in the broker.
-	var archived *string
-	err := h.DB.QueryRowContext(r.Context(),
-		`SELECT rooms.archived_at FROM rooms
-		 INNER JOIN room_members ON room_members.room_id = rooms.id
-		 WHERE rooms.id = ? AND room_members.key_id = ?`,
-		roomID, caller,
-	).Scan(&archived)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			http.Error(w, `{"error":{"code":"not_found","message":"room not found"}}`,
-				http.StatusNotFound)
-			return
-		}
-		http.Error(w, `{"error":{"code":"internal_error","message":"room lookup"}}`,
-			http.StatusInternalServerError)
+	// 404 to non-members, 403 missing_right without read.
+	mem, ok := rights.Require(w, r, h.DB, roomID, rights.Read)
+	if !ok {
 		return
 	}
-	if archived != nil {
+	if mem.Archived {
 		http.Error(w, `{"error":{"code":"not_found","message":"room is archived"}}`,
 			http.StatusGone)
 		return
@@ -170,6 +155,11 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		case ev, open := <-sub:
 			if !open {
+				return
+			}
+			// ponytail: one indexed query per delivered event; fine at local scale.
+			// Upgrade path: cancel subscriptions from the rights/remove handlers.
+			if cur, ok, err := rights.Lookup(r.Context(), h.DB, roomID); err != nil || !ok || !cur.Rights.Has(rights.Read) {
 				return
 			}
 			_, _ = fmt.Fprintf(w, "event: message.created\ndata: %s\n\n", ev.Payload)

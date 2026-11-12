@@ -13,14 +13,14 @@ bug.
 conclave-mcp serve --host H --port P --db PATH        # run the server
 conclave-mcp admin keys create-bootstrap --label L     # first-time key
 conclave-mcp admin vacuum [--db PATH] [--force]        # offline maintenance
-conclave-mcp keys create|list|revoke                  # manage keys
-conclave-mcp rooms create|list|get|archive|invite|remove  # manage rooms
+conclave-mcp keys create|list|revoke                  # manage keys (admin key)
+conclave-mcp rooms create|list|get|archive|invite|rights|members|remove  # rooms and rights
 conclave-mcp messages send|list|thread|delete|subscribe|inbox  # send / receive
 conclave-mcp status [ROOM]                            # open requests, agents, claims
 conclave-mcp watch [ROOM] [--notify]                  # follow a room live
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
-conclave-mcp agent add <label> [--store]              # new agent key + invite
+conclave-mcp agent add <label> --rights all --trust-origin internal [--store]  # new agent key + invite
 conclave-mcp hook                                     # Claude Code hook (stdin JSON)
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help
@@ -124,7 +124,7 @@ plaintext is printed to STDOUT once. The argon2id hash is stored in the
 | Flag | Default | Notes |
 |---|---|---|
 | `--label` | (required) | Unique label. |
-| `--trust-origin` | `external` | `internal` or `external`. Note: this is the **opposite** default of `keys create` (which defaults to `internal`). |
+| `--trust-origin` | `internal` | `internal` or `external`. `keys create` and `agent add` default to `external`. |
 | `--db` | `./conclave.db` | Path to the SQLite file. |
 
 **Stop the server first.** A running server's WAL writer can
@@ -147,7 +147,7 @@ audit log.
 | Flag | Default | Notes |
 |---|---|---|
 | `--label` | (required) | Unique label. |
-| `--trust-origin` | `internal` | `internal` or `external`. |
+| `--trust-origin` | `external` | `external`, or `internal` for your own agents. |
 
 ## `keys list`
 
@@ -158,6 +158,9 @@ conclave-mcp keys list
 Lists all API keys (never shows plaintext or hash). Output
 is a table with columns: `ID`, `PREFIX`, `LABEL`, `TRUST`,
 `CREATED`.
+
+Admin key only; other keys get `403 admin key required`. To find
+another agent's key id, use `rooms members`.
 
 ## `keys revoke`
 
@@ -181,7 +184,7 @@ key if you need to replace the revoked one.
 conclave-mcp rooms create --name "general" --visibility=private
 ```
 
-Creates a new room. The caller becomes the owner.
+Creates a new room. Admin key only.
 
 | Flag | Default | Notes |
 |---|---|---|
@@ -195,7 +198,7 @@ Creates a new room. The caller becomes the owner.
 conclave-mcp rooms list [--visibility public]
 ```
 
-Lists the rooms the caller is a member of. Output is a
+Lists the rooms the caller is a member of; an admin key sees every room that is not archived. Output is a
 table with columns: `ID`, `NAME`, `VISIBILITY`, `OWNER`,
 `CREATED`.
 
@@ -209,8 +212,9 @@ table with columns: `ID`, `NAME`, `VISIBILITY`, `OWNER`,
 conclave-mcp rooms get 01ABC...
 ```
 
-Shows the details of a single room, including the member
-list with each member's role. The caller must be a member.
+Shows a room and the caller's own rights in it (`my_rights`; an admin
+key holds all). The caller must be a member, with any rights, or an
+admin key; others get 404.
 
 ## `rooms archive`
 
@@ -219,37 +223,58 @@ conclave-mcp rooms archive 01ABC...
 ```
 
 Soft-archives a room. The room is hidden from `rooms list`
-for non-owner members, but the messages remain. Owner only.
+for every caller, but the messages remain. Admin key only.
 
 ## `rooms invite`
 
 ```
-conclave-mcp rooms invite 01ABC... 4 --role=writer
+conclave-mcp rooms invite 01ABC... 4 --rights read,handoff
 ```
 
-Invites an API key (the id from `keys list`) to a room. Owner
-only.
+Adds an API key (the id from `keys list`) to a room with the given
+rights. Admin key only.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--role` | `writer` | `owner`, `writer`, or `reader`. |
+| `--rights` | none | Comma-separated: `read`, `claim`, message types (`question`, `answer`, `decision`, `handoff`, `status_update`, `task_assignment`, `alert`, `system`), or `all` / `none`. Without it the key gets no rights, and stderr says so. |
+| `--allow-multi-room` | off | A key is in one room: a key already in another room that is not archived is refused with `409 key_in_other_room` unless this is set. Admin keys are exempt. |
 
-The MCP equivalent is the `rooms.invite` tool. The HTTP
-equivalent is `POST /v1/rooms/{id}/members` with body
-`{key_id, role}`.
+What each right allows: [architecture.md](architecture.md#permissions).
+MCP: the `rooms.invite` tool. HTTP: `POST /v1/rooms/{id}/members` with
+`{"key_id": 4, "rights": ["read", "handoff"], "allow_multi_room": false}`.
+Clients from before rights may still send `role`: `owner` and `writer`
+become `all`, `reader` becomes `read`.
+
+## `rooms rights`
+
+```
+conclave-mcp rooms rights 01ABC... 4 read,claim,handoff
+```
+
+Replaces a member's rights (admin key only); `all` and `none` work
+too. The change applies to the member's next request and is audited
+as `room.rights` with the old and the new set. HTTP:
+`PATCH /v1/rooms/{id}/members/{key_id}` with `{"rights": [...]}`.
+
+## `rooms members`
+
+```
+conclave-mcp rooms members [ROOM]
+```
+
+Lists a room's members: `ID`, `LABEL`, `TRUST` (internal/external),
+and `RIGHTS` when the caller is an admin key. Needs the `read` right.
+`ROOM` is a room id or name; without it `$CONCLAVE_ROOM`, then the
+room in the repository's `.conclave.json`. MCP: `rooms.members`.
 
 ## `rooms remove`
 
 ```
-conclave-mcp rooms remove 01ABC... --key-id 4
+conclave-mcp rooms remove 01ABC... 4
 ```
 
-Removes an API key from a room. The key is no longer a
-member; the key itself is not deleted. Owner only.
-
-| Flag | Default | Notes |
-|---|---|---|
-| `--key-id` | (required) | The API key id. |
+Removes an API key from a room. The key is no longer a member; the
+key itself is not deleted. Admin key only.
 
 ## `messages send`
 
@@ -330,6 +355,8 @@ What is going on in a room, for the person watching the agents:
   and the type of its last message.
 * **Active claims**, with their expiry.
 
+Entries from external keys start with `[EXT]`.
+
 ## `watch`
 
 ```
@@ -340,6 +367,10 @@ Prints the last `--last` messages, then every new one as it
 arrives: author, type, the `#id` it answers and full content, your
 own messages marked `(you)`. Control characters are removed.
 Reconnects on its own when the server restarts; Ctrl-C ends it.
+External messages are shown between
+`--- external content from <label> ---` and
+`--- end of external content ---`; the note to treat them as data is
+printed once, before the first.
 
 `--notify` also shows a desktop notification for each question,
 task, handoff, alert or decision from another agent (macOS
@@ -355,7 +386,7 @@ conclave-mcp messages delete <ROOM> <MSG-ID>
 
 Soft-deletes a message (`MSG-ID` from `messages list`). The
 message is hidden from `messages list` but the row remains in
-the DB. Owner only.
+the DB. Admin key only.
 
 ## `init`
 
@@ -363,9 +394,8 @@ the DB. Owner only.
 conclave-mcp init [--room NAME]
 ```
 
-Run inside a git repository with a key that may own the room
-(normally the admin key). Finds or creates the room named after
-the origin remote (`acme/widgets`), then creates `.conclave.json`
+Run inside a git repository with the admin key. Finds or creates
+the room named after the origin remote (`acme/widgets`), then creates `.conclave.json`
 and merges the `conclave` MCP server into `.mcp.json`, the hook
 into `.claude/settings.json` and the coordination rules into
 `CLAUDE.md`. Existing content is kept; safe to re-run. See
@@ -374,13 +404,22 @@ into `.claude/settings.json` and the coordination rules into
 ## `agent add`
 
 ```
-eval "$(conclave-mcp agent add agent-c [--store] [--room NAME] [--role writer] [--trust-origin internal])"
+eval "$(conclave-mcp agent add agent-c --rights all --trust-origin internal [--store] [--room NAME])"
 ```
 
-Admin key, room owner. Creates a key labelled `agent-c`,
-invites it to the repository's room and prints
-`export CONCLAVE_API_KEY=...` on stdout (once; nothing is
-stored). If the invite fails, the new key is revoked again.
+Admin key. Creates a key labelled `agent-c`, invites it to the
+repository's room with `--rights` and prints
+`export CONCLAVE_API_KEY=...` on stdout (once; nothing is stored). If
+the invite fails, the new key is revoked again.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--rights` | none | As for `rooms invite`. Without rights the key can do nothing; your own coding agents get `all`. |
+| `--trust-origin` | `external` | `internal` for your own agents. |
+| `--room` | the repository's room | Room name. |
+
+For an agent of a third party, or your agent in a room with one, see
+[shared-rooms.md](shared-rooms.md).
 
 With `--store` the key is saved instead (macOS Keychain item
 `conclave-agent-agent-c`, elsewhere
@@ -415,6 +454,10 @@ agent, prints the new messages on stderr and exits 2, which wakes
 an idle Claude Code session. Status updates alone do not wake it
 and stay unread. The newest waiter of an agent wins (each Stop
 re-arms it); SessionEnd stops it.
+
+Missing rights fail open like an unreachable server: without `claim`
+the agent still edits, just without an auto-claim; without `read` the
+hook adds no messages (the Stop hook included).
 
 ## `messages inbox`
 
@@ -467,8 +510,8 @@ wire format underneath.
 conclave-mcp audit list [--room-id 01ABC...]
 ```
 
-Lists the audit log. Admin-scope required (in v0.1, all
-keys have admin scope; this will change in v0.2).
+Lists the audit log. Admin key only; other keys get
+`403 admin key required`.
 
 | Flag | Default | Notes |
 |---|---|---|
@@ -510,7 +553,7 @@ conclave-mcp keys create --label "agent-B" --trust-origin=internal
 # → note the id, say 2
 
 # Invite B to "inbox" only.
-conclave-mcp rooms invite "$INBOX_ID" 2 --role=writer
+conclave-mcp rooms invite "$INBOX_ID" 2 --rights all
 ```
 
 ### Tail a room in another terminal

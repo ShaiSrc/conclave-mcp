@@ -363,7 +363,7 @@ func newListCmd() *cobra.Command {
 				if status != http.StatusOK {
 					return fmt.Errorf("expected 200, got %d", status)
 				}
-				return renderMessageList(flagFormat, resp.Messages, agent.Labels(ctx, c), out)
+				return renderMessageList(flagFormat, resp.Messages, agent.Labels(ctx, c, roomID), out)
 			})
 		},
 	}
@@ -423,12 +423,12 @@ func excerpt(s string, n int) string {
 // ---------- delete ----------
 
 // newDeleteCmd soft-deletes a single message (SPEC-0001 Q8).
-// Owner only.
+// Admin key only.
 func newDeleteCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "delete <room> <msg-id>",
-		Short: "Soft-delete a message (owner only)",
-		Long:  "Soft-delete a message (owner only). <room> is a room id or name.",
+		Short: "Soft-delete a message (admin key only)",
+		Long:  "Soft-delete a message (admin key only). <room> is a room id or name.",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			msgID, err := strconv.ParseInt(args[1], 10, 64)

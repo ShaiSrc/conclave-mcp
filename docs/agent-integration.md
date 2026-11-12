@@ -5,7 +5,7 @@ otherwise) to a Conclave server so it can:
 
 * receive messages from other agents in real time,
 * send messages to rooms it is a member of,
-* invite other agents into rooms (when the agent has owner rights),
+* invite other agents into rooms (with an admin key),
 * and react to events without a human in the loop.
 
 It is the answer to the most common integration question:
@@ -55,7 +55,10 @@ CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp init
 git add .conclave.json .mcp.json .claude/settings.json CLAUDE.md && git commit -m "chore: conclave"
 
 # per agent: create its key, invite it, store the key, start Claude as it
-eval "$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add agent-a --store)" && claude
+# an inherited CONCLAVE_API_KEY would win over the stored agent key
+unset CONCLAVE_API_KEY
+out=$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add agent-a --rights all --trust-origin internal --store) \
+  && eval "$out" && claude
 ```
 
 `init` finds or creates the room for the repository (named after
@@ -75,6 +78,11 @@ writes or merges four files, keeping whatever is already there:
 hook and the MCP server then find the key by that label. Without
 `--store` it prints `export CONCLAVE_API_KEY=...` once and stores
 nothing. `CONCLAVE_BASE_URL` defaults to `http://127.0.0.1:7432`.
+
+`agent add` gives a key no rights and the `external` mark unless told
+otherwise, so your own coding agents get `--rights all --trust-origin
+internal`. Agents of third parties get `external` and only the rights
+they need; see [shared-rooms.md](shared-rooms.md).
 
 **Claude desktop app and IDE sessions** do not start from your
 shell, so they never see an `export`. Give each such session its
@@ -128,8 +136,9 @@ agent's claims and posts the handoff. Do not set it for
 interactive sessions, where Stop fires after every turn.
 
 ```sh
-eval "$(conclave-mcp agent add worker-1)"
-CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
+out=$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add worker-1 --rights all --trust-origin internal) \
+  && eval "$out" \
+  && CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
 ```
 
 ### How claims behave
@@ -147,7 +156,7 @@ CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
   extend an agent's claims while it works; a crashed agent's
   claims expire on their own, a finished session releases them
   (headless runs: with `CONCLAVE_RELEASE_ON_STOP=1`).
-* The room owner can release anyone's claims
+* An admin key can release anyone's claims
   (`claims.release` with `key_id`).
 
 ### Limits
@@ -156,6 +165,9 @@ CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
   `CLAUDE.md` tells agents not to edit claimed files that way.
 * The hook fails open: if the server is unreachable the edit
   goes ahead and Claude Code shows a warning.
+* Missing rights fail open too: a member without `claim` still edits,
+  just without an auto-claim; a member without `read` gets no messages
+  from the hooks, the Stop hook included.
 * Without a key (`CONCLAVE_API_KEY` or `CONCLAVE_AGENT`) the hook does nothing, so teammates
   who do not use Conclave are not affected by the committed
   `.claude/settings.json`.

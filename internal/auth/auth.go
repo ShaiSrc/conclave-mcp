@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -229,6 +230,17 @@ func (v *Verifier) Middleware() func(http.Handler) http.Handler {
 func FromContext(ctx context.Context) (Claims, bool) {
 	c, ok := ctx.Value(ClaimsKey{}).(Claims)
 	return c, ok
+}
+
+// ScopeAdmin is the scope of admin keys (api_keys.is_admin). Admin keys
+// manage keys, rooms and rights and pass every room check without
+// being members.
+const ScopeAdmin = "admin"
+
+// IsAdmin reports whether ctx carries an admin key's claims.
+func IsAdmin(ctx context.Context) bool {
+	c, ok := FromContext(ctx)
+	return ok && slices.Contains(c.Scopes, ScopeAdmin)
 }
 
 // writeAuthError writes a 401 with the SPEC-0003 envelope. We import

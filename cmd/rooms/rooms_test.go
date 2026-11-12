@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -206,35 +207,96 @@ func TestInvite_BadKeyID(t *testing.T) {
 	}
 }
 
-func TestInvite_OK(t *testing.T) {
-	var gotBody map[string]any
+// runSub runs a fresh rooms subcommand against url and returns stdout,
+// stderr and the error.
+func runSub(t *testing.T, url string, build func() *cobra.Command, flags map[string]string, args ...string) (string, string, error) {
+	t.Helper()
+	oldOC := openClient
+	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
+		return client.New(client.Options{Server: url, Token: "stub"})
+	}
+	t.Cleanup(func() { openClient = oldOC })
+	var out, errOut bytes.Buffer
+	sub := build()
+	for k, v := range flags {
+		if err := sub.Flags().Set(k, v); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sub.SetOut(&out)
+	sub.SetErr(&errOut)
+	sub.SetContext(context.Background())
+	err := sub.RunE(sub, args)
+	return out.String(), errOut.String(), err
+}
+
+func TestInvite_SendsRights(t *testing.T) {
+	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/rooms/r1/members" {
 			t.Errorf("path=%s", r.URL.Path)
 		}
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
 		w.WriteHeader(http.StatusCreated)
 	}))
 	defer srv.Close()
-	oldOC := openClient
-	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
-		return client.New(client.Options{Server: srv.URL, Token: "stub"})
-	}
-	defer func() { openClient = oldOC }()
 
-	var buf bytes.Buffer
-	sub := newInviteCmd()
-	sub.SetOut(&buf)
-	sub.SetErr(&buf)
-	sub.SetContext(context.Background())
-	if err := sub.RunE(sub, []string{"r1", "42"}); err != nil {
-		t.Fatalf("err: %v", err)
+	out, errOut, err := runSub(t, srv.URL, newInviteCmd, map[string]string{"rights": "read, handoff", "allow-multi-room": "true"}, "r1", "42")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if gotBody["key_id"].(float64) != 42 || gotBody["role"] != "writer" {
-		t.Errorf("body=%v (default role must be writer)", gotBody)
+	if got["key_id"] != float64(42) || fmt.Sprint(got["rights"]) != "[read handoff]" || got["allow_multi_room"] != true || got["role"] != nil {
+		t.Errorf("body = %v", got)
 	}
-	if !strings.Contains(buf.String(), "invited key 42") {
-		t.Errorf("out=%q", buf.String())
+	if !strings.Contains(out, "invited key 42") || errOut != "" {
+		t.Errorf("out=%q stderr=%q", out, errOut)
+	}
+
+	_, errOut, err = runSub(t, srv.URL, newInviteCmd, nil, "r1", "42")
+	if err != nil || fmt.Sprint(got["rights"]) != "[]" || !strings.Contains(errOut, "has no rights") {
+		t.Errorf("without --rights: body %v, stderr %q, err %v", got, errOut, err)
+	}
+}
+
+func TestRightsCmd_Patches(t *testing.T) {
+	var method, path string
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method, path = r.Method, r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"key_id":42,"rights":["read","handoff"]}`)
+	}))
+	defer srv.Close()
+	out, _, err := runSub(t, srv.URL, newRightsCmd, nil, "r1", "42", "handoff,read")
+	if err != nil || method != http.MethodPatch || path != "/v1/rooms/r1/members/42" || fmt.Sprint(got["rights"]) != "[handoff read]" {
+		t.Fatalf("%s %s %v err=%v", method, path, got, err)
+	}
+	if !strings.Contains(out, "read,handoff") {
+		t.Errorf("out=%q", out)
+	}
+}
+
+func TestMembers_RightsColumnOnlyForAdmin(t *testing.T) {
+	const room = "01M72DWQRAZXY3X8HWGJ0QZGNW"
+	serve := func(reply string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/rooms/"+room+"/members" {
+				t.Errorf("path=%s", r.URL.Path)
+			}
+			fmt.Fprint(w, reply)
+		}))
+		t.Cleanup(srv.Close)
+		return srv.URL
+	}
+	admin := serve(`{"members":[{"key_id":1,"label":"agent-a","trust_origin":"internal","rights":["read"]},{"key_id":2,"label":"partner","trust_origin":"external","rights":[]}]}`)
+	out, _, err := runSub(t, admin, newMembersCmd, nil, room)
+	if err != nil || !strings.Contains(out, "RIGHTS") || !strings.Contains(out, "partner") || !strings.Contains(out, "none") {
+		t.Errorf("admin view: %q %v", out, err)
+	}
+	agentView := serve(`{"members":[{"key_id":1,"label":"agent-a","trust_origin":"internal"}]}`)
+	if out, _, err := runSub(t, agentView, newMembersCmd, nil, room); err != nil || strings.Contains(out, "RIGHTS") || !strings.Contains(out, "internal") {
+		t.Errorf("agent view: %q %v", out, err)
 	}
 }
 
@@ -273,5 +335,33 @@ func TestMapErr(t *testing.T) {
 	}
 	if ec := ExitCode(mapErr(&client.APIError{Status: 404, Code: "x"})); ec != 1 {
 		t.Errorf("mapErr(APIError)=%d", ec)
+	}
+}
+
+func TestGet_ShowsEmptyMyRights(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"r1","name":"n","owner_key_id":1,"created_at":"t"}`)
+	}))
+	defer srv.Close()
+	oldOC := openClient
+	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
+		return client.New(client.Options{Server: srv.URL, Token: "stub"})
+	}
+	defer func() { openClient = oldOC }()
+
+	var buf bytes.Buffer
+	sub := newGetCmd()
+	sub.SetOut(&buf)
+	sub.SetErr(&buf)
+	sub.SetContext(context.Background())
+	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got["my_rights"].([]any); !ok || len(v) != 0 {
+		t.Errorf("my_rights = %#v, want empty list; out=%s", got["my_rights"], buf.String())
 	}
 }

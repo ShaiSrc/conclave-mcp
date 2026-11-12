@@ -1,13 +1,13 @@
-// Package rooms implements the `conclave-mcp rooms` subcommand.
-//
-// Per SPEC-0004 §5, the rooms subcommand tree is:
+// Package rooms implements the `conclave-mcp rooms` subcommand:
 //
 //	conclave-mcp rooms list
-//	conclave-mcp rooms create <name> [--description ...]
+//	conclave-mcp rooms create --name <name> [--description ...]           (admin key)
 //	conclave-mcp rooms get <id>
-//	conclave-mcp rooms archive <id>
-//	conclave-mcp rooms invite <room-id> <api-key-id> [--role admin|member]
-//	conclave-mcp rooms remove <room-id> <api-key-id>
+//	conclave-mcp rooms archive <id>                                       (admin key)
+//	conclave-mcp rooms invite <room-id> <api-key-id> [--rights a,b] [--allow-multi-room]  (admin key)
+//	conclave-mcp rooms rights <room-id> <api-key-id> <rights>             (admin key)
+//	conclave-mcp rooms members [room]
+//	conclave-mcp rooms remove <room-id> <api-key-id>                      (admin key)
 //
 // All subcommands talk to a running server via the CLI client. They
 // never touch SQLite directly.
@@ -20,18 +20,21 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/cli/client"
+	"github.com/hermes/conclave-mcp/internal/rights"
 )
 
 // NewCmd builds the `rooms` subcommand tree.
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "rooms",
-		Short: "Manage rooms (create, list, get, archive, invite, remove)",
+		Short: "Manage rooms (create, list, get, archive, invite, rights, members, remove)",
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(newListCmd())
@@ -39,6 +42,8 @@ func NewCmd() *cobra.Command {
 	cmd.AddCommand(newGetCmd())
 	cmd.AddCommand(newArchiveCmd())
 	cmd.AddCommand(newInviteCmd())
+	cmd.AddCommand(newRightsCmd())
+	cmd.AddCommand(newMembersCmd())
 	cmd.AddCommand(newRemoveCmd())
 	return cmd
 }
@@ -54,6 +59,8 @@ type roomView struct {
 	OwnerKeyID  int64  `json:"owner_key_id"`
 	CreatedAt   string `json:"created_at"`
 	ArchivedAt  string `json:"archived_at,omitempty"`
+	// MyRights is the caller's own rights (GET /v1/rooms/{id} only).
+	MyRights []string `json:"my_rights,omitempty"`
 }
 
 type listResponse struct {
@@ -116,7 +123,7 @@ func newListCmd() *cobra.Command {
 	var format string
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List rooms the caller is a member of",
+		Short: "List your rooms (an admin key sees every room)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
@@ -162,7 +169,7 @@ func newCreateCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Create a new room (caller becomes owner)",
+		Short: "Create a new room (admin key only)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
@@ -195,7 +202,7 @@ func newCreateCmd() *cobra.Command {
 func newGetCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "get <id>",
-		Short: "Show details of a single room (members only)",
+		Short: "Show a room and your rights in it (my_rights)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
@@ -204,9 +211,15 @@ func newGetCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				// Shadow MyRights without omitempty so a member with no
+				// rights sees an empty list instead of a missing field.
+				view := struct {
+					roomView
+					MyRights []string `json:"my_rights"`
+				}{r, append([]string{}, r.MyRights...)}
 				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
-				return enc.Encode(r)
+				return enc.Encode(view)
 			})
 		},
 	}
@@ -218,7 +231,7 @@ func newGetCmd() *cobra.Command {
 func newArchiveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "archive <id>",
-		Short: "Soft-archive a room (owner only)",
+		Short: "Soft-archive a room (admin key only)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
@@ -237,33 +250,139 @@ func newArchiveCmd() *cobra.Command {
 // ---------- invite ----------
 
 func newInviteCmd() *cobra.Command {
-	var role string
+	var flagRights string
+	var flagMulti bool
 	cmd := &cobra.Command{
 		Use:   "invite <room-id> <api-key-id>",
-		Short: "Add an API key to a room (owner only)",
-		Args:  cobra.ExactArgs(2),
+		Short: "Add an API key to a room with the given rights (admin key only)",
+		Long: `Adds an API key to a room (admin key only). --rights is a
+comma-separated list of read, claim and message types (question, answer,
+decision, handoff, status_update, task_assignment, alert, system), or
+all / none. Without --rights the key gets no rights. A key that is
+already in another room is refused unless --allow-multi-room is given.`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			roomID, keyID := args[0], args[1]
-			keyIDInt, err := parseInt64(keyID)
+			roomID := args[0]
+			keyIDInt, err := parseInt64(args[1])
 			if err != nil {
 				return &exitError{Code: 2, Err: fmt.Errorf("api-key-id: %w", err)}
 			}
+			list := rights.Split(flagRights)
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				_, err := c.Do(ctx, client.Request{
 					Method: "POST",
 					Path:   "/v1/rooms/" + roomID + "/members",
-					Body:   map[string]any{"key_id": keyIDInt, "role": role},
+					Body:   map[string]any{"key_id": keyIDInt, "rights": list, "allow_multi_room": flagMulti},
 				})
 				if err != nil {
 					return err
 				}
-				_, _ = fmt.Fprintf(out, "invited key %d to room %s as %s\n", keyIDInt, roomID, role)
+				if len(list) == 0 {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "key %d has no rights in room %s; grant them with: conclave-mcp rooms rights %s %d <rights>\n",
+						keyIDInt, roomID, roomID, keyIDInt)
+				}
+				_, _ = fmt.Fprintf(out, "invited key %d to room %s with rights %s\n", keyIDInt, roomID, rightsText(list))
 				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&role, "role", "writer", "role: owner|writer|reader")
+	cmd.Flags().StringVar(&flagRights, "rights", "", "comma-separated rights, or all / none (default: none)")
+	cmd.Flags().BoolVar(&flagMulti, "allow-multi-room", false, "allow a key that is already in another room")
 	return cmd
+}
+
+// ---------- rights ----------
+
+func newRightsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "rights <room-id> <api-key-id> <rights>",
+		Short: "Replace a member's rights (admin key only)",
+		Long:  "Replaces a member's rights (admin key only). <rights> is a comma-separated list, or all / none.",
+		Args:  cobra.ExactArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			roomID, keyID := args[0], args[1]
+			if _, err := parseInt64(keyID); err != nil {
+				return &exitError{Code: 2, Err: fmt.Errorf("api-key-id: %w", err)}
+			}
+			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var resp struct {
+					Rights []string `json:"rights"`
+				}
+				if _, err := c.Do(ctx, client.Request{
+					Method: "PATCH",
+					Path:   "/v1/rooms/" + roomID + "/members/" + keyID,
+					Body:   map[string]any{"rights": rights.Split(args[2])},
+					Out:    &resp,
+				}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "key %s in room %s: %s\n", keyID, roomID, rightsText(resp.Rights))
+				return nil
+			})
+		},
+	}
+}
+
+// ---------- members ----------
+
+func newMembersCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "members [room]",
+		Short: "List a room's members (needs read; rights shown to admin keys)",
+		Long: `Lists a room's members: key id, label, internal/external, and each
+member's rights when the caller is an admin key. ROOM is a room id or
+name; without it: $CONCLAVE_ROOM, then the room in the .conclave.json of
+the repository you are in.`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				arg := ""
+				if len(args) > 0 {
+					arg = args[0]
+				}
+				roomID, err := agent.RoomID(ctx, c, arg)
+				if err != nil {
+					return err
+				}
+				var resp struct {
+					Members []struct {
+						KeyID       int64  `json:"key_id"`
+						Label       string `json:"label"`
+						TrustOrigin string `json:"trust_origin"`
+						// Only admin keys get rights; JSON [] decodes to an
+						// empty non-nil slice, a missing field to nil.
+						Rights []string `json:"rights"`
+					} `json:"members"`
+				}
+				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + roomID + "/members", Out: &resp}); err != nil {
+					return err
+				}
+				admin := len(resp.Members) > 0 && resp.Members[0].Rights != nil
+				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				header := "ID\tLABEL\tTRUST"
+				if admin {
+					header += "\tRIGHTS"
+				}
+				_, _ = fmt.Fprintln(tw, header)
+				for _, m := range resp.Members {
+					line := fmt.Sprintf("%d\t%s\t%s", m.KeyID, m.Label, m.TrustOrigin)
+					if admin {
+						line += "\t" + rightsText(m.Rights)
+					}
+					_, _ = fmt.Fprintln(tw, line)
+				}
+				return tw.Flush()
+			})
+		},
+	}
+}
+
+// rightsText renders rights for humans: "read,handoff", or "none".
+func rightsText(list []string) string {
+	if len(list) == 0 {
+		return "none"
+	}
+	return strings.Join(list, ",")
 }
 
 // ---------- remove ----------
@@ -271,7 +390,7 @@ func newInviteCmd() *cobra.Command {
 func newRemoveCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "remove <room-id> <api-key-id>",
-		Short: "Remove an API key from a room (owner only)",
+		Short: "Remove an API key from a room (admin key only)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roomID, keyID := args[0], args[1]

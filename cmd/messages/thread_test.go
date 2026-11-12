@@ -40,8 +40,8 @@ func threadAPI(t *testing.T) (url string, release chan struct{}) {
 		switch r.URL.Path {
 		case "/v1/whoami":
 			fmt.Fprint(w, `{"id":1}`)
-		case "/v1/keys":
-			fmt.Fprint(w, `{"keys":[{"id":1,"label":"agent-a"},{"id":2,"label":"agent-b"}]}`)
+		case "/v1/rooms/" + threadRoom + "/members":
+			fmt.Fprint(w, `{"members":[{"key_id":1,"label":"agent-a"},{"key_id":2,"label":"agent-b"}]}`)
 		case "/v1/rooms/" + threadRoom + "/messages":
 			if released() {
 				fmt.Fprintf(w, `{"messages":[%s,
@@ -190,8 +190,8 @@ func TestList_TableShowsAuthorTypeReplyAndExcerpt(t *testing.T) {
 	long := strings.Repeat("x", 200)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/v1/keys":
-			fmt.Fprint(w, `{"keys":[{"id":2,"label":"agent-b"}]}`)
+		case "/v1/rooms/" + threadRoom + "/members":
+			fmt.Fprint(w, `{"members":[{"key_id":2,"label":"agent-b"}]}`)
 		default:
 			_ = json.NewEncoder(w).Encode(map[string]any{"messages": []map[string]any{
 				{"id": 7, "author_key_id": 2, "ts": "t7", "trust_origin": "internal", "message_type": "answer",
@@ -224,8 +224,8 @@ func TestList_TableShowsAuthorTypeReplyAndExcerpt(t *testing.T) {
 
 func TestList_JSONKeepsAllFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/keys" {
-			fmt.Fprint(w, `{"keys":[{"id":2,"label":"agent-b"}]}`)
+		if r.URL.Path == "/v1/rooms/"+threadRoom+"/members" {
+			fmt.Fprint(w, `{"members":[{"key_id":2,"label":"agent-b"}]}`)
 			return
 		}
 		fmt.Fprint(w, `{"messages":[{"id":7,"author_key_id":2,"ts":"t7","content":"hi","message_type":"answer","metadata":{"reply_to":3}}]}`)

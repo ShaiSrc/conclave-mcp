@@ -1,16 +1,18 @@
 // Package rooms implements the rooms endpoints from SPEC-0003 §4.
 //
-// Endpoints:
+// Endpoints ("admin" = admin key only; room access is checked by
+// internal/rights):
 //
-//	POST   /v1/rooms                       -- create (caller becomes owner)
-//	GET    /v1/rooms                       -- list rooms caller is a member of
-//	GET    /v1/rooms/{id}                  -- details (members only; 404 otherwise)
-//	POST   /v1/rooms/{id}/archive          -- soft-delete (owner only)
-//	POST   /v1/rooms/{id}/members          -- invite (owner only)
-//	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (owner only)
+//	POST   /v1/rooms                       -- create (admin)
+//	GET    /v1/rooms                       -- the caller's rooms (admin: every room)
+//	GET    /v1/rooms/{id}                  -- details + my_rights (members, admin; 404 otherwise)
+//	GET    /v1/rooms/{id}/members          -- members (read right, admin)
+//	POST   /v1/rooms/{id}/archive          -- soft-delete (admin)
+//	POST   /v1/rooms/{id}/members          -- invite with rights (admin; /invite is an alias)
+//	PATCH  /v1/rooms/{id}/members/{keyid}  -- replace a member's rights (admin)
+//	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (admin)
 //
-// All mutations are intended to be audit-logged; that hook is
-// wired by the server in a follow-up task.
+// Mutations are audit-logged.
 package rooms
 
 import (
@@ -26,6 +28,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 )
 
 // Service is the rooms HTTP handler.
@@ -40,14 +43,23 @@ func (s *Service) Routes(r chi.Router) {
 	r.Get("/rooms", s.list)
 	r.Get("/rooms/{id}", s.get)
 	r.Post("/rooms/{id}/archive", s.archive)
-	// Both /members and /invite are accepted (SPEC-0003 §4.1
-	// says "invite"; the original implementation used
-	// /members, which is the internal column name. We
-	// register /invite first so the chi router matches it
-	// when both are requested).
+	// Both /members and /invite are accepted (SPEC-0003 §4.1 says
+	// "invite"; the original implementation used /members).
 	r.Post("/rooms/{id}/invite", s.invite)
 	r.Post("/rooms/{id}/members", s.invite)
+	r.Get("/rooms/{id}/members", s.members)
+	r.Patch("/rooms/{id}/members/{keyid}", s.setRights)
 	r.Delete("/rooms/{id}/members/{keyid}", s.removeMember)
+}
+
+// requireAdmin answers 403 unless the caller is an admin key: only the
+// operator manages rooms, members and rights.
+func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	if auth.IsAdmin(r.Context()) {
+		return true
+	}
+	writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
+	return false
 }
 
 type roomView struct {
@@ -72,6 +84,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "no auth claims")
+		return
+	}
+	if !requireAdmin(w, r) {
 		return
 	}
 	var req createRequest
@@ -121,9 +136,11 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert room")
 		return
 	}
+	// The creator is an admin key; its row keeps the owner role (the
+	// owner trigger needs one) and gets every right.
 	if _, err := tx.ExecContext(r.Context(),
-		`INSERT INTO room_members(room_id, key_id, role, joined_at) VALUES (?, ?, 'owner', ?)`,
-		id, caller, now,
+		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'owner', ?, ?)`,
+		id, caller, now, rights.All().Storage(),
 	); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert owner member")
 		return
@@ -147,9 +164,8 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// list returns rooms visible to the caller (SPEC-0003 §3.3):
-// all public rooms + all rooms the caller is a member of.
-// An optional `?visibility=public` filter restricts the result.
+// list returns the rooms the caller is a member of; an admin key gets
+// every room. Archived rooms are left out; ?visibility= narrows the set.
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
@@ -161,47 +177,18 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "visibility must be private or public")
 		return
 	}
-
-	// SQL: if the caller wants public only, drop the
-	// member-join and return all public, non-archived rooms.
-	// Otherwise return the union of public + member rooms.
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if visibilityFilter == "public" {
-		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility
-			 FROM rooms
-			 WHERE visibility = 'public' AND archived_at IS NULL
-			 ORDER BY created_at DESC`)
-	} else if visibilityFilter == "private" {
-		// "private only" means "rooms I am a member of that
-		// are private". This is the "personal workspace"
-		// view; public rooms are excluded by the user.
-		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility
-			 FROM rooms r
-			 INNER JOIN room_members m ON m.room_id = r.id
-			 WHERE m.key_id = ? AND r.visibility = 'private' AND r.archived_at IS NULL
-			 ORDER BY r.created_at DESC`,
-			caller)
-	} else {
-		// No filter: public rooms + rooms the caller is a
-		// member of. The UNION keeps the result set
-		// deduplicated by id.
-		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility
-			 FROM rooms r
-			 WHERE r.visibility = 'public' AND r.archived_at IS NULL
-			 UNION
-			 SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility
-			 FROM rooms r
-			 INNER JOIN room_members m ON m.room_id = r.id
-			 WHERE m.key_id = ? AND r.archived_at IS NULL
-			 ORDER BY created_at DESC`,
-			caller)
+	admin := 0
+	if auth.IsAdmin(r.Context()) {
+		admin = 1
 	}
+	rows, err := s.DB.QueryContext(r.Context(),
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility
+		 FROM rooms r
+		 WHERE r.archived_at IS NULL
+		   AND (? = 1 OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.key_id = ?))
+		   AND (? = '' OR r.visibility = ?)
+		 ORDER BY r.created_at DESC`,
+		admin, caller, visibilityFilter, visibilityFilter)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "list query")
 		return
@@ -219,57 +206,84 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
-		if desc.Valid {
-			rv.Description = desc.String
-		}
-		if archived.Valid {
-			rv.ArchivedAt = archived.String
-		}
+		rv.Description, rv.ArchivedAt = desc.String, archived.String
 		out = append(out, rv)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})
 }
 
+// get returns a room to its members (whatever their rights) and to
+// admin keys, with the caller's own rights as my_rights.
 func (s *Service) get(w http.ResponseWriter, r *http.Request) {
-	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
+	mem, ok := rights.Require(w, r, s.DB, id, "")
+	if !ok {
+		return
+	}
 	var (
 		rv       roomView
 		desc     sql.NullString
 		archived sql.NullString
 	)
-	err := s.DB.QueryRowContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility
-		 FROM rooms r
-		 INNER JOIN room_members m ON m.room_id = r.id
-		 WHERE r.id = ? AND m.key_id = ?`,
-		id, caller,
-	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-			return
-		}
+	if err := s.DB.QueryRowContext(r.Context(),
+		`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility FROM rooms WHERE id = ?`, id,
+	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "get query")
 		return
 	}
-	if desc.Valid {
-		rv.Description = desc.String
+	rv.Description, rv.ArchivedAt = desc.String, archived.String
+	writeJSON(w, http.StatusOK, struct {
+		roomView
+		MyRights rights.Set `json:"my_rights"`
+	}{rv, mem.Rights})
+}
+
+// members lists a room's members to keys holding read and to admin
+// keys; only admin keys also get each member's rights.
+func (s *Service) members(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	mem, ok := rights.Require(w, r, s.DB, id, rights.Read)
+	if !ok {
+		return
 	}
-	if archived.Valid {
-		rv.ArchivedAt = archived.String
+	rows, err := s.DB.QueryContext(r.Context(),
+		`SELECT m.key_id, k.label, k.trust_origin, m.rights
+		 FROM room_members m JOIN api_keys k ON k.id = m.key_id
+		 WHERE m.room_id = ? ORDER BY m.key_id`, id)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "members query")
+		return
 	}
-	writeJSON(w, http.StatusOK, rv)
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var (
+			keyID                int64
+			label, trust, stored string
+		)
+		if err := rows.Scan(&keyID, &label, &trust, &stored); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
+			return
+		}
+		m := map[string]any{"key_id": keyID, "label": label, "trust_origin": trust}
+		if mem.Admin {
+			m["rights"] = rights.FromStorage(stored)
+		}
+		out = append(out, m)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"members": out})
 }
 
 func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := s.DB.ExecContext(r.Context(),
-		`UPDATE rooms SET archived_at = ?
-		 WHERE id = ? AND owner_key_id = ? AND archived_at IS NULL`,
-		now, id, caller,
+		`UPDATE rooms SET archived_at = ? WHERE id = ? AND archived_at IS NULL`,
+		now, id,
 	)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "archive")
@@ -277,7 +291,7 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		writeErr(w, r, http.StatusNotFound, "not_found", "room not found or not owner")
+		writeErr(w, r, http.StatusNotFound, "not_found", "room not found or already archived")
 		return
 	}
 	_ = audit.Write(r.Context(), s.DB, caller, "room.archive", "room", id, id, "ok", "")
@@ -285,11 +299,18 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 }
 
 type inviteRequest struct {
-	KeyID int64  `json:"key_id"`
-	Role  string `json:"role"`
+	KeyID int64 `json:"key_id"`
+	// Rights wins over Role. Role is what clients from before rights
+	// send: owner/writer become all, reader becomes read.
+	Rights         []string `json:"rights"`
+	Role           string   `json:"role"`
+	AllowMultiRoom bool     `json:"allow_multi_room"`
 }
 
 func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
 	var req inviteRequest
@@ -301,31 +322,50 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "key_id required")
 		return
 	}
-	switch req.Role {
-	case "owner", "writer", "reader":
-	default:
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "role must be owner|writer|reader")
+	set, err := rights.Parse(req.Rights)
+	if req.Rights == nil && req.Role != "" {
+		set, err = rights.FromRole(req.Role)
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	var ownerID int64
-	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT owner_key_id FROM rooms WHERE id = ?`, id,
-	).Scan(&ownerID); err != nil {
+	var exists int
+	if err := s.DB.QueryRowContext(r.Context(), `SELECT 1 FROM rooms WHERE id = ?`, id).Scan(&exists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
 			return
 		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "owner lookup")
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
 		return
 	}
-	if ownerID != caller {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "only owner can invite")
+	// One room per key: a key that is not an admin key and is already
+	// in another room that is not archived needs allow_multi_room.
+	var isAdmin, elsewhere bool
+	err = s.DB.QueryRowContext(r.Context(),
+		`SELECT k.is_admin, EXISTS (
+		   SELECT 1 FROM room_members m JOIN rooms o ON o.id = m.room_id
+		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL)
+		 FROM api_keys k WHERE k.id = ? AND k.revoked_at IS NULL`,
+		id, req.KeyID,
+	).Scan(&isAdmin, &elsewhere)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, r, http.StatusNotFound, "not_found", "key not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "key lookup")
+		return
+	}
+	if elsewhere && !isAdmin && !req.AllowMultiRoom {
+		writeErr(w, r, http.StatusConflict, "key_in_other_room",
+			"key is already a member of another room; pass allow_multi_room to add it anyway")
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := s.DB.ExecContext(r.Context(),
-		`INSERT INTO room_members(room_id, key_id, role, joined_at) VALUES (?, ?, ?, ?)`,
-		id, req.KeyID, req.Role, now,
+		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)`,
+		id, req.KeyID, now, set.Storage(),
 	); err != nil {
 		if isUniqueViolation(err) {
 			writeErr(w, r, http.StatusConflict, "conflict", "already a member")
@@ -334,32 +374,74 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert member")
 		return
 	}
-	_ = audit.Write(r.Context(), s.DB, caller, "room.invite", "member", strconv.FormatInt(req.KeyID, 10), id, "ok",
-		`{"room_id":`+strconvQuote(id)+`,"role":`+strconvQuote(req.Role)+`}`)
+	detail, _ := json.Marshal(map[string]any{"room_id": id, "rights": set})
+	_ = audit.Write(r.Context(), s.DB, caller, "room.invite", "member", strconv.FormatInt(req.KeyID, 10), id, "ok", string(detail))
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
-	caller := callerKeyID(r)
+// setRights replaces a member's rights (PATCH /rooms/{id}/members/{keyid}).
+func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	id := chi.URLParam(r, "id")
 	keyid, err := strconv.ParseInt(chi.URLParam(r, "keyid"), 10, 64)
 	if err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "keyid must be integer")
 		return
 	}
-	var ownerID int64
-	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT owner_key_id FROM rooms WHERE id = ?`, id,
-	).Scan(&ownerID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-			return
-		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "owner lookup")
+	var req struct {
+		Rights []string `json:"rights"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Rights == nil {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", `body must be {"rights": [...]}`)
 		return
 	}
-	if ownerID != caller {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "only owner can remove members")
+	set, err := rights.Parse(req.Rights)
+	if err != nil {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	// ponytail: the old rights are read outside a transaction, so two
+	// concurrent PATCHes of one member can audit a stale "old".
+	// Admin-only and rare; wrap both in a tx if that ever matters.
+	var old string
+	err = s.DB.QueryRowContext(r.Context(),
+		`SELECT rights FROM room_members WHERE room_id = ? AND key_id = ?`, id, keyid,
+	).Scan(&old)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
+		return
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "member lookup")
+		return
+	}
+	res, err := s.DB.ExecContext(r.Context(),
+		`UPDATE room_members SET rights = ? WHERE room_id = ? AND key_id = ?`, set.Storage(), id, keyid,
+	)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "update rights")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 { // removed between lookup and update
+		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
+		return
+	}
+	detail, _ := json.Marshal(map[string]any{"room_id": id, "old": rights.FromStorage(old), "new": set})
+	_ = audit.Write(r.Context(), s.DB, callerKeyID(r), "room.rights", "member", strconv.FormatInt(keyid, 10), id, "ok", string(detail))
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": keyid, "rights": set})
+}
+
+func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
+	caller := callerKeyID(r)
+	id := chi.URLParam(r, "id")
+	keyid, err := strconv.ParseInt(chi.URLParam(r, "keyid"), 10, 64)
+	if err != nil {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "keyid must be integer")
 		return
 	}
 	res, err := s.DB.ExecContext(r.Context(),

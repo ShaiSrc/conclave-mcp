@@ -52,7 +52,7 @@ func NewStatusCmd() *cobra.Command {
 				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + roomID + "/claims", Out: &held}); err != nil {
 					return mapErr(err)
 				}
-				return renderStatus(out, c.BaseURL, roomName(ctx, c, roomID), roomID, msgs, agent.Labels(ctx, c), held.Claims, flagSince)
+				return renderStatus(out, c.BaseURL, roomName(ctx, c, roomID), roomID, msgs, agent.Labels(ctx, c, roomID), held.Claims, flagSince)
 			})
 		},
 	}
@@ -78,7 +78,7 @@ func renderStatus(out io.Writer, server, name, roomID string, msgs []agent.Msg, 
 		fmt.Fprintln(w, "  none")
 	}
 	for _, m := range open {
-		fmt.Fprintf(w, "  #%d\t%s\t%s\t%s\t%s\n", m.ID, ago(m.TS, n), agent.Who(m, labels), m.MessageType, excerpt(m.Content, 60))
+		fmt.Fprintf(w, "  %s#%d\t%s\t%s\t%s\t%s\n", ext(m), m.ID, ago(m.TS, n), agent.Who(m, labels), m.MessageType, excerpt(m.Content, 60))
 	}
 
 	// Last message per author, most recent first.
@@ -100,7 +100,7 @@ func renderStatus(out io.Writer, server, name, roomID string, msgs []agent.Msg, 
 		if typ == "" {
 			typ = "-"
 		}
-		fmt.Fprintf(w, "  %s\t%s\t%s\n", agent.Who(m, labels), ago(m.TS, n), typ)
+		fmt.Fprintf(w, "  %s%s\t%s\t%s\n", ext(m), agent.Who(m, labels), ago(m.TS, n), typ)
 	}
 
 	fmt.Fprintln(w, "\nActive claims:")
@@ -157,4 +157,12 @@ func ago(ts string, n time.Time) string {
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
+}
+
+// ext marks an entry from an external key.
+func ext(m agent.Msg) string {
+	if m.TrustOrigin == "external" {
+		return "[EXT] "
+	}
+	return ""
 }

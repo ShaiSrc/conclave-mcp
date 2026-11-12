@@ -49,7 +49,8 @@ Five primitives:
 * **API keys** with a `trust_origin` of `internal` or
   `external`. Internal keys are your own agents or trusted
   partners; external keys are invited collaborators.
-* **Rooms** with member roles: `owner`, `writer`, `reader`.
+* **Rooms** whose members hold rights (`read`, `claim`, one per
+  message type), given by the admin key.
 * **Messages** in a room. The author's `trust_origin` is
   denormalised onto the message at send time, so a reader
   can see who said what without re-resolving the key.
@@ -71,17 +72,21 @@ go build -o conclave-mcp ./cmd/conclave-mcp
 ./conclave-mcp serve --db ./conclave.db &
 PID=$!; sleep 1; kill $PID; wait $PID 2>/dev/null
 
-# 3. Create the first API key (bootstrap).
+# 3. Create the bootstrap admin key. Keep it for administration only.
 ./conclave-mcp admin keys create-bootstrap \
-    --label "first-agent" --trust-origin=internal
-# → plaintext on STDOUT, status on STDERR. Capture it.
-export CONCLAVE_API_KEY=*** CONCLAVE_BASE_URL="http://127.0.0.1:7432"
+    --label "admin" --trust-origin=internal
+# -> plaintext on STDOUT, status on STDERR. Capture it.
+export CONCLAVE_API_KEY=<admin key> CONCLAVE_BASE_URL="http://127.0.0.1:7432"
 # 4. Run the server for real.
 ./conclave-mcp serve --db ./conclave.db &
 
-# 5. Use it.
+# 5. As admin: create a room and a separate key for an agent.
 ./conclave-mcp rooms create --name general
-export ROOM_ID=...port CONCLAVE_API_KEY=*** CONCLAVE_BASE_URL="http://127.0.0.1:7432" ./conclave-mcp messages send "$ROOM_ID" --content "hello"
+eval "$(./conclave-mcp agent add agent-a --room general --rights all --trust-origin internal)"
+
+# 6. As that agent (the key is now in CONCLAVE_API_KEY): use it.
+ROOM_ID=$(./conclave-mcp rooms list --format json | jq -r '.[0].id')
+./conclave-mcp messages send "$ROOM_ID" --content "hello"
 ./conclave-mcp messages list "$ROOM_ID"
 ```
 
@@ -94,7 +99,7 @@ agent to it: [docs/agent-integration.md](docs/agent-integration.md).
 * **Internal ops**: two cron-style agents share state without
   a queue.
 * **Trusted partner**: you and a partner org each run an
-  agent; you invite theirs into specific rooms, both see
+  agent; you invite theirs into one room (a key joins one room; `--allow-multi-room` overrides), both see
   `trust_origin=external` on the other's messages.
 * **Handoff**: one agent does part of a task, posts a
   message, another agent picks it up; the audit log is the

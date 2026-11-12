@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hermes/conclave-mcp/internal/agent"
 )
 
 func TestServer_Initialize(t *testing.T) {
@@ -56,12 +58,9 @@ func TestServer_ToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools not array: %T", result["tools"])
 	}
-	// 16 tools: 11 original + rooms.invite, rooms.remove
-	// (ADR-0007 §Open questions, resolved 2026-06-28) + the
-	// three claims tools. If a future commit adds or removes a
-	// tool, the message below makes the drift obvious.
-	if len(tools) != 16 {
-		t.Errorf("tool count: got %d, want 16 (13 + claims.list, claims.claim, claims.release)", len(tools))
+	// 17 tools: 13 + claims.list, claims.claim, claims.release + rooms.members.
+	if len(tools) != 17 {
+		t.Errorf("tool count: got %d, want 17", len(tools))
 	}
 	for i, raw := range tools {
 		m, ok := raw.(map[string]any)
@@ -209,7 +208,7 @@ func TestServer_PingAndToolResultShape(t *testing.T) {
 
 	rpc(t, s, `{"jsonrpc":"2.0","id":1,"method":"ping"}`)
 
-	if text, isErr := toolText(t, s, "rooms.invite", `{"room_id":"R","key_id":3,"role":"writer"}`); isErr || text != `{"ok":true}` {
+	if text, isErr := toolText(t, s, "rooms.invite", `{"room_id":"R","key_id":3,"rights":["read"]}`); isErr || text != `{"ok":true}` {
 		t.Errorf("invite with empty 201 body: got %q isError=%v, want {\"ok\":true}", text, isErr)
 	}
 	if text, isErr := toolText(t, s, "rooms.delete", `{"room_id":"nope"}`); !isErr || !strings.Contains(text, "404") {
@@ -429,5 +428,43 @@ func TestSendTool_ForwardsReplyTo(t *testing.T) {
 				t.Error("messages.send schema lacks reply_to")
 			}
 		}
+	}
+}
+
+func TestRoomsMembersTool(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/rooms/R/members" {
+			http.NotFound(w, r)
+			return
+		}
+		fmt.Fprint(w, `{"members":[{"key_id":2,"label":"agent-b","trust_origin":"internal"}]}`)
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "tk_test")
+	if text, isErr := toolText(t, s, "rooms.members", `{"room_id":"R"}`); isErr || !strings.Contains(text, "agent-b") {
+		t.Errorf("rooms.members: %q isError=%v", text, isErr)
+	}
+	if text, isErr := toolText(t, s, "rooms.members", `{}`); !isErr || !strings.Contains(text, "room_id") {
+		t.Errorf("missing room_id: %q isError=%v", text, isErr)
+	}
+}
+
+func TestToolDescriptions_AdminOnlyAndExternalNote(t *testing.T) {
+	desc := map[string]string{}
+	for _, tl := range tools {
+		desc[tl.name] = tl.desc
+	}
+	for _, n := range []string{"rooms.create", "rooms.delete", "rooms.invite", "rooms.remove", "messages.delete", "keys.list", "audit.list"} {
+		if !strings.Contains(desc[n], "Admin only") {
+			t.Errorf("%s: description must say Admin only: %q", n, desc[n])
+		}
+	}
+	for _, n := range []string{"messages.list", "messages.subscribe"} {
+		if !strings.Contains(desc[n], agent.ExternalNote) {
+			t.Errorf("%s: description must carry the external note", n)
+		}
+	}
+	if !strings.Contains(desc["keys.list"], "rooms.members") {
+		t.Errorf("keys.list must point to rooms.members: %q", desc["keys.list"])
 	}
 }

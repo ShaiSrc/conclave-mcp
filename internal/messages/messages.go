@@ -22,6 +22,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -67,8 +68,8 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", s.send)
 	r.Get("/rooms/{id}/messages", s.list)
-	// Soft-delete (SPEC-0001 Q8). Owner only; see delete()
-	// for the role check.
+	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
+	// 403 forbidden to every other caller.
 	r.Delete("/rooms/{id}/messages/{msgid}", s.delete)
 }
 
@@ -157,7 +158,7 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// SPEC-0001 Q7: optional intent tag. Empty / missing
-	// means "unstructured" (NULL in the DB). The trigger in
+	// is allowed and is stored as system (see below). The trigger in
 	// migration 0003 rejects unknown values; we pre-validate
 	// here for a friendlier 400.
 	if req.MessageType != "" {
@@ -189,39 +190,22 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		metadata = sql.NullString{String: string(req.Metadata), Valid: true}
 	}
 
-	// Verify caller is a member of an active room, with the
-	// correct role. SPEC-0003 §3.3: `room.send` requires
-	// owner or writer; reader cannot send. We also pick up
-	// the caller's trust_origin here so it can be
-	// denormalised onto the new message (SPEC-0001 Q11).
-	var (
-		role              string
-		archived          sql.NullString
-		callerTrustOrigin string
-	)
-	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT m.role, r.archived_at, k.trust_origin
-		 FROM rooms r
-		 INNER JOIN room_members m ON m.room_id = r.id
-		 INNER JOIN api_keys k ON k.id = m.key_id
-		 WHERE r.id = ? AND m.key_id = ?`,
-		roomID, caller,
-	).Scan(&role, &archived, &callerTrustOrigin); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-			return
-		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
+	// The message type is the right the caller needs; a message
+	// without a type is stored as system (SPEC-0001 Q7). The caller's
+	// trust_origin is denormalised onto the message (SPEC-0001 Q11).
+	messageType := req.MessageType
+	if messageType == "" {
+		messageType = rights.System
+	}
+	mem, ok := rights.Require(w, r, s.DB, roomID, messageType)
+	if !ok {
 		return
 	}
-	if archived.Valid {
+	if mem.Archived {
 		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
 		return
 	}
-	if role != "owner" && role != "writer" {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "reader role cannot send messages")
-		return
-	}
+	callerTrustOrigin := mem.TrustOrigin
 
 	// A reply_to inside metadata gets the same check as the field (the
 	// field wins when both are set).
@@ -283,15 +267,6 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	}
 	s.lastTS = t
 	now := storage.FormatTS(t)
-	// message_type is NOT NULL with DEFAULT 'system'; we
-	// send an explicit value rather than rely on the column
-	// default, so the SQLite CHECK on the 8 enum values
-	// fires (or doesn't) consistently. Empty string from the
-	// client becomes 'system' (the unstructured default).
-	messageType := req.MessageType
-	if messageType == "" {
-		messageType = "system"
-	}
 	res, err := s.DB.ExecContext(r.Context(),
 		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -345,19 +320,8 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := chi.URLParam(r, "id")
 
-	// Membership check (and 404 to non-members).
-	var archived sql.NullString
-	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT archived_at FROM rooms
-		 INNER JOIN room_members ON room_members.room_id = rooms.id
-		 WHERE rooms.id = ? AND room_members.key_id = ?`,
-		roomID, caller,
-	).Scan(&archived); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-			return
-		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
+	// 404 to non-members, 403 missing_right without read.
+	if _, ok := rights.Require(w, r, s.DB, roomID, rights.Read); !ok {
 		return
 	}
 
@@ -483,13 +447,12 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// delete soft-deletes a single message (SPEC-0001 Q8). Owner
-// only. The row is kept (with deleted_at set) for audit; the
-// GET /messages list endpoint filters it out.
+// delete soft-deletes a single message (SPEC-0001 Q8). Admin keys
+// only; they need not be members. The row is kept (with
+// deleted_at set) for audit; the GET /messages list endpoint filters it out.
 //
 // Idempotent: a second DELETE on an already-deleted message
-// returns 404 because the row is no longer visible to the
-// owner-check query.
+// returns 404 because the row is no longer visible.
 func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
@@ -504,18 +467,14 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the caller is the **owner** of the room (not
-	// just a writer). SPEC-0003 §3.3: `message.delete`
-	// requires `owner`.
-	var role string
+	if !auth.IsAdmin(r.Context()) {
+		writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
+		return
+	}
 	var archived sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT m.role, r.archived_at
-		 FROM rooms r
-		 INNER JOIN room_members m ON m.room_id = r.id
-		 WHERE r.id = ? AND m.key_id = ?`,
-		roomID, caller,
-	).Scan(&role, &archived); err != nil {
+		`SELECT archived_at FROM rooms WHERE id = ?`, roomID,
+	).Scan(&archived); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
 			return
@@ -525,10 +484,6 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	if archived.Valid {
 		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
-		return
-	}
-	if role != "owner" {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "only the room owner can delete messages")
 		return
 	}
 

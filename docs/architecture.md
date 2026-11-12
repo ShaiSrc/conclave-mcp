@@ -69,8 +69,9 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (16 tools)
+internal/mcp        MCP tool definitions (17 tools)
 internal/claims     path claims service + storage
+internal/rights     room rights: parse/store, the membership check every room handler runs
 internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
 internal/cli/client shared HTTP client for every subcommand (token resolution)
 internal/cli/keystore stored agent keys (macOS Keychain or 0600 files)
@@ -79,7 +80,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0007)
+migrations/         numbered SQL migrations (0001..0008)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -103,8 +104,9 @@ api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at)
 rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at)
   visibility  'private' or 'public'
 
-room_members(room_id, key_id, role, created_at)
-  role        'owner', 'writer', or 'reader'
+room_members(room_id, key_id, role, joined_at, rights)
+  rights      comma-separated rights (migration 0008), see Permissions
+  role        'owner', 'writer' or 'reader'; kept for the schema, grants nothing
 
 messages(id [auto-inc], room_id, author_key_id, ts, content_type,
          content, message_type, metadata, deleted_at, trust_origin)
@@ -115,38 +117,40 @@ audit_log(id [auto-inc], ts, actor_key_id, action, room_id,
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0000..0004`. New migrations are added by creating
+`migrations/0001..0008`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
 ## HTTP API surface
 
-The HTTP API is in SPEC-0003 (in the vault). The endpoints
-that exist in v0.4.0:
+The HTTP API is in SPEC-0003 (in the vault). The endpoints, with who
+may call them (see [Permissions](#permissions)):
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/healthz` | Liveness probe. |
-| `GET` | `/v1/keys` | List API keys. |
-| `POST` | `/v1/keys` | Create a new API key. |
-| `DELETE` | `/v1/keys/{id}` | Revoke an API key. |
-| `GET` | `/v1/whoami` | The caller's own key. |
-| `GET` | `/v1/rooms` | List rooms the caller is a member of. |
-| `POST` | `/v1/rooms` | Create a new room. |
-| `GET` | `/v1/rooms/{id}` | Get room details and members. |
-| `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. |
-| `POST` | `/v1/rooms/{id}/members` | Invite an API key (`/invite` is an alias). |
-| `DELETE` | `/v1/rooms/{id}/members/{key_id}` | Remove an API key. |
-| `GET` | `/v1/rooms/{id}/messages` | List messages. |
-| `POST` | `/v1/rooms/{id}/messages` | Send a message. |
-| `DELETE` | `/v1/rooms/{id}/messages/{msg_id}` | Soft-delete a message. |
-| `GET` | `/v1/rooms/{id}/events?wait=N` | SSE stream. |
-| `GET` | `/v1/rooms/{id}/claims` | List active path claims. |
-| `POST` | `/v1/rooms/{id}/claims` | Claim paths (409 on overlap). |
-| `POST` | `/v1/rooms/{id}/claims/heartbeat` | Extend the caller's claims. |
-| `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (the room owner may release another key's). |
-| `GET` | `/v1/audit` | List audit entries. |
-| `POST` | `/v1/mcp` | MCP over HTTP. |
+| Method | Path | Purpose | Access |
+|---|---|---|---|
+| `GET` | `/healthz` | Liveness probe. | anyone |
+| `GET` | `/v1/keys` | List API keys. | admin |
+| `POST` | `/v1/keys` | Create an API key (`trust_origin` defaults to `external`). | admin |
+| `DELETE` | `/v1/keys/{id}` | Revoke an API key. | admin |
+| `GET` | `/v1/whoami` | The caller's own key. | any key |
+| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room. | any key |
+| `POST` | `/v1/rooms` | Create a room. | admin |
+| `GET` | `/v1/rooms/{id}` | Room details and `my_rights`. | member, admin |
+| `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. | admin |
+| `POST` | `/v1/rooms/{id}/members` | Invite a key with rights (`/invite` is an alias). | admin |
+| `GET` | `/v1/rooms/{id}/members` | List members (admin keys also get rights). | `read`, admin |
+| `PATCH` | `/v1/rooms/{id}/members/{key_id}` | Replace a member's rights. | admin |
+| `DELETE` | `/v1/rooms/{id}/members/{key_id}` | Remove a member. | admin |
+| `GET` | `/v1/rooms/{id}/messages` | List messages. | `read` |
+| `POST` | `/v1/rooms/{id}/messages` | Send a message. | the message type's right (`system` without a type) |
+| `DELETE` | `/v1/rooms/{id}/messages/{msg_id}` | Soft-delete a message. | admin |
+| `GET` | `/v1/rooms/{id}/events?wait=N` | SSE stream. | `read`, checked again before each message |
+| `GET` | `/v1/rooms/{id}/claims` | List active path claims. | `read` |
+| `POST` | `/v1/rooms/{id}/claims` | Claim paths (409 on overlap). | `claim` |
+| `POST` | `/v1/rooms/{id}/claims/heartbeat` | Extend the caller's claims. | `claim` |
+| `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (an admin key may release another key's). | `claim` |
+| `GET` | `/v1/audit` | List audit entries. | admin |
+| `POST` | `/v1/mcp` | MCP over HTTP; each tool calls the endpoints above with the caller's key. | any key |
 
 All endpoints return JSON. Errors are JSON of the form
 `{"error": {"code": "string", "message": "string",
@@ -161,7 +165,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 16 tools:
+arguments are the same). The 17 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -171,14 +175,15 @@ arguments are the same). The 16 tools:
 6. `rooms.delete` (soft-archive)
 7. `rooms.invite`
 8. `rooms.remove`
-9. `messages.send`
-10. `messages.list`
-11. `messages.delete`
-12. `messages.subscribe`
-13. `audit.list`
-14. `claims.list`
-15. `claims.claim`
-16. `claims.release`
+9. `rooms.members`
+10. `messages.send`
+11. `messages.list`
+12. `messages.delete`
+13. `messages.subscribe`
+14. `audit.list`
+15. `claims.list`
+16. `claims.claim`
+17. `claims.release`
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument
@@ -205,6 +210,50 @@ The first API key on a fresh install is created with
 hashes it, and inserts the row directly into SQLite. After
 that, all key creation goes through `POST /v1/keys` and is
 recorded in the audit log.
+
+## Permissions
+
+What a key may do in a room is the set of rights on its membership
+(`room_members.rights`), given when an admin key invites it:
+
+| Right | Allows |
+|---|---|
+| `read` | listing messages, the live stream, listing claims, the member list |
+| `claim` | taking, renewing and releasing claims |
+| `question` `answer` `decision` `handoff` `status_update` `task_assignment` `alert` `system` | sending a message of that type; a message without a type is stored as `system` |
+
+* The API and the CLI accept `all` and `none`. `all` is expanded when
+  stored, so a message type added later is not granted to existing
+  members. An unknown right is `400 bad_request`.
+* An invitation without rights grants nothing. Clients from before
+  rights may send `role`: `owner`/`writer` become `all`, `reader`
+  becomes `read`; `rights` wins when both are sent. The `role` column
+  stays for the schema and grants nothing.
+* A key is in one room. Inviting a key that is already in another
+  room that is not archived answers `409 key_in_other_room` unless the
+  request sets `allow_multi_room`. Admin keys are exempt.
+* Only admin keys manage keys, rooms, members and rights, delete
+  messages, list keys and read the audit log; other keys get
+  `403 forbidden` ("admin key required"). Admin keys pass every room
+  check without being members, and their messages carry their own
+  `trust_origin`.
+* A non-member gets `404` (a key cannot tell whether a room exists), a
+  member without the right `403 missing_right` ("missing right:
+  <right>"). An archived room answers `403 missing_right` first when
+  the member lacks the right (send, live stream, claims), otherwise its
+  old answer (`410` for send and the live stream, `404` for claims).
+* Rights are read from the database on every request, so a change
+  applies to the next one. A live stream checks `read` again before
+  each message and ends when it is gone.
+* A key that is not an admin key sees only its own rooms, and the
+  members of rooms where it holds `read`.
+* `room.invite` in the audit log records the rights given;
+  `room.rights` records the old and the new set.
+* MCP tools call these endpoints with the agent's own key, so they get
+  the same checks.
+
+Putting one of your agents into a room with third-party agents:
+[shared-rooms.md](shared-rooms.md).
 
 ## Rate limiting
 

@@ -3,7 +3,7 @@
 // Endpoints:
 //
 //	POST   /v1/keys       -- create; returns plaintext once
-//	GET    /v1/keys       -- list (id, label, prefix, created_at,
+//	GET    /v1/keys       -- list, admin only (id, label, prefix, created_at,
 //	                         last_used_at, revoked_at)
 //	DELETE /v1/keys/{id}  -- soft-revoke (set revoked_at), admin only
 //	GET    /v1/whoami     -- the caller's own key
@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"slices"
 	"strconv"
 	"time"
 
@@ -41,9 +40,8 @@ func NewService(db *sql.DB) *Service {
 	return &Service{DB: db}
 }
 
-// ScopeAdmin is the only scope so far: admin keys may create and
-// revoke keys (migration 0005).
-const ScopeAdmin = "admin"
+// ScopeAdmin is auth.ScopeAdmin; LookupByPrefix grants it to admin keys.
+const ScopeAdmin = auth.ScopeAdmin
 
 // LookupByPrefix implements auth.KeyLookup. It returns the key id,
 // scopes ([ScopeAdmin] for admin keys, nil otherwise), and the
@@ -75,7 +73,7 @@ func (s *Service) LookupByPrefix(ctx context.Context, prefix string) (int64, []s
 // requireAdmin writes 403 and returns false unless the caller
 // holds ScopeAdmin.
 func requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	if c, ok := auth.FromContext(r.Context()); ok && slices.Contains(c.Scopes, ScopeAdmin) {
+	if auth.IsAdmin(r.Context()) {
 		return true
 	}
 	writeJSONError(w, r, http.StatusForbidden, "forbidden", "admin key required")
@@ -104,7 +102,7 @@ func (s *Service) whoami(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": c.KeyID, "label": label, "trust_origin": trust,
-		"admin": slices.Contains(c.Scopes, ScopeAdmin),
+		"admin": auth.IsAdmin(r.Context()),
 	})
 }
 
@@ -157,11 +155,11 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, r, http.StatusBadRequest, "bad_request", "label must be 1..128 chars")
 		return
 	}
-	// Default trust_origin to 'internal' if missing; reject
-	// anything outside the closed set before the SQL CHECK
-	// fires (so we return 400, not 500). SPEC-0001 Q11.
+	// A key without a trust mark is external: an invited agent is
+	// untrusted unless the operator says otherwise. Values outside the
+	// closed set get 400 before the SQL CHECK fires. SPEC-0001 Q11.
 	if req.TrustOrigin == "" {
-		req.TrustOrigin = TrustOriginInternal
+		req.TrustOrigin = TrustOriginExternal
 	}
 	if !AllowedTrustOrigins[req.TrustOrigin] {
 		writeJSONError(w, r, http.StatusBadRequest, "bad_request",
@@ -216,6 +214,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	rows, err := s.DB.QueryContext(r.Context(),
 		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin
 		 FROM api_keys

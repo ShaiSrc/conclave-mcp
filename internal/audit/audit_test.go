@@ -58,12 +58,12 @@ func seedKey(t *testing.T, db *sql.DB, label string) int64 {
 	return id
 }
 
-func newServer(t *testing.T, db *sql.DB, callerID int64) *chi.Mux {
+func newServer(t *testing.T, db *sql.DB, callerID int64, scopes ...string) *chi.Mux {
 	t.Helper()
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: callerID})
+			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: callerID, Scopes: scopes})
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
@@ -191,9 +191,18 @@ func setupAs(t *testing.T) (*chi.Mux, *sql.DB, int64) {
 	t.Helper()
 	db := setupDB(t)
 	id := seedKey(t, db, "k-"+t.Name())
-	return newServer(t, db, id), db, id
+	return newServer(t, db, id, auth.ScopeAdmin), db, id
 }
 
 // silence unused imports
 var _ = bytes.NewBuffer
 var _ = strconv.Itoa
+
+func TestAudit_ListIsAdminOnly(t *testing.T) {
+	db := setupDB(t)
+	rec := httptest.NewRecorder()
+	newServer(t, db, seedKey(t, db, "agent")).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/audit", nil))
+	if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte("admin key required")) {
+		t.Errorf("agent key: %d %s, want 403 admin key required", rec.Code, rec.Body.String())
+	}
+}

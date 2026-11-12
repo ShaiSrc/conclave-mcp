@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
 
@@ -45,8 +46,8 @@ func watchAPI(t *testing.T) string {
 		switch r.URL.Path {
 		case "/v1/whoami":
 			fmt.Fprint(w, `{"id":1}`)
-		case "/v1/keys":
-			fmt.Fprint(w, `{"keys":[{"id":1,"label":"agent-a"},{"id":2,"label":"agent-b"}]}`)
+		case "/v1/rooms/" + threadRoom + "/members":
+			fmt.Fprint(w, `{"members":[{"key_id":1,"label":"agent-a"},{"key_id":2,"label":"agent-b"}]}`)
 		case "/v1/rooms/" + threadRoom + "/messages":
 			since := r.URL.Query().Get("since")
 			mu.Lock()
@@ -66,7 +67,7 @@ func watchAPI(t *testing.T) string {
 			mu.Lock()
 			if len(stored) == 2 {
 				stored = append(stored,
-					`{"id":3,"author_key_id":2,"ts":"2026-11-11T10:02:00Z","message_type":"question","content":"Port\nwhich one?","metadata":{"reply_to":2}}`,
+					`{"id":3,"author_key_id":2,"ts":"2026-11-11T10:02:00Z","message_type":"question","content":"Port\nwhich one?","metadata":{"reply_to":2},"trust_origin":"external"}`,
 					`{"id":4,"author_key_id":1,"ts":"2026-11-11T10:03:00Z","message_type":"alert","content":"mine"}`)
 			}
 			mu.Unlock()
@@ -125,10 +126,16 @@ func TestWatch_BacklogThenLiveWithNotifications(t *testing.T) {
 	if strings.Count(got, "old two") != 1 {
 		t.Errorf("#2 should appear once:\n%s", got)
 	}
-	for _, want := range []string{"#3 agent-b <question> re #2: Port\n    which one?", "#4 agent-a (you) <alert>: mine"} {
+	for _, want := range []string{
+		"#3 agent-b (EXTERNAL, untrusted) <question> re #2:\n  --- external content from agent-b ---\n    Port\n    which one?\n  --- end of external content ---",
+		"#4 agent-a (you) <alert>: mine",
+	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	if strings.Count(got, agent.ExternalNote) != 1 || strings.Index(got, agent.ExternalNote) > strings.Index(got, "#3 agent-b") {
+		t.Errorf("want the note once, before the external message:\n%s", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()

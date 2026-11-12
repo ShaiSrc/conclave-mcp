@@ -22,8 +22,8 @@ func TestInbox_HookOutputSkipsOwnAndAdvancesCursor(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/whoami":
 			fmt.Fprint(w, `{"id":1}`)
-		case "/v1/keys":
-			fmt.Fprint(w, `{"keys":[{"id":1,"label":"agent-a"},{"id":2,"label":"agent-b"}]}`)
+		case "/v1/rooms/01M72DWQRAZXY3X8HWGJ0QZGNW/members":
+			fmt.Fprint(w, `{"members":[{"key_id":1,"label":"agent-a"},{"key_id":2,"label":"agent-b"}]}`)
 		case "/v1/rooms/01M72DWQRAZXY3X8HWGJ0QZGNW/messages":
 			if r.URL.Query().Get("since") == "t2" {
 				fmt.Fprint(w, `{"messages":[]}`)
@@ -115,8 +115,8 @@ func waitAPI(t *testing.T) (url string, release chan struct{}) {
 		switch r.URL.Path {
 		case "/v1/whoami":
 			fmt.Fprint(w, `{"id":1}`)
-		case "/v1/keys":
-			fmt.Fprint(w, `{"keys":[{"id":2,"label":"agent-b"}]}`)
+		case "/v1/rooms/" + waitRoom + "/members":
+			fmt.Fprint(w, `{"members":[{"key_id":2,"label":"agent-b"}]}`)
 		case "/v1/rooms/" + waitRoom + "/messages":
 			if released() && r.URL.Query().Get("since") != "t2" {
 				fmt.Fprint(w, `{"messages":[{"id":2,"author_key_id":2,"ts":"t2","content":"review please"}]}`)
