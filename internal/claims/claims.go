@@ -75,10 +75,10 @@ type Claim struct {
 
 var errBadPath = errors.New("paths must be relative to the repository root, without '..' (a trailing / claims a directory)")
 
-// Normalize returns the stored form of a claim path: '/'-separated,
-// cleaned and relative, with a trailing '/' for directories.
 var errControlPath = errors.New("paths must not contain control characters (newline, tab, escape, ...)")
 
+// Normalize returns the stored form of a claim path: '/'-separated,
+// cleaned and relative, with a trailing '/' for directories.
 func Normalize(p string) (string, error) {
 	p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
 	if p == "" || strings.HasPrefix(p, "/") {

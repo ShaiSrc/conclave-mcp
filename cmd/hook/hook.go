@@ -394,7 +394,7 @@ func (h *Hook) preToolUse(ctx context.Context, in agent.HookInput, cwd string, r
 		Body: map[string]any{"paths": []string{rel}, "auto": true, "ttl_seconds": int(repo.TTL().Seconds())}})
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict {
-		return deny(out, apiErr.Message+". "+ask)
+		return deny(out, agent.OneLine(apiErr.Message)+". "+ask)
 	}
 	if err == nil {
 		st.Heartbeat = h.Now().Unix() // a claim refreshes all own claims
