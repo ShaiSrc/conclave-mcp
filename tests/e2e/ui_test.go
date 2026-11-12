@@ -154,19 +154,26 @@ func TestE2E_WebUI(t *testing.T) {
 		t.Errorf("create a room with the cookie: %d %s", resp.StatusCode, body)
 	}
 
-	// Forged cross-site requests carry the cookie but fail the checks.
+	// Forged cross-site requests carry the cookie but fail the checks;
+	// each is refused for its own reason, not by another check.
 	for _, c := range []struct {
-		name, host string
-		hdr        map[string]string
-		want       int
+		name, method, host string
+		hdr                map[string]string
+		want               int
+		msg                string
 	}{
-		{"another origin", "localhost:" + port, map[string]string{"Origin": "http://attacker.example"}, 403},
-		{"no X-Conclave-UI header", "localhost:" + port, map[string]string{"X-Conclave-UI": ""}, 401},
-		{"rebound Host", "attacker.example:" + port, map[string]string{"Origin": "http://attacker.example:" + port}, 403},
+		{"another origin", "POST", "localhost:" + port, map[string]string{"Origin": "http://attacker.example"}, 403, "origin not allowed"},
+		{"no X-Conclave-UI header", "POST", "localhost:" + port, map[string]string{"X-Conclave-UI": ""}, 401, "X-Conclave-UI"},
+		{"rebound Host (POST, right Origin)", "POST", "attacker.example:" + port, nil, 403, "host not allowed"},
+		{"rebound Host (GET)", "GET", "attacker.example:" + port, nil, 403, "host not allowed"},
 	} {
 		host = c.host
-		if resp, body := do("POST", "/v1/rooms", `{"name":"forged"}`, c.hdr); resp.StatusCode != c.want {
-			t.Errorf("%s: %d %s, want %d", c.name, resp.StatusCode, body, c.want)
+		path, body := "/v1/rooms", `{"name":"forged"}`
+		if c.method == "GET" {
+			path, body = "/v1/whoami", ""
+		}
+		if resp, b := do(c.method, path, body, c.hdr); resp.StatusCode != c.want || !strings.Contains(b, c.msg) {
+			t.Errorf("%s: %d %s, want %d containing %q", c.name, resp.StatusCode, b, c.want, c.msg)
 		}
 	}
 	host = "localhost:" + port
@@ -191,8 +198,7 @@ func TestE2E_WebUI(t *testing.T) {
 	}
 
 	// admin ui-reset (server stopped), restart: the old session is dead.
-	env.cancel()
-	_ = env.cmd.Wait()
+	env.stop()
 	reset := exec.Command(env.BinaryPath(), "admin", "ui-reset", "--db", filepath.Join(env.DataDir(), "data.db"))
 	reset.Env = []string{"PATH=" + os.Getenv("PATH")}
 	if out, err := reset.CombinedOutput(); err != nil {
@@ -202,10 +208,42 @@ func TestE2E_WebUI(t *testing.T) {
 	if resp, _ := do("GET", "/v1/whoami", "", nil); resp.StatusCode != 401 {
 		t.Errorf("old session after reset: %d, want 401", resp.StatusCode)
 	}
+	oldSession := cookies["conclave_ui"]
 	delete(cookies, "conclave_ui")
 
 	// Set up again: a new passkey, a new operator key.
 	pk2, cred2 := setupAndRegister()
+	// A new operator exists now, so a 401 for the old cookie can only mean
+	// the reset deleted its session row.
+	newSession := cookies["conclave_ui"]
+	cookies["conclave_ui"] = oldSession
+	if resp, body := do("GET", "/v1/whoami", "", nil); resp.StatusCode != 401 {
+		t.Errorf("old session after reset and re-setup: %d %s, want 401", resp.StatusCode, body)
+	}
+	cookies["conclave_ui"] = newSession
+	// The reset revoked the old operator key and freed its label.
+	var keys struct {
+		Keys []struct {
+			ID        int64  `json:"id"`
+			Label     string `json:"label"`
+			RevokedAt string `json:"revoked_at"`
+		} `json:"keys"`
+	}
+	if r := env.call("GET", "/v1/keys", admin.Plaintext, nil); r.Status != 200 || json.Unmarshal(r.Body, &keys) != nil {
+		t.Fatalf("keys: %d %s", r.Status, r.Body)
+	}
+	foundOld := false
+	for _, k := range keys.Keys {
+		if k.ID == firstOperator {
+			foundOld = true
+			if k.RevokedAt == "" || k.Label != "operator-revoked-"+strconv.FormatInt(firstOperator, 10) {
+				t.Errorf("old operator key after reset: %+v, want revoked and renamed", k)
+			}
+		}
+	}
+	if !foundOld {
+		t.Errorf("old operator key %d missing from /v1/keys", firstOperator)
+	}
 	if id := operatorID(); id == firstOperator {
 		t.Errorf("operator id after re-setup is still %d, want a new key", id)
 	}

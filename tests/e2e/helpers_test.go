@@ -246,6 +246,8 @@ type subprocessEnv struct {
 	cancel     context.CancelFunc
 	dataDir    string
 	binaryPath string
+	stopOnce   sync.Once
+	stderr     *bytes.Buffer
 }
 
 // startSubprocess builds, then spawns the binary on a random port.
@@ -314,28 +316,8 @@ func startSubprocess(t *testing.T) *subprocessEnv {
 		binaryPath: binPath,
 	}
 
-	t.Cleanup(func() {
-		// SIGTERM via cancel; if the process is stuck, the test
-		// binary will report it as a hang and abort. We do NOT
-		// call cmd.Process.Kill() because that masks shutdown
-		// bugs we want to see.
-		cancel()
-		doneCh := make(chan struct{})
-		var waitErr error
-		go func() {
-			waitErr = cmd.Wait()
-			close(doneCh)
-		}()
-		select {
-		case <-doneCh:
-			if waitErr != nil && !strings.Contains(waitErr.Error(), "exit status") {
-				t.Logf("subprocess wait error: %v", waitErr)
-			}
-		case <-time.After(3 * time.Second):
-			t.Logf("subprocess did not exit within 3s; captured stderr: %s", stderr.String())
-			_ = cmd.Process.Kill()
-		}
-	})
+	env.stderr = &stderr
+	t.Cleanup(env.stop)
 
 	// Wait for ready.
 	client := &http.Client{Timeout: 2 * time.Second}
@@ -352,6 +334,33 @@ func startSubprocess(t *testing.T) *subprocessEnv {
 	}
 	t.Fatalf("subprocess did not become healthy; stderr: %s", stderr.String())
 	return env
+}
+
+// stop shuts the server down and waits for it; safe to call twice (the
+// test may stop it early, cleanup stops it again).
+func (s *subprocessEnv) stop() {
+	s.stopOnce.Do(func() {
+		// SIGTERM via cancel; if the process is stuck, the test
+		// binary will report it as a hang and abort. We do NOT
+		// call cmd.Process.Kill() because that masks shutdown
+		// bugs we want to see.
+		s.cancel()
+		doneCh := make(chan struct{})
+		var waitErr error
+		go func() {
+			waitErr = s.cmd.Wait()
+			close(doneCh)
+		}()
+		select {
+		case <-doneCh:
+			if waitErr != nil && !strings.Contains(waitErr.Error(), "exit status") && !strings.Contains(waitErr.Error(), "signal:") {
+				s.t.Logf("subprocess wait error: %v", waitErr)
+			}
+		case <-time.After(3 * time.Second):
+			s.t.Logf("subprocess did not exit within 3s; captured stderr: %s", s.stderr.String())
+			_ = s.cmd.Process.Kill()
+		}
+	})
 }
 
 func (s *subprocessEnv) URL() string { return "http://" + s.addr }
