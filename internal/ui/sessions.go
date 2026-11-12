@@ -78,6 +78,12 @@ func (s *store) deleteSession(ctx context.Context, token string) error {
 	return err
 }
 
+// deleteOtherSessions ends every session except the one of token.
+func (s *store) deleteOtherSessions(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM ui_sessions WHERE token_hash != ?`, hashToken(token))
+	return err
+}
+
 // purge deletes expired sessions and setup tokens.
 func (s *store) purge(ctx context.Context) error {
 	now := s.now()

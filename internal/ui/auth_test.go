@@ -186,3 +186,198 @@ func TestLogin_WrongOriginAndLateFinish(t *testing.T) {
 		t.Errorf("finish after 5 minutes: %d, want 400", status)
 	}
 }
+
+// Two browsers begin with two different valid setup tokens. Only the
+// first finish may add a passkey: the insert itself guards "no passkey yet".
+func TestRegister_SecondSetupTokenLosesRace(t *testing.T) {
+	s, _, base := newTestUI(t)
+	ctx := context.Background()
+	t1, _, _ := s.createSetupToken(ctx)
+	t2, _, _ := s.createSetupToken(ctx)
+	b1, b2 := newBrowser(t, base), newBrowser(t, base)
+	p1, p2 := newPasskey(testOrigin), newPasskey(testOrigin)
+	o1, _, _ := p1.beginRegistration(b1, t1)
+	o2, _, _ := p2.beginRegistration(b2, t2)
+	if o1 == nil || o2 == nil {
+		t.Fatal("begin failed")
+	}
+	if st, body := p1.finishRegistration(b1, o1); st != http.StatusCreated {
+		t.Fatalf("first finish: %d %s", st, body)
+	}
+	if st, body := p2.finishRegistration(b2, o2); st != http.StatusConflict {
+		t.Errorf("second finish with another token: %d %s, want 409", st, body)
+	}
+	if n, _ := s.credentialCount(ctx); n != 1 {
+		t.Errorf("%d passkeys, want 1", n)
+	}
+	if b2.cookies[CookieName] != nil {
+		t.Error("the losing browser got a session")
+	}
+}
+
+// Without user verification neither registration nor login is accepted,
+// and the library's reason stays out of the response.
+func TestUserVerificationRequired(t *testing.T) {
+	s, _, base := newTestUI(t)
+	tok, _, _ := s.createSetupToken(context.Background())
+	pk := newPasskey(testOrigin)
+	pk.auth.Options.UserNotVerified = true
+	st, body := pk.register(newBrowser(t, base), tok)
+	if st != http.StatusBadRequest || !strings.Contains(string(body), `"passkey not accepted"`) {
+		t.Errorf("register without UV: %d %s, want 400 passkey not accepted", st, body)
+	}
+	_, good := loggedIn(t, s, base)
+	good.auth.Options.UserNotVerified = true
+	st, body = good.login(newBrowser(t, base))
+	if st != http.StatusUnauthorized || !strings.Contains(string(body), `"passkey not accepted"`) {
+		t.Errorf("login without UV: %d %s, want 401 passkey not accepted", st, body)
+	}
+	var result, detail string
+	if err := s.db.QueryRow(`SELECT result, detail FROM audit WHERE action = 'ui.login' AND result != 'ok' ORDER BY id DESC LIMIT 1`).Scan(&result, &detail); err != nil || !strings.HasPrefix(result, "error:") || !strings.Contains(detail, "reason") {
+		t.Errorf("failed login audit: %q %q (%v), want an error entry with a reason", result, detail, err)
+	}
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM audit WHERE action = 'ui.passkey.add' AND result != 'ok'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("%d failed ui.passkey.add audit entries, want 1", n)
+	}
+}
+
+// A sign counter that goes backwards is refused without a session (and
+// audited); a changed backup-eligible flag is not accepted.
+func TestLogin_CloneAndBackupFlags(t *testing.T) {
+	s, _, base := newTestUI(t)
+	_, pk := loggedIn(t, s, base)
+	pk.cred.Counter = 5
+	if st, body := pk.login(newBrowser(t, base)); st != http.StatusNoContent {
+		t.Fatalf("login counter 5: %d %s", st, body)
+	}
+	pk.cred.Counter = 3
+	b := newBrowser(t, base)
+	if st, _ := pk.login(b); st != http.StatusForbidden || b.cookies[CookieName] != nil {
+		t.Errorf("counter regression: %d, cookie %v; want 403 and no cookie", st, b.cookies[CookieName])
+	}
+	var n int
+	s.db.QueryRow(`SELECT COUNT(*) FROM audit WHERE action = 'ui.login' AND result = 'error:clone_warning'`).Scan(&n)
+	if n != 1 {
+		t.Errorf("%d clone warnings audited, want 1", n)
+	}
+	pk.cred.Counter = 9
+	pk.auth.Options.BackupEligible = false
+	pk.auth.Options.BackupState = false
+	b = newBrowser(t, base)
+	if st, _ := pk.login(b); st != http.StatusUnauthorized || b.cookies[CookieName] != nil {
+		t.Errorf("backup-eligible flip: %d, want 401 and no cookie", st)
+	}
+}
+
+// A finish cannot be replayed with the same ceremony cookie, nor used
+// for the other kind of ceremony.
+func TestCeremony_FinishCannotBeReplayed(t *testing.T) {
+	s, _, base := newTestUI(t)
+	_, pk := loggedIn(t, s, base)
+	b := newBrowser(t, base)
+	_, body := b.do("POST", "/ui/auth/login/begin", nil)
+	ck := *b.cookies[ceremonyCookie]
+	opts, err := virtualwebauthn.ParseAssertionOptions(string(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := virtualwebauthn.CreateAssertionResponse(pk.rp, pk.auth, pk.cred, *opts)
+	if st, body := b.do("POST", "/ui/auth/login/finish", resp); st != http.StatusNoContent {
+		t.Fatalf("finish: %d %s", st, body)
+	}
+	replay := newBrowser(t, base)
+	replay.cookies[ceremonyCookie] = &ck
+	if st, _ := replay.do("POST", "/ui/auth/login/finish", resp); st != http.StatusBadRequest || replay.cookies[CookieName] != nil {
+		t.Errorf("replayed finish: %d, want 400 and no session", st)
+	}
+	cross := newBrowser(t, base)
+	cross.do("POST", "/ui/auth/login/begin", nil)
+	if st, _ := cross.do("POST", "/ui/auth/register/finish", "{}"); st != http.StatusBadRequest {
+		t.Errorf("register finish with a login ceremony: %d, want 400", st)
+	}
+}
+
+// The operator key is the one the UI created and recorded in meta; an
+// admin key that merely carries the label is never adopted.
+func TestSetup_OperatorKeyIsRecordedNotAdoptedByLabel(t *testing.T) {
+	s, _, base := newTestUI(t)
+	ctx := context.Background()
+	if _, err := s.db.Exec(`INSERT INTO api_keys (label, hash, prefix, created_at, trust_origin, is_admin) VALUES ('operator', 'x', 'abcdefgh', '2026-01-01T00:00:00Z', 'internal', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	tok, _, _ := s.createSetupToken(ctx)
+	if st, body := newPasskey(testOrigin).register(newBrowser(t, base), tok); st != http.StatusConflict {
+		t.Fatalf("setup with a foreign operator key: %d %s, want 409", st, body)
+	}
+	if n, _ := s.credentialCount(ctx); n != 0 {
+		t.Errorf("%d passkeys, want 0", n)
+	}
+
+	// After ui-reset renames it, setup creates and records its own key.
+	s.db.Exec(`UPDATE api_keys SET label = 'operator-revoked-1', revoked_at = '2026-01-02T00:00:00Z'`)
+	tok, _, _ = s.createSetupToken(ctx)
+	if st, body := newPasskey(testOrigin).register(newBrowser(t, base), tok); st != http.StatusCreated {
+		t.Fatalf("setup: %d %s", st, body)
+	}
+	var recorded, id int64
+	s.db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'ui_operator_key_id'`).Scan(&recorded)
+	s.db.QueryRow(`SELECT id FROM api_keys WHERE label = 'operator' AND revoked_at IS NULL`).Scan(&id)
+	if recorded == 0 || recorded != id {
+		t.Errorf("meta ui_operator_key_id %d, operator key %d", recorded, id)
+	}
+	if got, err := operatorKeyID(ctx, s.db); err != nil || got != id {
+		t.Errorf("operatorKeyID %d (%v), want %d", got, err, id)
+	}
+}
+
+// Begins beyond the cap are refused; expired ones free their slots.
+func TestCeremonies_Capped(t *testing.T) {
+	_, clk, base := newTestUI(t)
+	b := newBrowser(t, base)
+	for i := 0; i < maxCeremonies; i++ {
+		if st, body := b.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
+			t.Fatalf("begin %d: %d %s", i, st, body)
+		}
+	}
+	if st, _ := b.do("POST", "/ui/auth/login/begin", nil); st != http.StatusServiceUnavailable {
+		t.Errorf("begin over the cap: %d, want 503", st)
+	}
+	clk.advance(CeremonyTTL + time.Second)
+	if st, _ := b.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
+		t.Errorf("begin after expiry: %d, want 200", st)
+	}
+}
+
+// Removing a passkey ends every other session, not the caller's own.
+func TestPasskeys_RemoveEndsOtherSessions(t *testing.T) {
+	s, _, base := newTestUI(t)
+	b1, pk1 := loggedIn(t, s, base)
+	pk2 := newPasskey(testOrigin)
+	if st, body := pk2.register(b1, ""); st != http.StatusCreated {
+		t.Fatalf("second passkey: %d %s", st, body)
+	}
+	b2 := newBrowser(t, base)
+	if st, body := pk1.login(b2); st != http.StatusNoContent {
+		t.Fatalf("login with the first passkey: %d %s", st, body)
+	}
+	var l struct {
+		Credentials []struct {
+			ID string `json:"id"`
+		} `json:"credentials"`
+	}
+	_, body := b1.do("GET", "/ui/auth/credentials", nil)
+	if json.Unmarshal(body, &l) != nil || len(l.Credentials) != 2 {
+		t.Fatalf("list: %s", body)
+	}
+	if st, _ := b1.do("DELETE", "/ui/auth/credentials/"+l.Credentials[0].ID, nil); st != http.StatusNoContent {
+		t.Fatalf("remove: %d", st)
+	}
+	if !state(t, b1).LoggedIn {
+		t.Error("the caller's own session ended")
+	}
+	if state(t, b2).LoggedIn {
+		t.Error("another session survived the removal")
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,6 +24,9 @@ import (
 
 // ceremonyCookie links a ceremony's begin and finish requests.
 const ceremonyCookie = "conclave_ui_ceremony"
+
+// maxCeremonies caps the live ceremonies kept in memory.
+const maxCeremonies = 64
 
 // operator is the one WebAuthn user: every passkey is the operator's.
 type operator struct {
@@ -45,13 +49,20 @@ type ceremony struct {
 }
 
 // errOperatorUnusable: the label is taken by a key the UI cannot act as.
-var errOperatorUnusable = errors.New(`a key labelled "operator" exists but is revoked or not an admin key`)
+var errOperatorUnusable = errors.New(`a key labelled "operator" exists that the UI did not create or that is revoked: run admin ui-reset with the service stopped`)
 
-// operatorKeyID returns the id of the active admin key labelled operator.
+// metaOperatorKey is the meta key that records the id of the operator
+// key the UI created. The label alone proves nothing: an admin key made
+// by hand may carry it, and its secret is known.
+const metaOperatorKey = "ui_operator_key_id"
+
+// operatorKeyID returns the id of the operator key the UI created,
+// provided it is still an active admin key.
 func operatorKeyID(ctx context.Context, db *sql.DB) (int64, error) {
 	var id int64
 	err := db.QueryRowContext(ctx,
-		`SELECT id FROM api_keys WHERE label = ? AND is_admin = 1 AND revoked_at IS NULL`, OperatorLabel).Scan(&id)
+		`SELECT k.id FROM meta m JOIN api_keys k ON k.id = CAST(m.value AS INTEGER)
+		 WHERE m.key = ? AND k.is_admin = 1 AND k.revoked_at IS NULL`, metaOperatorKey).Scan(&id)
 	return id, err
 }
 
@@ -67,16 +78,34 @@ func ensureOperatorKey(ctx context.Context, db *sql.DB, now time.Time) (int64, e
 	if err != nil {
 		return 0, err
 	}
-	res, err := db.ExecContext(ctx,
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO api_keys (label, hash, prefix, created_at, trust_origin, is_admin) VALUES (?, ?, ?, ?, 'internal', 1)`,
 		OperatorLabel, phc, plaintext[3:11], now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			// A parallel setup may have created the recorded key just now.
+			if id, rerr := operatorKeyID(ctx, db); rerr == nil {
+				return id, nil
+			}
 			return 0, errOperatorUnusable
 		}
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, err = res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		metaOperatorKey, strconv.FormatInt(id, 10)); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 // credID is the stored form of a credential id.
@@ -211,27 +240,42 @@ func (s *Service) startSession(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// startCeremony keeps c for the finish step under a fresh cookie.
-func (s *Service) startCeremony(w http.ResponseWriter, c ceremony) error {
+// auditFail records a refused passkey attempt: the reason stays on the
+// server, the client only sees a fixed message.
+func (s *Service) auditFail(ctx context.Context, action, result, reason string) {
+	keyID, _ := operatorKeyID(ctx, s.db)
+	detail, _ := json.Marshal(map[string]string{"reason": reason})
+	_ = audit.Write(ctx, s.db, keyID, action, "passkey", "", "", result, string(detail))
+}
+
+// startCeremony keeps c for the finish step under a fresh cookie. It
+// writes the error response itself and reports false on failure.
+func (s *Service) startCeremony(w http.ResponseWriter, r *http.Request, c ceremony) bool {
 	token, hash, err := newToken()
 	if err != nil {
-		return err
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "start ceremony")
+		return false
 	}
 	now := s.now()
 	c.expires = now.Add(CeremonyTTL)
 	s.mu.Lock()
-	// ponytail: a sweep per begin, fine for one operator; a flood of
-	// begins on the loopback address only grows the map for 5 minutes.
+	// ponytail: at most maxCeremonies live entries and an O(n) sweep per
+	// begin (n <= 64); a flood is refused with 503 until entries expire.
 	for k, v := range s.ceremonies {
 		if !now.Before(v.expires) {
 			delete(s.ceremonies, k)
 		}
 	}
+	if len(s.ceremonies) >= maxCeremonies {
+		s.mu.Unlock()
+		writeErr(w, r, http.StatusServiceUnavailable, "unavailable", "too many passkey ceremonies in progress: try again in a few minutes")
+		return false
+	}
 	s.ceremonies[hash] = c
 	s.mu.Unlock()
 	http.SetCookie(w, &http.Cookie{Name: ceremonyCookie, Value: token, Path: "/ui/auth/",
 		MaxAge: int(CeremonyTTL.Seconds()), HttpOnly: true, SameSite: http.SameSiteStrictMode})
-	return nil
+	return true
 }
 
 // takeCeremony returns the request's ceremony of the given kind and
@@ -311,8 +355,7 @@ func (s *Service) registerBegin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin registration")
 		return
 	}
-	if err := s.startCeremony(w, ceremony{register: true, data: *data, setupToken: token, name: name}); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "start ceremony")
+	if !s.startCeremony(w, r, ceremony{register: true, data: *data, setupToken: token, name: name}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, creation.Response)
@@ -335,12 +378,19 @@ func (s *Service) registerFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	cred, err := s.wa.FinishRegistration(op, c.data, r)
 	if err != nil {
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "passkey not accepted: "+err.Error())
+		s.auditFail(ctx, "ui.passkey.add", "error:rejected", err.Error())
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "passkey not accepted")
 		return
 	}
 	var keyID int64
 	if c.setupToken != "" {
-		if used, err := s.useSetupToken(ctx, c.setupToken); err != nil || !used {
+		var used bool
+		used, err = s.useSetupToken(ctx, c.setupToken)
+		if err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "setup token lookup")
+			return
+		}
+		if !used {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "setup token invalid, used or expired: run conclave-mcp ui setup again")
 			return
 		}
@@ -384,8 +434,7 @@ func (s *Service) loginBegin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin login")
 		return
 	}
-	if err := s.startCeremony(w, ceremony{data: *data}); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "start ceremony")
+	if !s.startCeremony(w, r, ceremony{data: *data}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, assertion.Response)
@@ -410,10 +459,12 @@ func (s *Service) loginFinish(w http.ResponseWriter, r *http.Request) {
 		return op, nil
 	}, c.data, r)
 	if err != nil {
-		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "passkey not accepted: "+err.Error())
+		s.auditFail(ctx, "ui.login", "error:rejected", err.Error())
+		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "passkey not accepted")
 		return
 	}
 	if cred.Authenticator.CloneWarning {
+		s.auditFail(ctx, "ui.login", "error:clone_warning", "sign counter went backwards")
 		writeErr(w, r, http.StatusForbidden, "forbidden", "the passkey's signature counter went backwards: possibly a cloned authenticator")
 		return
 	}
@@ -497,6 +548,10 @@ func (s *Service) listCredentials(w http.ResponseWriter, r *http.Request) {
 		v.LastUsedAt = last.String
 		out = append(out, v)
 	}
+	if err := rows.Err(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "list passkeys")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"credentials": out})
 }
 
@@ -520,6 +575,12 @@ func (s *Service) removeCredential(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeErr(w, r, http.StatusNotFound, "not_found", "passkey not found")
+		return
+	}
+	// A session started with the removed passkey must not survive.
+	own, _ := r.Cookie(CookieName)
+	if err := s.deleteOtherSessions(ctx, own.Value); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "end other sessions")
 		return
 	}
 	keyID, _ := operatorKeyID(ctx, s.db)
