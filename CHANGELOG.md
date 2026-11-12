@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-12
+
 Room permissions: a key sees and does only what its invitation
 allows, nothing outside its own room can be discovered, and only
 admin keys manage keys, rooms and rights. **Breaking** for every key
