@@ -101,14 +101,19 @@ export function rightsPicker(selected = []) {
 
 // showSecret replaces the page in view with a secret shown only once.
 export function showSecret(view, title, secret) {
+  const copyMsg = h('span', { role: 'alert' });
   const copy = h('button', {
     onclick: async () => {
-      await navigator.clipboard.writeText(secret);
-      copy.textContent = 'Copied';
+      try {
+        await navigator.clipboard.writeText(secret);
+        copy.textContent = 'Copied';
+      } catch {
+        copyMsg.textContent = 'Copy failed — select the text and copy it manually';
+      }
     },
   }, 'Copy');
   view.replaceChildren(h('h1', {}, title),
-    h('div', { class: 'secret' }, h('pre', {}, secret), copy),
+    h('div', { class: 'secret' }, h('pre', {}, secret), copy, copyMsg),
     h('p', {}, 'Shown once: the server keeps only a hash of the key.'),
     h('button', { onclick: rerender }, 'Done'));
 }

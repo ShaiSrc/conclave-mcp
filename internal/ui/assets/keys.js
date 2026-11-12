@@ -58,8 +58,13 @@ export async function keysPage(view) {
       try {
         await api('POST', `/v1/rooms/${encodeURIComponent(room.value)}/invite`, { key_id: created.id, rights: rights.value() });
       } catch (err) {
-        await api('DELETE', `/v1/keys/${created.id}`); // no key that can reach nothing
-        throw err;
+        try {
+          await api('DELETE', `/v1/keys/${created.id}`); // no key that can reach nothing
+        } catch (delErr) {
+          if (delErr.status === 401) { rerender(); return; } // the session ended: show the login page
+          throw new Error(`Invite failed (${err.message}); revoking key ${created.id} also failed (${delErr.message}) — revoke it on the Keys page.`);
+        }
+        throw new Error(`${err.message} The label stays taken by the revoked key, so a retry needs a different label.`);
       }
       showSecret(view, `Agent ${created.label} created`, `export CONCLAVE_API_KEY=${created.key}`);
     }),
