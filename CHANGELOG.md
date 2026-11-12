@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-11-12
+
 ### Added
 
 - Web admin UI at `http://localhost:<port>/ui/` when the server listens
