@@ -256,7 +256,7 @@ func TestE2E_WebUI(t *testing.T) {
 	for _, k := range keys.Keys {
 		if k.ID == firstOperator {
 			foundOld = true
-			if k.RevokedAt == "" || k.Label != "operator-revoked-"+strconv.FormatInt(firstOperator, 10) {
+			if k.RevokedAt == "" || !strings.HasPrefix(k.Label, "operator-revoked-"+strconv.FormatInt(firstOperator, 10)+"-") {
 				t.Errorf("old operator key after reset: %+v, want revoked and renamed", k)
 			}
 		}

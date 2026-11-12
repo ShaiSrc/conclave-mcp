@@ -143,7 +143,7 @@ conclave-mcp admin ui-reset [--db PATH]
 
 Deletes every passkey, session and setup token of the web UI directly
 in the SQLite file, revokes the operator key the UI created and
-renames it `operator-revoked-<id>`, and records `ui.reset` in the
+renames it `operator-revoked-<id>-<random hex>`, and records `ui.reset` in the
 audit log. Then start the server and run `ui setup`: it creates a
 fresh operator key. An active `operator` key that the UI did not
 create is left alone, and registering a passkey fails with 409 while it

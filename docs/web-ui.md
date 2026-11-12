@@ -63,7 +63,7 @@ conclave-mcp admin ui-reset --db /path/to/data.db
 ```
 
 It deletes all passkeys, sessions and setup tokens, revokes the
-operator key the UI created and renames it `operator-revoked-<id>`,
+operator key the UI created and renames it `operator-revoked-<id>-<random hex>`,
 clears the record of it, and writes `ui.reset` to the audit log. Start
 the service and run `conclave-mcp ui setup` again; setup then creates a
 fresh operator key. An active `operator` key that setup did not create

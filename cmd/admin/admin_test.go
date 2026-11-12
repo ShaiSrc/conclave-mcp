@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,8 @@ func TestUIReset(t *testing.T) {
 		`INSERT INTO ui_setup_tokens (token_hash, expires_at) VALUES ('t', '2026-11-12T10:10:00Z')`,
 		`INSERT INTO ui_credentials (id, public_key, created_at) VALUES ('c1', x'01', '2026-11-12T10:00:00Z'), ('c2', x'02', '2026-11-12T10:00:00Z')`,
 		`INSERT INTO ui_sessions (token_hash, created_at, last_seen_at, expires_at) VALUES ('h', '2026-11-12T10:00:00Z', '2026-11-12T10:00:00Z', '2026-11-12T22:00:00Z')`,
+		// A label made beforehand must not block the rename.
+		`INSERT INTO api_keys (label, hash, prefix, created_at) VALUES ('operator-revoked-1', 'y', 'p2', '2026-11-12T10:00:00Z')`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			t.Fatal(err)
@@ -215,7 +218,7 @@ func TestUIReset(t *testing.T) {
 		Scan(&creds, &sessions, &tokens, &metaRows, &free, &label, &revokedAt); err != nil {
 		t.Fatal(err)
 	}
-	if creds != 0 || sessions != 0 || tokens != 0 || metaRows != 0 || free != 0 || label != "operator-revoked-1" || !revokedAt.Valid {
+	if creds != 0 || sessions != 0 || tokens != 0 || metaRows != 0 || free != 0 || !regexp.MustCompile(`^operator-revoked-1-[0-9a-f]{8}$`).MatchString(label) || !revokedAt.Valid {
 		t.Errorf("after reset: %d passkeys, %d sessions, %d tokens, %d meta rows, %d operator labels, label %q, revoked %v", creds, sessions, tokens, metaRows, free, label, revokedAt)
 	}
 	if err := db.QueryRow(`SELECT detail FROM audit WHERE action = 'ui.reset' AND actor_key_id IS NULL`).Scan(&detail); err != nil || detail != `{"operator_key_revoked":true,"passkeys":2,"sessions":1}` {

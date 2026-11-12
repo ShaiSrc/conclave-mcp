@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -377,11 +378,11 @@ the SQLite file, revokes the UI's operator key and records ui.reset in
 the audit log. Then start the server and run conclave-mcp ui setup to
 register a passkey again; setup creates a fresh operator key.
 
-The revoked operator key is renamed operator-revoked-<id>, because key
-labels are unique; so is any other revoked key labelled operator. An
-active key labelled operator that the UI did not create is left alone,
-and setup refuses with a conflict while it exists: revoke it first
-(conclave-mcp keys revoke <id>), then run this again.
+The revoked operator key is renamed operator-revoked-<id>-<random hex>,
+because key labels are unique; so is any other revoked key labelled
+operator. An active key labelled operator that the UI did not create
+is left alone, and setup refuses with a conflict while it exists:
+revoke it first (conclave-mcp keys revoke <id>), then run this again.
 
 Like admin vacuum, this subcommand does NOT talk to a running server.
 Stop the server first.`,
@@ -411,7 +412,10 @@ func runUIReset(ctx context.Context, errOut io.Writer, dbPath string) error {
 	}
 	defer tx.Rollback()
 	fail := func(what string, err error) error {
-		return &exitError{Code: 1, Err: fmt.Errorf("%s: %w (has the server run this version once?)", what, err)}
+		if strings.Contains(err.Error(), "no such table") { // migration 0009 not applied yet
+			return &exitError{Code: 1, Err: fmt.Errorf("%s: %w (has the server run this version once?)", what, err)}
+		}
+		return &exitError{Code: 1, Err: fmt.Errorf("%s: %w", what, err)}
 	}
 	var passkeys, sessions int64
 	for _, d := range []struct {
@@ -429,6 +433,7 @@ func runUIReset(ctx context.Context, errOut io.Writer, dbPath string) error {
 		*d.n, _ = res.RowsAffected()
 	}
 	// The recorded operator key: revoke it if still active, free its label.
+	// The random suffix keeps a label made beforehand from blocking this.
 	var opID int64
 	revoked := false
 	switch err := tx.QueryRowContext(ctx,
@@ -443,7 +448,7 @@ func runUIReset(ctx context.Context, errOut io.Writer, dbPath string) error {
 		n, _ := res.RowsAffected()
 		revoked = n > 0
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE api_keys SET label = 'operator-revoked-' || id WHERE id = ? AND label = 'operator'`, opID); err != nil {
+			`UPDATE api_keys SET label = 'operator-revoked-' || id || '-' || lower(hex(randomblob(4))) WHERE id = ? AND label = 'operator'`, opID); err != nil {
 			return fail("rename operator key", err)
 		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key = 'ui_operator_key_id'`); err != nil {
@@ -454,7 +459,7 @@ func runUIReset(ctx context.Context, errOut io.Writer, dbPath string) error {
 	}
 	// Any other revoked key still holding the label would block setup too.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE api_keys SET label = 'operator-revoked-' || id WHERE label = 'operator' AND revoked_at IS NOT NULL`); err != nil {
+		`UPDATE api_keys SET label = 'operator-revoked-' || id || '-' || lower(hex(randomblob(4))) WHERE label = 'operator' AND revoked_at IS NOT NULL`); err != nil {
 		return fail("rename revoked operator key", err)
 	}
 	if err := tx.Commit(); err != nil {
