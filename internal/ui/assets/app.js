@@ -1,5 +1,5 @@
 // The page: routing, the header, passkey login and setup, passkeys.
-import { h, api, errorBox, confirmButton, table, when } from './lib.js';
+import { h, api, setSession, errorBox, confirmButton, table, when } from './lib.js';
 import { roomsPage, roomPage } from './rooms.js';
 import { keysPage, auditPage } from './keys.js';
 
@@ -7,7 +7,8 @@ const main = document.getElementById('app');
 const nav = document.getElementById('nav');
 
 // registerPasskey runs a registration ceremony: with a setup token for
-// the first passkey, else as the logged-in operator.
+// the first passkey (which logs this tab in), else as the logged-in
+// operator.
 async function registerPasskey(name, setupToken = '') {
   let options;
   try {
@@ -18,13 +19,20 @@ async function registerPasskey(name, setupToken = '') {
     throw err;
   }
   const cred = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) });
-  await api('POST', '/ui/auth/register/finish', cred.toJSON());
+  const res = await api('POST', '/ui/auth/register/finish', cred.toJSON());
+  if (res.session) setSession(res.session);
 }
 
 async function login() {
   const options = await api('POST', '/ui/auth/login/begin');
   const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
-  await api('POST', '/ui/auth/login/finish', cred.toJSON());
+  setSession((await api('POST', '/ui/auth/login/finish', cred.toJSON())).session);
+}
+
+// logout ends the session on the server; the tab forgets its token
+// even if that fails.
+async function logout() {
+  try { await api('POST', '/ui/auth/logout'); } finally { setSession(''); }
 }
 
 // action makes a click handler that shows errors in msg. While fn runs
@@ -114,7 +122,7 @@ async function header() {
     h('a', { href: '#/audit' }, 'Audit'), h('a', { href: '#/passkeys' }, 'Passkeys'),
     h('span', { class: 'rooms' }, rooms.map(r => h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name))),
     msg,
-    h('button', { onclick: action(msg, async () => { await api('POST', '/ui/auth/logout'); await render(); }) }, 'Log out'),
+    h('button', { onclick: action(msg, async () => { await logout(); await render(); }) }, 'Log out'),
   ];
 }
 

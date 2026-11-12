@@ -207,13 +207,14 @@ func (s *Service) operator(ctx context.Context) (operator, error) {
 	return operator{handle: h, creds: creds}, err
 }
 
-// loggedIn reports whether r carries a live session cookie.
+// sessionToken is the session token r carries in X-Conclave-UI. No
+// cookie is read: browsers send localhost cookies to every port, so any
+// local process could collect one.
+func sessionToken(r *http.Request) string { return r.Header.Get(HeaderName) }
+
+// loggedIn reports whether r carries a live session token.
 func (s *Service) loggedIn(r *http.Request) (bool, error) {
-	c, err := r.Cookie(CookieName)
-	if err != nil {
-		return false, nil
-	}
-	return s.session(r.Context(), c.Value)
+	return s.session(r.Context(), sessionToken(r))
 }
 
 // requireSession answers 401 unless r is logged in.
@@ -227,17 +228,6 @@ func (s *Service) requireSession(w http.ResponseWriter, r *http.Request) bool {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "log in first")
 	}
 	return ok
-}
-
-// startSession logs the operator in: a new session and its cookie.
-func (s *Service) startSession(w http.ResponseWriter, r *http.Request) error {
-	token, err := s.createSession(r.Context())
-	if err != nil {
-		return err
-	}
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: token, Path: "/",
-		HttpOnly: true, SameSite: http.SameSiteStrictMode})
-	return nil
 }
 
 // auditFail records a refused passkey attempt: the reason stays on the
@@ -415,9 +405,10 @@ func (s *Service) registerFinish(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusConflict, "conflict", "another passkey was registered meanwhile: log in with it")
 		return
 	}
+	out := map[string]string{"id": credID(cred.ID), "name": c.name}
 	via := "session"
-	if c.setupToken != "" {
-		if err := s.startSession(w, r); err != nil {
+	if c.setupToken != "" { // the first passkey logs the operator in
+		if out["session"], err = s.createSession(ctx); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "start session")
 			return
 		}
@@ -425,7 +416,7 @@ func (s *Service) registerFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	detail, _ := json.Marshal(map[string]string{"name": c.name, "via": via})
 	_ = audit.Write(ctx, s.db, keyID, "ui.passkey.add", "passkey", credID(cred.ID), "", "ok", string(detail))
-	writeJSON(w, http.StatusCreated, map[string]string{"id": credID(cred.ID), "name": c.name})
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (s *Service) loginBegin(w http.ResponseWriter, r *http.Request) {
@@ -479,27 +470,26 @@ func (s *Service) loginFinish(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "update passkey")
 		return
 	}
-	if err := s.startSession(w, r); err != nil {
+	token, err := s.createSession(ctx)
+	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "start session")
 		return
 	}
 	_ = audit.Write(ctx, s.db, keyID, "ui.login", "passkey", credID(cred.ID), "", "ok", "")
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]string{"session": token})
 }
 
 func (s *Service) logout(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	if c, err := r.Cookie(CookieName); err == nil {
-		if live, _ := s.session(ctx, c.Value); live {
-			if err := s.deleteSession(ctx, c.Value); err != nil {
-				writeErr(w, r, http.StatusInternalServerError, "internal_error", "end session")
-				return
-			}
-			keyID, _ := operatorKeyID(ctx, s.db)
-			_ = audit.Write(ctx, s.db, keyID, "ui.logout", "session", "", "", "ok", "")
+	token := sessionToken(r)
+	if live, _ := s.session(ctx, token); live {
+		if err := s.deleteSession(ctx, token); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "end session")
+			return
 		}
+		keyID, _ := operatorKeyID(ctx, s.db)
+		_ = audit.Write(ctx, s.db, keyID, "ui.logout", "session", "", "", "ok", "")
 	}
-	http.SetCookie(w, &http.Cookie{Name: CookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -578,8 +568,7 @@ func (s *Service) removeCredential(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A session started with the removed passkey must not survive.
-	own, _ := r.Cookie(CookieName)
-	if err := s.deleteOtherSessions(ctx, own.Value); err != nil {
+	if err := s.deleteOtherSessions(ctx, sessionToken(r)); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "end other sessions")
 		return
 	}

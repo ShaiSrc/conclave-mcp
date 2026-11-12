@@ -19,15 +19,18 @@ import (
 
 // TestE2E_WebUI: the real binary serves /ui, ui setup prints a working
 // setup URL, a passkey registered with a software authenticator gets a
-// session cookie, the cookie reaches an admin endpoint as the operator
-// key, and forged cross-site requests are refused.
+// session token, the token in X-Conclave-UI reaches an admin endpoint as
+// the operator key, and forged requests (no header, the token only as a
+// cookie, another Origin or Host) are refused.
 func TestE2E_WebUI(t *testing.T) {
 	env, admin := bootstrapKeyFor(t)
 	port := strconv.Itoa(portFromAddr(env.addr))
 	host, origin := "localhost:"+port, "http://localhost:"+port
-	cookies := map[string]string{}
+	cookies := map[string]string{} // the ceremony cookie
+	session := ""                  // the token from the last finish, held like the page holds it
 	// do sends a request as the UI page would: the localhost Host, the
-	// UI's Origin on writes, the X-Conclave-UI header, the cookies so far.
+	// UI's Origin on writes, the session token in X-Conclave-UI, the
+	// cookies so far.
 	do := func(method, path, body string, hdr map[string]string) (*http.Response, string) {
 		t.Helper()
 		req, err := http.NewRequest(method, env.URL()+path, strings.NewReader(body))
@@ -36,7 +39,9 @@ func TestE2E_WebUI(t *testing.T) {
 		}
 		req.Host = host
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-Conclave-UI", "1")
+		if session != "" {
+			req.Header.Set("X-Conclave-UI", session)
+		}
 		if method != "GET" {
 			req.Header.Set("Origin", origin)
 		}
@@ -65,6 +70,17 @@ func TestE2E_WebUI(t *testing.T) {
 			}
 		}
 		return resp, string(b)
+	}
+	// keepSession takes the session token from a finish response.
+	keepSession := func(body string) bool {
+		var r struct {
+			Session string `json:"session"`
+		}
+		if json.Unmarshal([]byte(body), &r) != nil || r.Session == "" {
+			return false
+		}
+		session = r.Session
+		return true
 	}
 
 	// The pages, with the CSP.
@@ -108,12 +124,15 @@ func TestE2E_WebUI(t *testing.T) {
 			t.Fatal(err)
 		}
 		pk.Options.UserHandle = []byte(opts.UserID)
-		if resp, body := do("POST", "/ui/auth/register/finish", virtualwebauthn.CreateAttestationResponse(rp, pk, cred, *opts), nil); resp.StatusCode != 201 || cookies["conclave_ui"] == "" {
-			t.Fatalf("register finish: %d %s", resp.StatusCode, body)
+		if resp, body := do("POST", "/ui/auth/register/finish", virtualwebauthn.CreateAttestationResponse(rp, pk, cred, *opts), nil); resp.StatusCode != 201 || !keepSession(body) {
+			t.Fatalf("register finish: %d %s, want 201 with a session token", resp.StatusCode, body)
+		}
+		if _, ok := cookies["conclave_ui"]; ok {
+			t.Error("register finish set a conclave_ui cookie")
 		}
 		return pk, cred
 	}
-	// login runs a discoverable passkey login; it sets the cookie.
+	// login runs a discoverable passkey login; it sets the session token.
 	login := func(pk virtualwebauthn.Authenticator, cred virtualwebauthn.Credential) {
 		t.Helper()
 		resp, body := do("POST", "/ui/auth/login/begin", "", nil)
@@ -124,11 +143,11 @@ func TestE2E_WebUI(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if resp, body := do("POST", "/ui/auth/login/finish", virtualwebauthn.CreateAssertionResponse(rp, pk, cred, *opts), nil); resp.StatusCode != 204 || cookies["conclave_ui"] == "" {
-			t.Fatalf("login finish: %d %s", resp.StatusCode, body)
+		if resp, body := do("POST", "/ui/auth/login/finish", virtualwebauthn.CreateAssertionResponse(rp, pk, cred, *opts), nil); resp.StatusCode != 200 || !keepSession(body) {
+			t.Fatalf("login finish: %d %s, want 200 with a session token", resp.StatusCode, body)
 		}
 	}
-	// operatorID asks /v1/whoami with the cookie who the UI acts as.
+	// operatorID asks /v1/whoami with the session token who the UI acts as.
 	operatorID := func() int64 {
 		t.Helper()
 		resp, body := do("GET", "/v1/whoami", "", nil)
@@ -138,7 +157,7 @@ func TestE2E_WebUI(t *testing.T) {
 			Admin bool   `json:"admin"`
 		}
 		if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &me) != nil || me.Label != "operator" || !me.Admin || me.ID == 0 {
-			t.Fatalf("whoami with the cookie: %d %s", resp.StatusCode, body)
+			t.Fatalf("whoami with the session token: %d %s", resp.StatusCode, body)
 		}
 		return me.ID
 	}
@@ -146,16 +165,17 @@ func TestE2E_WebUI(t *testing.T) {
 	pk, cred := setupAndRegister()
 	firstOperator := operatorID()
 
-	// The cookie reaches admin endpoints as the operator key.
+	// The session token reaches admin endpoints as the operator key.
 	if resp, body := do("GET", "/v1/keys", "", nil); resp.StatusCode != 200 {
-		t.Errorf("keys with the cookie: %d %s", resp.StatusCode, body)
+		t.Errorf("keys with the session token: %d %s", resp.StatusCode, body)
 	}
 	if resp, body := do("POST", "/v1/rooms", `{"name":"e2e-ui-room"}`, nil); resp.StatusCode != 201 {
-		t.Errorf("create a room with the cookie: %d %s", resp.StatusCode, body)
+		t.Errorf("create a room with the session token: %d %s", resp.StatusCode, body)
 	}
 
-	// Forged cross-site requests carry the cookie but fail the checks;
-	// each is refused for its own reason, not by another check.
+	// Forged requests fail the checks; each is refused for its own
+	// reason, not by another check. A process on another localhost port
+	// may hold a cookie the browser sent it, never the token.
 	for _, c := range []struct {
 		name, method, host string
 		hdr                map[string]string
@@ -163,7 +183,9 @@ func TestE2E_WebUI(t *testing.T) {
 		msg                string
 	}{
 		{"another origin", "POST", "localhost:" + port, map[string]string{"Origin": "http://attacker.example"}, 403, "origin not allowed"},
-		{"no X-Conclave-UI header", "POST", "localhost:" + port, map[string]string{"X-Conclave-UI": ""}, 401, "X-Conclave-UI"},
+		{"no X-Conclave-UI header", "POST", "localhost:" + port, map[string]string{"X-Conclave-UI": ""}, 401, "Authorization"},
+		{"the token only as a cookie", "POST", "localhost:" + port, map[string]string{"X-Conclave-UI": "", "Cookie": "conclave_ui=" + session}, 401, "Authorization"},
+		{"the old X-Conclave-UI: 1", "POST", "localhost:" + port, map[string]string{"X-Conclave-UI": "1"}, 401, "X-Conclave-UI"},
 		{"rebound Host (POST, right Origin)", "POST", "attacker.example:" + port, nil, 403, "host not allowed"},
 		{"rebound Host (GET)", "GET", "attacker.example:" + port, nil, 403, "host not allowed"},
 	} {
@@ -181,12 +203,10 @@ func TestE2E_WebUI(t *testing.T) {
 		t.Errorf("a forged request created a room: %d %s", r.Status, r.Body)
 	}
 
-	// Logout ends the session on the server.
-	session := cookies["conclave_ui"]
+	// Logout ends the session on the server: the same token is dead.
 	if resp, _ := do("POST", "/ui/auth/logout", "", nil); resp.StatusCode != 204 {
 		t.Errorf("logout: %d", resp.StatusCode)
 	}
-	cookies["conclave_ui"] = session
 	if resp, _ := do("GET", "/v1/whoami", "", nil); resp.StatusCode != 401 {
 		t.Errorf("whoami after logout: %d, want 401", resp.StatusCode)
 	}
@@ -208,19 +228,19 @@ func TestE2E_WebUI(t *testing.T) {
 	if resp, _ := do("GET", "/v1/whoami", "", nil); resp.StatusCode != 401 {
 		t.Errorf("old session after reset: %d, want 401", resp.StatusCode)
 	}
-	oldSession := cookies["conclave_ui"]
-	delete(cookies, "conclave_ui")
+	oldSession := session
+	session = ""
 
 	// Set up again: a new passkey, a new operator key.
 	pk2, cred2 := setupAndRegister()
-	// A new operator exists now, so a 401 for the old cookie can only mean
+	// A new operator exists now, so a 401 for the old token can only mean
 	// the reset deleted its session row.
-	newSession := cookies["conclave_ui"]
-	cookies["conclave_ui"] = oldSession
+	newSession := session
+	session = oldSession
 	if resp, body := do("GET", "/v1/whoami", "", nil); resp.StatusCode != 401 {
 		t.Errorf("old session after reset and re-setup: %d %s, want 401", resp.StatusCode, body)
 	}
-	cookies["conclave_ui"] = newSession
+	session = newSession
 	// The reset revoked the old operator key and freed its label.
 	var keys struct {
 		Keys []struct {

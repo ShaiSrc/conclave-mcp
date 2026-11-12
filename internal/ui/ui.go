@@ -1,6 +1,8 @@
 // Package ui is the web admin UI: the embedded pages, passkey login,
-// and the cookie sessions that let those pages call /v1 as the
-// operator key. See docs/web-ui.md.
+// and the sessions that let those pages call /v1 as the operator key.
+// A session token lives only in the page's memory and travels in the
+// X-Conclave-UI header, never in a cookie: browsers send localhost
+// cookies to every port. See docs/web-ui.md.
 package ui
 
 import (
@@ -20,8 +22,7 @@ import (
 
 // Names the browser, the server and the CLI agree on.
 const (
-	CookieName    = "conclave_ui"   // the session cookie
-	HeaderName    = "X-Conclave-UI" // /v1 takes the cookie only with this header set to 1
+	HeaderName    = "X-Conclave-UI" // carries the session token
 	OperatorLabel = "operator"      // the admin key UI sessions act as
 )
 
@@ -38,7 +39,7 @@ type Service struct {
 	store
 	wa     *webauthn.WebAuthn
 	origin string    // http://localhost:<port>, the only origin the UI runs on
-	hosts  [2]string // the Host headers /ui and cookie sessions accept: localhost:<port>, 127.0.0.1:<port>
+	hosts  [2]string // the Host headers /ui and UI sessions accept: localhost:<port>, 127.0.0.1:<port>
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony // by hashToken(ceremony cookie)
@@ -76,7 +77,7 @@ func New(db *sql.DB, port int) (*Service, error) {
 }
 
 // Loopback reports whether the listen host is a loopback address. The
-// UI and cookie sessions exist only then: passkeys need a secure
+// UI and its sessions exist only then: passkeys need a secure
 // context, and plain HTTP is one only on localhost.
 func Loopback(host string) bool {
 	if host == "localhost" {

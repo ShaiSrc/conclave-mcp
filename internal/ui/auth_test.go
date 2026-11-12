@@ -40,12 +40,11 @@ func TestCeremonies_SetupLoginLogout(t *testing.T) {
 		t.Fatal(err)
 	}
 	pk := newPasskey(testOrigin)
-	if status, body := pk.register(b, tok); status != http.StatusCreated {
-		t.Fatalf("register: %d %s", status, body)
+	if status, body := pk.register(b, tok); status != http.StatusCreated || len(b.session) != 43 {
+		t.Fatalf("register: %d %s, want 201 with a session token", status, body)
 	}
-	c := b.cookies[CookieName]
-	if c == nil || !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Secure {
-		t.Fatalf("session cookie %+v: want HttpOnly, SameSite=Strict, Path=/, not Secure", c)
+	if len(b.cookies) != 0 {
+		t.Fatalf("cookies after setup %v, want none (the ceremony cookie is cleared, no session cookie)", b.cookies)
 	}
 	if st := state(t, b); st.SetupNeeded || !st.LoggedIn {
 		t.Errorf("state after setup %+v, want logged in", st)
@@ -57,15 +56,13 @@ func TestCeremonies_SetupLoginLogout(t *testing.T) {
 	}
 
 	b2 := newBrowser(t, base)
-	if status, body := pk.login(b2); status != http.StatusNoContent || b2.cookies[CookieName] == nil {
-		t.Fatalf("login: %d %s, cookie %v", status, body, b2.cookies[CookieName])
+	if status, body := pk.login(b2); status != http.StatusOK || b2.session == "" || b2.session == b.session || len(b2.cookies) != 0 {
+		t.Fatalf("login: %d %s, cookies %v; want 200 with a new session token and no cookie", status, body, b2.cookies)
 	}
-	old := *b2.cookies[CookieName]
-	if status, _ := b2.do("POST", "/ui/auth/logout", nil); status != http.StatusNoContent || b2.cookies[CookieName] != nil {
-		t.Fatalf("logout: %d, cookie %v left", status, b2.cookies[CookieName])
+	if status, _ := b2.do("POST", "/ui/auth/logout", nil); status != http.StatusNoContent {
+		t.Fatalf("logout: %d", status)
 	}
-	b2.cookies[CookieName] = &old // the old cookie is dead on the server too
-	if st := state(t, b2); st.LoggedIn {
+	if st := state(t, b2); st.LoggedIn { // the same token, now dead on the server
 		t.Error("session still live after logout")
 	}
 	if got, want := auditActions(t, s.db), []string{"ui.passkey.add", "ui.login", "ui.logout"}; !slices.Equal(got, want) {
@@ -210,7 +207,7 @@ func TestRegister_SecondSetupTokenLosesRace(t *testing.T) {
 	if n, _ := s.credentialCount(ctx); n != 1 {
 		t.Errorf("%d passkeys, want 1", n)
 	}
-	if b2.cookies[CookieName] != nil {
+	if b2.session != "" {
 		t.Error("the losing browser got a session")
 	}
 }
@@ -249,13 +246,13 @@ func TestLogin_CloneAndBackupFlags(t *testing.T) {
 	s, _, base := newTestUI(t)
 	_, pk := loggedIn(t, s, base)
 	pk.cred.Counter = 5
-	if st, body := pk.login(newBrowser(t, base)); st != http.StatusNoContent {
+	if st, body := pk.login(newBrowser(t, base)); st != http.StatusOK {
 		t.Fatalf("login counter 5: %d %s", st, body)
 	}
 	pk.cred.Counter = 3
 	b := newBrowser(t, base)
-	if st, _ := pk.login(b); st != http.StatusForbidden || b.cookies[CookieName] != nil {
-		t.Errorf("counter regression: %d, cookie %v; want 403 and no cookie", st, b.cookies[CookieName])
+	if st, body := pk.login(b); st != http.StatusForbidden || b.session != "" {
+		t.Errorf("counter regression: %d %s; want 403 and no session", st, body)
 	}
 	var n int
 	s.db.QueryRow(`SELECT COUNT(*) FROM audit WHERE action = 'ui.login' AND result = 'error:clone_warning'`).Scan(&n)
@@ -266,8 +263,8 @@ func TestLogin_CloneAndBackupFlags(t *testing.T) {
 	pk.auth.Options.BackupEligible = false
 	pk.auth.Options.BackupState = false
 	b = newBrowser(t, base)
-	if st, _ := pk.login(b); st != http.StatusUnauthorized || b.cookies[CookieName] != nil {
-		t.Errorf("backup-eligible flip: %d, want 401 and no cookie", st)
+	if st, _ := pk.login(b); st != http.StatusUnauthorized || b.session != "" {
+		t.Errorf("backup-eligible flip: %d, want 401 and no session", st)
 	}
 }
 
@@ -284,13 +281,13 @@ func TestCeremony_FinishCannotBeReplayed(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := virtualwebauthn.CreateAssertionResponse(pk.rp, pk.auth, pk.cred, *opts)
-	if st, body := b.do("POST", "/ui/auth/login/finish", resp); st != http.StatusNoContent {
+	if st, body := b.do("POST", "/ui/auth/login/finish", resp); st != http.StatusOK {
 		t.Fatalf("finish: %d %s", st, body)
 	}
 	replay := newBrowser(t, base)
 	replay.cookies[ceremonyCookie] = &ck
-	if st, _ := replay.do("POST", "/ui/auth/login/finish", resp); st != http.StatusBadRequest || replay.cookies[CookieName] != nil {
-		t.Errorf("replayed finish: %d, want 400 and no session", st)
+	if st, body := replay.keepSession(replay.do("POST", "/ui/auth/login/finish", resp)); st != http.StatusBadRequest || replay.session != "" {
+		t.Errorf("replayed finish: %d %s, want 400 and no session", st, body)
 	}
 	cross := newBrowser(t, base)
 	cross.do("POST", "/ui/auth/login/begin", nil)
@@ -359,7 +356,7 @@ func TestPasskeys_RemoveEndsOtherSessions(t *testing.T) {
 		t.Fatalf("second passkey: %d %s", st, body)
 	}
 	b2 := newBrowser(t, base)
-	if st, body := pk1.login(b2); st != http.StatusNoContent {
+	if st, body := pk1.login(b2); st != http.StatusOK {
 		t.Fatalf("login with the first passkey: %d %s", st, body)
 	}
 	var l struct {

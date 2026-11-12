@@ -32,10 +32,28 @@ export class APIError extends Error {
   }
 }
 
-// api calls the server as the logged-in operator: same origin, the
-// session cookie, and the header /v1 needs to accept the cookie.
+// session is this tab's session token. It lives only here, in the
+// page's memory: never in a cookie (browsers send localhost cookies to
+// every port, so another local process could collect it), nor in
+// localStorage or sessionStorage (kept unencrypted on disk). A reload or
+// a new tab starts logged out.
+let session = '';
+
+// setSession keeps the token a login or the first registration returned;
+// '' logs the tab out.
+export function setSession(token) {
+  session = token || '';
+}
+
+// authHeaders is what a request needs to act as the logged-in operator.
+export function authHeaders() {
+  return session ? { 'X-Conclave-UI': session } : {};
+}
+
+// api calls the server as the logged-in operator: same origin (the
+// passkey ceremony cookie) and the session token.
 export async function api(method, path, body) {
-  const opts = { method, headers: { 'X-Conclave-UI': '1' }, credentials: 'same-origin' };
+  const opts = { method, headers: authHeaders(), credentials: 'same-origin' };
   if (body !== undefined) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);

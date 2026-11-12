@@ -43,7 +43,7 @@ func withV1(s *Service, r chi.Router) {
 	})
 }
 
-func TestCookieAuth_HeaderHostOriginSession(t *testing.T) {
+func TestSessionAuth_HeaderHostOriginSession(t *testing.T) {
 	s, clk, base := newTestUI(t, withV1)
 	b, _ := loggedIn(t, s, base)
 	opID, err := operatorKeyID(t.Context(), s.db)
@@ -56,7 +56,7 @@ func TestCookieAuth_HeaderHostOriginSession(t *testing.T) {
 	}
 	status, body := b.do("GET", "/v1/whoami", nil)
 	if status != http.StatusOK || json.Unmarshal(body, &me) != nil || me.ID != opID || !me.Admin {
-		t.Fatalf("whoami with the cookie: %d %s, want the operator key %d as admin", status, body, opID)
+		t.Fatalf("whoami with the session token: %d %s, want the operator key %d as admin", status, body, opID)
 	}
 	for _, c := range []struct {
 		name   string
@@ -65,7 +65,9 @@ func TestCookieAuth_HeaderHostOriginSession(t *testing.T) {
 		host   string
 		want   int
 	}{
-		{"cookie without the header", "GET", map[string]string{HeaderName: ""}, testHost, 401},
+		{"no X-Conclave-UI header", "GET", map[string]string{HeaderName: ""}, testHost, 401},
+		{"the old constant X-Conclave-UI: 1", "GET", map[string]string{HeaderName: "1"}, testHost, 401},
+		{"an unknown token", "GET", map[string]string{HeaderName: "made-up"}, testHost, 401},
 		{"wrong Host", "GET", nil, "attacker.example:7432", 403},
 		{"other port", "GET", nil, "localhost:9999", 403},
 		{"127.0.0.1 is a UI host", "GET", nil, "127.0.0.1:7432", 200},
@@ -87,12 +89,12 @@ func TestCookieAuth_HeaderHostOriginSession(t *testing.T) {
 	}
 	b.host = testHost
 
-	// A bearer key still wins over the cookie.
+	// A bearer key still wins over the session token.
 	resp := b.send("GET", "/v1/whoami", nil, map[string]string{"Authorization": "Bearer agent"})
 	_ = json.NewDecoder(resp.Body).Decode(&me)
 	resp.Body.Close()
 	if me.ID != 2 || me.Admin {
-		t.Errorf("bearer with a cookie: acted as %d (admin %v), want the agent key", me.ID, me.Admin)
+		t.Errorf("bearer with a session token: acted as %d (admin %v), want the agent key", me.ID, me.Admin)
 	}
 
 	clk.advance(IdleTimeout + time.Minute)
@@ -101,7 +103,29 @@ func TestCookieAuth_HeaderHostOriginSession(t *testing.T) {
 	}
 }
 
-func TestCookieAuth_RevokedOperatorKey(t *testing.T) {
+// A live session token sent only as the old conclave_ui cookie counts
+// for nothing: browsers send localhost cookies to every port, so another
+// local process could have collected it.
+func TestSessionAuth_CookieAloneIsIgnored(t *testing.T) {
+	s, _, base := newTestUI(t, withV1)
+	b, _ := loggedIn(t, s, base)
+	if !state(t, b).LoggedIn {
+		t.Fatal("the token itself is not live")
+	}
+	c := newBrowser(t, base) // no X-Conclave-UI
+	c.cookies["conclave_ui"] = &http.Cookie{Name: "conclave_ui", Value: b.session}
+	if status, body := c.do("GET", "/v1/whoami", nil); status != http.StatusUnauthorized {
+		t.Errorf("whoami with only the cookie: %d %s, want 401", status, body)
+	}
+	if state(t, c).LoggedIn {
+		t.Error("/ui/auth/state: logged in with only the cookie")
+	}
+	if status, body := c.do("POST", "/ui/auth/register/begin", map[string]string{"name": "x"}); status != http.StatusForbidden {
+		t.Errorf("register/begin with only the cookie (a passkey exists): %d %s, want 403", status, body)
+	}
+}
+
+func TestSessionAuth_RevokedOperatorKey(t *testing.T) {
 	s, _, base := newTestUI(t, withV1)
 	b, _ := loggedIn(t, s, base)
 	if _, err := s.db.Exec(`UPDATE api_keys SET revoked_at = '2026-11-12T10:00:00Z' WHERE label = 'operator'`); err != nil {

@@ -1,6 +1,6 @@
 // Rooms: the list, and one room with its messages (live), open
 // requests, claims and members.
-import { h, api, errorBox, confirmButton, table, when, rerender, rightsPicker } from './lib.js';
+import { h, api, authHeaders, errorBox, confirmButton, table, when, rerender, rightsPicker } from './lib.js';
 
 const PAGE = 500; // the server's largest message page
 
@@ -222,7 +222,7 @@ function membersSection(base, members, keys) {
 }
 
 // follow reads the room's event stream with fetch (EventSource cannot
-// send the X-Conclave-UI header) and reconnects until stopped, with
+// send the session token in X-Conclave-UI) and reconnects until stopped, with
 // backoff (1 s doubling to 30 s, reset by any event). An event is only a
 // trigger: each one re-lists the messages after the newest known, so
 // events dropped for a slow reader are recovered too.
@@ -238,7 +238,7 @@ function follow(base, id, msgs, draw, note) {
     let delay = 1000;
     while (!stop.signal.aborted) {
       try {
-        const res = await fetch(base + '/events?wait=300', { headers: { 'X-Conclave-UI': '1' }, signal: stop.signal });
+        const res = await fetch(base + '/events?wait=300', { headers: authHeaders(), signal: stop.signal });
         if (res.status === 401) return rerender(); // the session ended
         if (res.status === 404 || res.status === 410) return; // gone or archived
         if (!res.ok) throw new Error('status ' + res.status);

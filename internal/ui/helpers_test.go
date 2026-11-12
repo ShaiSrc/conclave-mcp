@@ -44,12 +44,14 @@ func newTestUI(t *testing.T, extra ...func(s *Service, r chi.Router)) (*Service,
 }
 
 // browser is a test client that acts like the UI page: it sends the UI's
-// Host, its Origin on writes and the X-Conclave-UI header, and keeps cookies.
+// Host, its Origin on writes and, once logged in, its session token in
+// X-Conclave-UI; it keeps cookies (the ceremony cookie).
 type browser struct {
 	t       *testing.T
 	base    string
 	host    string
 	origin  string
+	session string // the token from login or setup, held like the page holds it
 	cookies map[string]*http.Cookie
 }
 
@@ -90,7 +92,9 @@ func (b *browser) send(method, path string, body any, hdr map[string]string) *ht
 	}
 	req.Host = b.host
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(HeaderName, "1")
+	if b.session != "" {
+		req.Header.Set(HeaderName, b.session)
+	}
 	if method != http.MethodGet {
 		req.Header.Set("Origin", b.origin)
 	}
@@ -151,7 +155,19 @@ func (p *passkey) beginRegistration(b *browser, setupToken string) (*virtualweba
 func (p *passkey) finishRegistration(b *browser, opts *virtualwebauthn.AttestationOptions) (int, []byte) {
 	b.t.Helper()
 	p.auth.Options.UserHandle = []byte(opts.UserID) // a discoverable credential keeps the user handle
-	return b.do("POST", "/ui/auth/register/finish", virtualwebauthn.CreateAttestationResponse(p.rp, p.auth, p.cred, *opts))
+	return b.keepSession(b.do("POST", "/ui/auth/register/finish", virtualwebauthn.CreateAttestationResponse(p.rp, p.auth, p.cred, *opts)))
+}
+
+// keepSession stores the session token a successful finish returns, as
+// the page does, and passes the response on.
+func (b *browser) keepSession(status int, body []byte) (int, []byte) {
+	var r struct {
+		Session string `json:"session"`
+	}
+	if status < 300 && json.Unmarshal(body, &r) == nil && r.Session != "" {
+		b.session = r.Session
+	}
+	return status, body
 }
 
 // register runs a registration ceremony and returns the last response.
@@ -175,7 +191,7 @@ func (p *passkey) login(b *browser) (int, []byte) {
 	if err != nil {
 		b.t.Fatalf("request options: %v\n%s", err, body)
 	}
-	return b.do("POST", "/ui/auth/login/finish", virtualwebauthn.CreateAssertionResponse(p.rp, p.auth, p.cred, *opts))
+	return b.keepSession(b.do("POST", "/ui/auth/login/finish", virtualwebauthn.CreateAssertionResponse(p.rp, p.auth, p.cred, *opts)))
 }
 
 // loggedIn sets the UI up with a setup token and returns the logged-in

@@ -20,7 +20,7 @@ import (
 )
 
 // uiDB is a migrated database with an operator key and a UI session
-// whose cookie value is "session-token".
+// whose token is "session-token".
 func uiDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, closeDB, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "data.db"))
@@ -49,11 +49,12 @@ func uiDB(t *testing.T) *sql.DB {
 	return db
 }
 
+// uiRequest is a request as the UI page sends it: the session token in
+// X-Conclave-UI.
 func uiRequest(method, path, host string) *http.Request {
 	req := httptest.NewRequest(method, path, nil)
 	req.Host = host
-	req.AddCookie(&http.Cookie{Name: ui.CookieName, Value: "session-token"})
-	req.Header.Set(ui.HeaderName, "1")
+	req.Header.Set(ui.HeaderName, "session-token")
 	return req
 }
 
@@ -66,16 +67,34 @@ func TestServer_UISessionOnV1(t *testing.T) {
 	rec := httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, uiRequest("GET", "/v1/whoami", "localhost:7432"))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"label":"operator"`) {
-		t.Fatalf("whoami with the UI cookie: %d %s", rec.Code, rec.Body)
+		t.Fatalf("whoami with the UI session token: %d %s", rec.Code, rec.Body)
 	}
 	rec = httptest.NewRecorder()
 	s.Handler().ServeHTTP(rec, uiRequest("GET", "/ui/auth/state", "localhost:7432"))
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"logged_in":true`) {
 		t.Errorf("/ui/auth/state: %d %s", rec.Code, rec.Body)
 	}
+
+	// The same token only as a conclave_ui cookie counts for nothing.
+	cookieOnly := func(path string) *http.Request {
+		req := uiRequest("GET", path, "localhost:7432")
+		req.Header.Del(ui.HeaderName)
+		req.AddCookie(&http.Cookie{Name: "conclave_ui", Value: "session-token"})
+		return req
+	}
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, cookieOnly("/v1/whoami"))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("whoami with only the cookie: %d %s, want 401", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, cookieOnly("/ui/auth/state"))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"logged_in":false`) {
+		t.Errorf("/ui/auth/state with only the cookie: %d %s, want logged out", rec.Code, rec.Body)
+	}
 }
 
-// On any other address there is no UI and the cookie counts for nothing.
+// On any other address there is no UI and the session token counts for nothing.
 func TestServer_NoUIOffLoopback(t *testing.T) {
 	s, err := New(Config{Host: "0.0.0.0", Port: 7432}, Deps{DB: uiDB(t)})
 	if err != nil {
@@ -90,9 +109,9 @@ func TestServer_NoUIOffLoopback(t *testing.T) {
 	}
 }
 
-// The cookie reaches the SSE route (mounted outside the /v1 group) but
-// not /v1/mcp, which stays bearer-only.
-func TestServer_UICookieOnEventsAndMCP(t *testing.T) {
+// The session token reaches the SSE route (mounted outside the /v1
+// group) but not /v1/mcp, which stays bearer-only.
+func TestServer_UISessionOnEventsAndMCP(t *testing.T) {
 	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: uiDB(t), Broker: events.NewBroker()})
 	if err != nil {
 		t.Fatal(err)
@@ -103,17 +122,18 @@ func TestServer_UICookieOnEventsAndMCP(t *testing.T) {
 		return rec.Code
 	}
 	if got := do(uiRequest("GET", "/v1/rooms/nope/events", "localhost:7432")); got == http.StatusUnauthorized || got == http.StatusForbidden {
-		t.Errorf("events with cookie and header: %d, want it authenticated", got)
+		t.Errorf("events with the session token: %d, want it authenticated", got)
 	}
 	req := uiRequest("GET", "/v1/rooms/nope/events", "localhost:7432")
 	req.Header.Del(ui.HeaderName)
+	req.AddCookie(&http.Cookie{Name: "conclave_ui", Value: "session-token"})
 	if got := do(req); got != http.StatusUnauthorized {
-		t.Errorf("events with cookie, no header: %d, want 401", got)
+		t.Errorf("events with only the cookie: %d, want 401", got)
 	}
 	req = uiRequest("POST", "/v1/mcp", "localhost:7432")
 	req.Header.Set("Origin", "http://localhost:7432")
 	if got := do(req); got != http.StatusUnauthorized {
-		t.Errorf("/v1/mcp with cookie: %d, want 401", got)
+		t.Errorf("/v1/mcp with the session token: %d, want 401", got)
 	}
 }
 

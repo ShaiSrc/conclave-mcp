@@ -37,8 +37,8 @@ type store struct {
 	now func() time.Time // tests move the clock
 }
 
-// createSession starts a session and returns its token (the cookie
-// value). It also purges what has expired.
+// createSession starts a session and returns its token (the page sends
+// it in X-Conclave-UI). It also purges what has expired.
 func (s *store) createSession(ctx context.Context) (string, error) {
 	if err := s.purge(ctx); err != nil {
 		return "", err

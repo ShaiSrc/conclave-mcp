@@ -15,21 +15,22 @@ import (
 )
 
 // Auth wraps the bearer middleware of /v1. A request without an
-// Authorization header that carries the conclave_ui cookie acts as the
-// operator key if it also has X-Conclave-UI: 1 (else 401), a UI Host
-// (else 403), the UI Origin unless it is a GET (else 403) and a live
-// session (else 401). Every other request goes to bearer unchanged.
+// Authorization header that carries X-Conclave-UI acts as the operator
+// key if that header holds a session token (else 401), the request has a
+// UI Host (else 403), the UI Origin unless it is a GET (else 403) and
+// the session is live (else 401). Every other request goes to bearer
+// unchanged; a session cookie counts for nothing.
 func (s *Service) Auth(bearer func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		viaBearer := bearer(next)
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			c, err := r.Cookie(CookieName)
-			if err != nil || r.Header.Get("Authorization") != "" {
+			if r.Header.Get("Authorization") != "" || len(r.Header.Values(HeaderName)) == 0 {
 				viaBearer.ServeHTTP(w, r)
 				return
 			}
-			if r.Header.Get(HeaderName) != "1" {
-				writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "a UI session needs the X-Conclave-UI: 1 header")
+			token := sessionToken(r)
+			if token == "" || token == "1" {
+				writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "X-Conclave-UI must carry the session token from a passkey login")
 				return
 			}
 			if !s.uiHost(r.Host) {
@@ -40,7 +41,7 @@ func (s *Service) Auth(bearer func(http.Handler) http.Handler) func(http.Handler
 				writeErr(w, r, http.StatusForbidden, "forbidden", "origin not allowed")
 				return
 			}
-			live, err := s.session(r.Context(), c.Value)
+			live, err := s.session(r.Context(), token)
 			if err != nil {
 				writeErr(w, r, http.StatusInternalServerError, "internal_error", "session lookup")
 				return

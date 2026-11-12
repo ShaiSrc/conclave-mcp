@@ -70,7 +70,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 
 	s := &Server{cfg: cfg, logger: cfg.Logger}
 
-	// The web UI and its cookie sessions exist only on a loopback
+	// The web UI and its sessions exist only on a loopback
 	// listen address (docs/web-ui.md).
 	var uiSvc *ui.Service
 	if ui.Loopback(cfg.Host) {
@@ -148,7 +148,8 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
 	verifier := auth.NewVerifier(keysSvc, deps.MaxConcurrentVerify)
 
 	// authMW is the bearer verifier; with the web UI it also accepts a
-	// UI session cookie and acts as the operator key (internal/ui).
+	// UI session token (X-Conclave-UI) and acts as the operator key
+	// (internal/ui).
 	authMW := verifier.Middleware()
 	if uiSvc != nil {
 		authMW = uiSvc.Auth(authMW)
