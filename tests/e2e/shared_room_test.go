@@ -55,9 +55,10 @@ func TestE2E_ExternalKeySeesOnlyItsRoom(t *testing.T) {
 	if r := env.call("POST", "/v1/rooms/"+intRoom+"/messages", intKey, map[string]any{"content": "internal-secret"}); r.Status != 201 {
 		t.Fatalf("internal send: %d %s", r.Status, r.Body)
 	}
-	// leaks reports output that names anything of the internal room.
+	// leaks reports output that names anything of the internal room, in
+	// table or JSON form alike.
 	leaks := func(s string) bool {
-		return strings.Contains(s, "internal-secret") || strings.Contains(s, "e2e-int\"") || strings.Contains(s, intRoom+"\"")
+		return strings.Contains(s, "internal-secret") || strings.Contains(s, "e2e-int") || strings.Contains(s, intRoom)
 	}
 
 	// Through the CLI, as the external key.
@@ -74,22 +75,30 @@ func TestE2E_ExternalKeySeesOnlyItsRoom(t *testing.T) {
 	if out, err := cli("rooms", "list", "--format", "json"); err != nil || !strings.Contains(out, extRoom) || strings.Contains(out, intRoom) {
 		t.Errorf("cli rooms list: %v\n%s", err, out)
 	}
-	for _, args := range [][]string{
-		{"messages", "list", intRoom},
-		{"rooms", "members", intRoom},
-		{"rooms", "get", intRoom},
-		{"keys", "list"},
-		{"audit", "list"},
-		{"messages", "send", extRoom, "--content", "q?", "--message-type", "question"},
+	const (
+		notFound   = "404 (not_found): room not found"
+		adminOnly  = "403 (forbidden): admin key required"
+		noQuestion = "403 (missing_right): missing right: question"
+	)
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"messages", "list", intRoom}, notFound},
+		{[]string{"rooms", "members", intRoom}, notFound},
+		{[]string{"rooms", "get", intRoom}, notFound},
+		{[]string{"keys", "list"}, adminOnly},
+		{[]string{"audit", "list"}, adminOnly},
+		{[]string{"messages", "send", extRoom, "--content", "q?", "--message-type", "question"}, noQuestion},
 	} {
-		if out, err := cli(args...); err == nil || leaks(out) {
-			t.Errorf("cli %v: want a refusal that shows nothing of the other room, got err=%v\n%s", args, err, out)
+		if out, err := cli(c.args...); err == nil || !strings.Contains(out, c.want) || leaks(out) {
+			t.Errorf("cli %v: want refusal %q and nothing of the other room, got err=%v\n%s", c.args, c.want, err, out)
 		}
 	}
 	if out, err := cli("messages", "send", extRoom, "--content", "delivered", "--message-type", "handoff"); err != nil {
 		t.Errorf("cli handoff: %v\n%s", err, out)
 	}
-	if out, err := cli("messages", "list", extRoom, "--format", "json"); err != nil || !strings.Contains(out, `"trust_origin": "external"`) {
+	if out, err := cli("messages", "list", extRoom, "--format", "json"); err != nil || !strings.Contains(strings.Join(strings.Fields(out), ""), `"trust_origin":"external"`) {
 		t.Errorf("cli own room: want the handoff marked external, got %v\n%s", err, out)
 	}
 
@@ -107,8 +116,11 @@ func TestE2E_ExternalKeySeesOnlyItsRoom(t *testing.T) {
 				IsError bool `json:"isError"`
 			} `json:"result"`
 		}
-		if r.Status != 200 || json.Unmarshal(r.Body, &resp) != nil || len(resp.Result.Content) != 1 {
-			return "bad response: " + string(r.Body), true
+		if r.Status != 200 {
+			t.Fatalf("mcp %s: status %d %s", tool, r.Status, r.Body)
+		}
+		if err := json.Unmarshal(r.Body, &resp); err != nil || len(resp.Result.Content) != 1 {
+			t.Fatalf("mcp %s: malformed envelope: %v %s", tool, err, r.Body)
 		}
 		return resp.Result.Content[0].Text, resp.Result.IsError
 	}
@@ -118,16 +130,17 @@ func TestE2E_ExternalKeySeesOnlyItsRoom(t *testing.T) {
 	for _, c := range []struct {
 		tool string
 		args map[string]any
+		want string
 	}{
-		{"messages.list", map[string]any{"room_id": intRoom}},
-		{"rooms.members", map[string]any{"room_id": intRoom}},
-		{"claims.list", map[string]any{"room_id": intRoom}},
-		{"keys.list", map[string]any{}},
-		{"audit.list", map[string]any{}},
-		{"messages.send", map[string]any{"room_id": extRoom, "content": "q?", "message_type": "question"}},
+		{"messages.list", map[string]any{"room_id": intRoom}, "not_found"},
+		{"rooms.members", map[string]any{"room_id": intRoom}, "not_found"},
+		{"claims.list", map[string]any{"room_id": intRoom}, "not_found"},
+		{"keys.list", map[string]any{}, "admin key required"},
+		{"audit.list", map[string]any{}, "admin key required"},
+		{"messages.send", map[string]any{"room_id": extRoom, "content": "q?", "message_type": "question"}, "missing_right"},
 	} {
-		if text, isErr := mcp(c.tool, c.args); !isErr || leaks(text) {
-			t.Errorf("mcp %s: want an error that shows nothing of the other room, got isError=%v %s", c.tool, isErr, text)
+		if text, isErr := mcp(c.tool, c.args); !isErr || !strings.Contains(text, c.want) || leaks(text) {
+			t.Errorf("mcp %s: want error %q and nothing of the other room, got isError=%v %s", c.tool, c.want, isErr, text)
 		}
 	}
 	if text, isErr := mcp("rooms.members", map[string]any{"room_id": extRoom}); isErr || !strings.Contains(text, "e2e-ext") || strings.Contains(text, `"rights"`) {
