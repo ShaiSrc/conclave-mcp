@@ -34,7 +34,7 @@ principal that part 2 needs.
 | Left out | Why |
 |---|---|
 | Sending messages from the UI | That is the operator channel (part 2); it needs the authenticity mark. |
-| Offline commands (`admin vacuum`, `admin keys create-bootstrap`, `ui reset`) | They need the service stopped; the CLI keeps them. |
+| Offline commands (`admin vacuum`, `admin keys create-bootstrap`, `admin ui-reset`) | They need the service stopped; the CLI keeps them. |
 | `init`, hooks, `--store` | They configure a repository or a local key store, not the server. |
 | Remote access (non-loopback) | Passkeys need a secure context; plain HTTP is only secure on `localhost`. TLS setups can come later. |
 | A password fallback | Passkeys sync through the platform key store; `ui reset` covers loss. |
@@ -67,6 +67,7 @@ CREATE TABLE ui_credentials (
     id            TEXT PRIMARY KEY,      -- base64url credential id
     public_key    BLOB NOT NULL,
     sign_count    INTEGER NOT NULL DEFAULT 0,
+    flags         INTEGER NOT NULL DEFAULT 0, -- authenticator flags (backup eligible/state) the library checks on login
     transports    TEXT NOT NULL DEFAULT '',
     name          TEXT NOT NULL DEFAULT '',
     created_at    TEXT NOT NULL,
