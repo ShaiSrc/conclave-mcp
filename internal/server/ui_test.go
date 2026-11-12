@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -113,5 +114,23 @@ func TestServer_UICookieOnEventsAndMCP(t *testing.T) {
 	req.Header.Set("Origin", "http://localhost:7432")
 	if got := do(req); got != http.StatusUnauthorized {
 		t.Errorf("/v1/mcp with cookie: %d, want 401", got)
+	}
+}
+
+// A /ui error carries the server-generated request id.
+func TestServer_UIErrorHasRequestID(t *testing.T) {
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, uiRequest("GET", "/ui/auth/state", "attacker.example:7432"))
+	var body struct {
+		Error struct {
+			RequestID string `json:"request_id"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusForbidden || body.Error.RequestID == "" {
+		t.Errorf("foreign Host: %d %s, want 403 with a request_id", rec.Code, rec.Body)
 	}
 }

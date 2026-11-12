@@ -104,18 +104,30 @@ func (s *Service) Routes(r chi.Router) {
 		panic(err) // the embedded directory always exists
 	}
 	pages := http.StripPrefix("/ui/", http.FileServer(http.FS(files)))
-	r.Group(func(r chi.Router) {
+	r.Route("/ui", func(r chi.Router) {
 		r.Use(s.guard)
-		r.Get("/ui", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
-		r.Get("/ui/*", pages.ServeHTTP)
-		r.Post("/ui/auth/register/begin", s.registerBegin)
-		r.Post("/ui/auth/register/finish", s.registerFinish)
-		r.Post("/ui/auth/login/begin", s.loginBegin)
-		r.Post("/ui/auth/login/finish", s.loginFinish)
-		r.Post("/ui/auth/logout", s.logout)
-		r.Get("/ui/auth/state", s.state)
-		r.Get("/ui/auth/credentials", s.listCredentials)
-		r.Delete("/ui/auth/credentials/{id}", s.removeCredential)
+		// Unmatched requests are answered behind the guard too.
+		r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+			writeErr(w, req, http.StatusNotFound, "not_found", "not found")
+		})
+		r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+			writeErr(w, req, http.StatusMethodNotAllowed, "bad_request", "method not allowed")
+		})
+		r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
+			if req.URL.Path == "/ui" {
+				http.Redirect(w, req, "/ui/", http.StatusFound)
+				return
+			}
+			pages.ServeHTTP(w, req)
+		})
+		r.Post("/auth/register/begin", s.registerBegin)
+		r.Post("/auth/register/finish", s.registerFinish)
+		r.Post("/auth/login/begin", s.loginBegin)
+		r.Post("/auth/login/finish", s.loginFinish)
+		r.Post("/auth/logout", s.logout)
+		r.Get("/auth/state", s.state)
+		r.Get("/auth/credentials", s.listCredentials)
+		r.Delete("/auth/credentials/{id}", s.removeCredential)
 	})
 }
 
@@ -134,7 +146,7 @@ func (s *Service) guard(next http.Handler) http.Handler {
 			writeErr(w, r, http.StatusForbidden, "forbidden", "host not allowed")
 			return
 		}
-		read := r.Method == http.MethodGet || r.Method == http.MethodHead
+		read := r.Method == http.MethodGet
 		if read && r.Host == s.hosts[1] {
 			http.Redirect(w, r, s.origin+r.URL.RequestURI(), http.StatusFound)
 			return

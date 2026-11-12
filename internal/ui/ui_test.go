@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"io"
 	"io/fs"
 	"net/http"
@@ -23,6 +24,7 @@ func TestPages_ServedWithSecurityHeaders(t *testing.T) {
 			"Content-Security-Policy": "default-src 'self'; base-uri 'none'; frame-ancestors 'none'",
 			"X-Content-Type-Options":  "nosniff",
 			"Referrer-Policy":         "no-referrer",
+			"Cache-Control":           "no-store",
 		} {
 			if got := resp.Header.Get(k); got != want {
 				t.Errorf("%s: %s = %q, want %q", path, k, got, want)
@@ -82,8 +84,8 @@ func TestPages_HostAndOriginChecks(t *testing.T) {
 // Agent-written text must never become markup: the scripts only use
 // textContent, and the page has no inline script, style or handler.
 func TestAssets_NoMarkupFromData(t *testing.T) {
-	banned := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new Function`)
-	inline := regexp.MustCompile(`<script>|<script [^>]*>[^<]|<style|\sstyle=|\son[a-z]+=`)
+	banned := regexp.MustCompile(`(?i)innerHTML|outerHTML|insertAdjacentHTML|document\.write|eval\(|new\s+Function|javascript:|srcdoc|setAttribute\(\s*['"` + "`" + `]on|\.on[a-z]+\s*=[^=]`)
+	inline := regexp.MustCompile(`(?i)<script>|<script\s[^>]*>[^<]|<style|\sstyle\s*=|\son[a-z]+\s*=|javascript:|srcdoc`)
 	err := fs.WalkDir(assets, "assets", func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -105,11 +107,44 @@ func TestAssets_NoMarkupFromData(t *testing.T) {
 	}
 }
 
+// The 64 KiB cap, not the name check, must refuse the padded body: the
+// same request without the padding succeeds.
 func TestPages_BodyCapOnAuthRoutes(t *testing.T) {
+	s, _, base := newTestUI(t)
+	b := newBrowser(t, base)
+	tok, _, err := s.createSetupToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := `{"setup_token":"` + tok + `","name":"x"`
+	if status, body := b.do("POST", "/ui/auth/register/begin", valid+`}`); status != http.StatusOK {
+		t.Fatalf("small body: %d %s, want 200", status, body)
+	}
+	status, _ := b.do("POST", "/ui/auth/register/begin", valid+`,"pad":"`+strings.Repeat("a", 70<<10)+`"}`)
+	if status != http.StatusBadRequest {
+		t.Errorf("a 70 KiB body: %d, want 400", status)
+	}
+}
+
+// Requests no route matches are guarded too.
+func TestPages_UnmatchedRequestsGuarded(t *testing.T) {
 	_, _, base := newTestUI(t)
 	b := newBrowser(t, base)
-	status, _ := b.do("POST", "/ui/auth/register/begin", `{"name":"`+strings.Repeat("a", 70<<10)+`"}`)
-	if status == http.StatusOK || status == http.StatusCreated {
-		t.Errorf("a 70 KiB body: %d, want it refused", status)
+	for _, c := range []struct {
+		method, path string
+		want         int
+	}{{"POST", "/ui/", 405}, {"PUT", "/ui/auth/state", 405}, {"GET", "/ui/auth/nope", 404}} {
+		resp := b.send(c.method, c.path, nil, nil)
+		resp.Body.Close()
+		if resp.StatusCode != c.want || resp.Header.Get("Content-Security-Policy") == "" {
+			t.Errorf("%s %s: %d, want %d with the security headers", c.method, c.path, resp.StatusCode, c.want)
+		}
+		b.host = "attacker.example:7432"
+		resp = b.send(c.method, c.path, nil, nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("%s %s with a foreign Host: %d, want 403", c.method, c.path, resp.StatusCode)
+		}
+		b.host = testHost
 	}
 }
