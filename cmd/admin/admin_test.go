@@ -13,6 +13,9 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite"
+
+	"github.com/hermes/conclave-mcp/internal/storage"
+	"github.com/hermes/conclave-mcp/migrations"
 )
 
 func TestVacuum_OK(t *testing.T) {
@@ -164,5 +167,65 @@ func TestExitCode(t *testing.T) {
 	}
 	if ec := ExitCode(&exitError{Code: 3, Err: errors.New("x")}); ec != 3 {
 		t.Errorf("typed=%d", ec)
+	}
+}
+
+func TestUIReset(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "data.db")
+	db, closeDB, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Migrate(ctx, db, migrations.FS(), nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO api_keys (label, hash, prefix, created_at, is_admin) VALUES ('operator', 'x', 'p1', '2026-11-12T10:00:00Z', 1)`,
+		`INSERT INTO meta (key, value) VALUES ('ui_operator_key_id', (SELECT CAST(id AS TEXT) FROM api_keys WHERE prefix = 'p1'))`,
+		`INSERT INTO ui_setup_tokens (token_hash, expires_at) VALUES ('t', '2026-11-12T10:10:00Z')`,
+		`INSERT INTO ui_credentials (id, public_key, created_at) VALUES ('c1', x'01', '2026-11-12T10:00:00Z'), ('c2', x'02', '2026-11-12T10:00:00Z')`,
+		`INSERT INTO ui_sessions (token_hash, created_at, last_seen_at, expires_at) VALUES ('h', '2026-11-12T10:00:00Z', '2026-11-12T10:00:00Z', '2026-11-12T22:00:00Z')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = closeDB()
+
+	var errOut bytes.Buffer
+	if err := runUIReset(ctx, &errOut, dbPath); err != nil {
+		t.Fatalf("runUIReset: %v", err)
+	}
+	if !strings.Contains(errOut.String(), "removed 2 passkey(s) and 1 session(s)") {
+		t.Errorf("stderr: %q", errOut.String())
+	}
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var creds, sessions, tokens, metaRows, free int
+	var label string
+	var revokedAt sql.NullString
+	var detail string
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM ui_credentials), (SELECT COUNT(*) FROM ui_sessions), (SELECT COUNT(*) FROM ui_setup_tokens),
+		(SELECT COUNT(*) FROM meta WHERE key = 'ui_operator_key_id'), (SELECT COUNT(*) FROM api_keys WHERE label = 'operator'),
+		(SELECT label FROM api_keys WHERE prefix = 'p1'), (SELECT revoked_at FROM api_keys WHERE prefix = 'p1')`).
+		Scan(&creds, &sessions, &tokens, &metaRows, &free, &label, &revokedAt); err != nil {
+		t.Fatal(err)
+	}
+	if creds != 0 || sessions != 0 || tokens != 0 || metaRows != 0 || free != 0 || label != "operator-revoked-1" || !revokedAt.Valid {
+		t.Errorf("after reset: %d passkeys, %d sessions, %d tokens, %d meta rows, %d operator labels, label %q, revoked %v", creds, sessions, tokens, metaRows, free, label, revokedAt)
+	}
+	if err := db.QueryRow(`SELECT detail FROM audit WHERE action = 'ui.reset' AND actor_key_id IS NULL`).Scan(&detail); err != nil || detail != `{"operator_key_revoked":true,"passkeys":2,"sessions":1}` {
+		t.Errorf("audit detail %q (%v)", detail, err)
+	}
+}
+
+func TestUIReset_MissingDBIsExit1(t *testing.T) {
+	err := runUIReset(context.Background(), &bytes.Buffer{}, filepath.Join(t.TempDir(), "missing.db"))
+	if ExitCode(err) != 1 {
+		t.Errorf("missing db: %v (exit %d), want exit 1", err, ExitCode(err))
 	}
 }

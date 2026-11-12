@@ -23,6 +23,7 @@ import (
 	"github.com/hermes/conclave-mcp/cmd/rooms"
 	"github.com/hermes/conclave-mcp/cmd/serve"
 	"github.com/hermes/conclave-mcp/cmd/setup"
+	uicli "github.com/hermes/conclave-mcp/cmd/ui"
 )
 
 var version = "0.1.0-dev"
@@ -48,6 +49,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(setup.NewAgentCmd())
 	root.AddCommand(messages.NewStatusCmd())
 	root.AddCommand(messages.NewWatchCmd())
+	root.AddCommand(uicli.NewCmd())
 	root.AddCommand(newVersionCmd())
 
 	// Global flags shared by every CLI subcommand that talks to a server.
@@ -126,6 +128,11 @@ func main() {
 	}
 	if code == 0 || code == 2 {
 		if c := setup.ExitCode(err); c == 1 {
+			code = c
+		}
+	}
+	if code == 0 || code == 2 {
+		if c := uicli.ExitCode(err); c == 1 || c == 3 {
 			code = c
 		}
 	}
