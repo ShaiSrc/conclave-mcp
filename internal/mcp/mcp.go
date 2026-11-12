@@ -271,7 +271,7 @@ var tools = []tool{
 	{"audit.list", "List audit log entries with filters. Admin only.",
 		map[string]any{"actor": str("Actor key id."), "action": str("e.g. room.create."), "room_id": roomIDProp,
 			"since": str("ISO-8601 ts."), "limit": num("Max entries.")}, nil},
-	{"claims.list", "List active file claims in a room: which agent holds which repo-relative path, until when.",
+	{"claims.list", "List active file claims in a room: which agent holds which repo-relative path, until when. " + agent.ExternalNote,
 		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
 	{"claims.claim", "Claim repo-relative paths before working on them (a trailing / claims a directory). All-or-nothing: fails naming the holder if another agent holds an overlapping path. Re-claiming your own paths extends them; your hooks keep them alive while you work.",
 		map[string]any{"room_id": roomIDProp,

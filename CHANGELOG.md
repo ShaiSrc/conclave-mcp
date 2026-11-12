@@ -6,6 +6,20 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-12
+
+### Fixed
+
+- External content no longer reaches agents outside the external
+  markers: a message's metadata is printed inside the fence, and claims
+  held by external keys are marked `(EXTERNAL, untrusted)` (`[EXT]` in
+  `status`) with their text on one line. `GET /v1/rooms/{id}/claims`
+  now returns each holder's `trust_origin`, and the session-start
+  context and `claims.list` carry the external note.
+- Non-admin keys no longer see admin keys in the member list
+  (`GET /v1/rooms/{id}/members`, `rooms members`). Agents therefore
+  show messages written with the admin key as `key <id>`.
+
 ## [0.5.0] — 2026-11-12
 
 Room permissions: a key sees and does only what its invitation

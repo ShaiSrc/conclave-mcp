@@ -202,3 +202,18 @@ func TestAccess(t *testing.T) {
 		}
 	}
 }
+
+func TestList_CarriesHolderTrustOrigin(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.svc.DB.Exec(`UPDATE api_keys SET trust_origin = 'external' WHERE id = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := e.do(2, "POST", "/rooms/R/claims", `{"paths":["a.go"]}`); code != 201 {
+		t.Fatalf("claim: %d", code)
+	}
+	_, out := e.do(1, "GET", "/rooms/R/claims", "")
+	list, _ := out["claims"].([]any)
+	if len(list) != 1 || list[0].(map[string]any)["trust_origin"] != "external" {
+		t.Errorf("want trust_origin external: %v", out)
+	}
+}

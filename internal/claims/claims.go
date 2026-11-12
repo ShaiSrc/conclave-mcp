@@ -68,6 +68,8 @@ type Claim struct {
 	Auto      bool   `json:"auto"`
 	Note      string `json:"note,omitempty"`
 	ExpiresAt string `json:"expires_at"`
+	// TrustOrigin is the holder key's origin ("internal" or "external").
+	TrustOrigin string `json:"trust_origin,omitempty"`
 }
 
 var errBadPath = errors.New("paths must be relative to the repository root, without '..' (a trailing / claims a directory)")
@@ -112,7 +114,7 @@ type queryer interface {
 // active returns the room's unexpired claims, labels included.
 func active(ctx context.Context, q queryer, roomID string, now time.Time) ([]Claim, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT c.id, c.path, c.key_id, k.label, c.auto, COALESCE(c.note, ''), c.expires_at
+		`SELECT c.id, c.path, c.key_id, k.label, c.auto, COALESCE(c.note, ''), c.expires_at, k.trust_origin
 		 FROM claims c JOIN api_keys k ON k.id = c.key_id
 		 WHERE c.room_id = ? AND c.expires_at > ?
 		 ORDER BY c.path, c.key_id`,
@@ -125,7 +127,7 @@ func active(ctx context.Context, q queryer, roomID string, now time.Time) ([]Cla
 	for rows.Next() {
 		var c Claim
 		var exp int64
-		if err := rows.Scan(&c.ID, &c.Path, &c.KeyID, &c.Label, &c.Auto, &c.Note, &exp); err != nil {
+		if err := rows.Scan(&c.ID, &c.Path, &c.KeyID, &c.Label, &c.Auto, &c.Note, &exp, &c.TrustOrigin); err != nil {
 			return nil, err
 		}
 		c.ExpiresAt = time.Unix(exp, 0).UTC().Format(time.RFC3339)
