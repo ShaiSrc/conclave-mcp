@@ -365,7 +365,7 @@ func newListCmd() *cobra.Command {
 				if status != http.StatusOK {
 					return fmt.Errorf("expected 200, got %d", status)
 				}
-				return renderMessageList(flagFormat, resp.Messages, agent.Labels(ctx, c), out)
+				return renderMessageList(flagFormat, resp.Messages, agent.Labels(ctx, c, roomID), out)
 			})
 		},
 	}

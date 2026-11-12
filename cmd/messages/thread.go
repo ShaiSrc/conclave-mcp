@@ -68,7 +68,7 @@ prints at once.
 				if err != nil || !done {
 					return err
 				}
-				labels := agent.Labels(ctx, c)
+				labels := agent.Labels(ctx, c, roomID)
 				if flagFormat == "json" {
 					for i := range thread {
 						thread[i].AuthorLabel = labels[thread[i].Author]

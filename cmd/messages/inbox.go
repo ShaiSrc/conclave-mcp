@@ -55,7 +55,7 @@ additionalContext envelope. For new setups prefer ` + "`conclave-mcp hook`" + `.
 				if err != nil || len(news) == 0 {
 					return err
 				}
-				text := agent.Format(roomID, news, agent.Labels(ctx, c))
+				text := agent.Format(roomID, news, agent.Labels(ctx, c, roomID))
 				if event == "" {
 					_, err := fmt.Fprint(out, text)
 					return err

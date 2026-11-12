@@ -162,7 +162,7 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 		}
 		return err
 	}
-	fmt.Fprint(w, agent.Format(h.roomLabel(repo, &st), news, agent.Labels(ctx, h.C))+
+	fmt.Fprint(w, agent.Format(h.roomLabel(repo, &st), news, agent.Labels(ctx, h.C, st.RoomID))+
 		"Handle what is addressed to you: answer with messages.send and reply_to = the message's #id.\n")
 	return ErrWake
 }
@@ -321,7 +321,7 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 		return err
 	}
 	if len(msgs) > 0 {
-		b.WriteString(agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C)))
+		b.WriteString(agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)))
 	}
 	return json.NewEncoder(out).Encode(agent.ContextOutput("SessionStart", b.String()))
 }
@@ -333,7 +333,7 @@ func (h *Hook) inbox(ctx context.Context, event string, repo agent.Repo, st *age
 		return err
 	}
 	return json.NewEncoder(out).Encode(agent.ContextOutput(event,
-		agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C))))
+		agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID))))
 }
 
 // heartbeat keeps this agent's claims alive while it works; best
@@ -414,7 +414,7 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	*st = next
 	return json.NewEncoder(out).Encode(map[string]any{
 		"decision": "block",
-		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C)) +
+		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)) +
 			"Before you stop: answer what is addressed to you in the Conclave room (messages.send with reply_to = the message's #id), or say briefly why no answer is needed. Then stop.",
 	})
 }

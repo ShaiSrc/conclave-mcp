@@ -81,8 +81,8 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(map[string]any{"id": 1, "label": "agent-a"})
 	case "GET /v1/rooms":
 		write(map[string]any{"rooms": []any{map[string]any{"id": "R", "name": "acme/widgets"}}})
-	case "GET /v1/keys":
-		write(map[string]any{"keys": []any{map[string]any{"id": 2, "label": "agent-b"}}})
+	case "GET /v1/rooms/R/members":
+		write(map[string]any{"members": []any{map[string]any{"key_id": 2, "label": "agent-b"}}})
 	case "GET /v1/rooms/R/messages":
 		since := r.URL.Query().Get("since")
 		out := []agent.Msg{}
