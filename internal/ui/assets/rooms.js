@@ -79,7 +79,10 @@ export async function roomsPage(view) {
   // Not awaited: the router shows the page now and each row fills as its
   // summary arrives (rows of a page left meanwhile are detached, so harmless).
   // fill shows other errors in its row; a 401 sends the router to the login page.
-  mapLimit(rooms.map((_, i) => i), i => fill(rooms[i], i))
+  // Once the operator leaves the page (the route changes), no new summary
+  // requests start; those already in flight finish into detached rows.
+  const route = location.hash;
+  mapLimit(rooms.map((_, i) => i), i => (location.hash === route ? fill(rooms[i], i) : null))
     .catch(err => { if (err.status === 401) rerender(); });
 }
 

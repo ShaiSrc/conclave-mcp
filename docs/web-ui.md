@@ -68,8 +68,8 @@ clears the record of it, and writes `ui.reset` to the audit log. Start
 the service and run `conclave-mcp ui setup` again; setup then creates a
 fresh operator key. An active `operator` key that setup did not create
 is left alone, and registering a passkey fails with 409 while it exists:
-revoke it first (`conclave-mcp keys revoke <id>`), then run `admin
-ui-reset --db /path/to/data.db`, which renames it as well. Whoever can stop
+revoke it first (`conclave-mcp keys revoke <id>`), stop the service, run `admin
+ui-reset --db /path/to/data.db` (which renames it as well), start the service and run `ui setup` again. Whoever can stop
 the service and write the database file is the operator already, as with
 `admin keys create-bootstrap`.
 
