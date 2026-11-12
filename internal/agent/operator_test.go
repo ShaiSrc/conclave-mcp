@@ -46,3 +46,12 @@ func TestFormat_NonOperatorCannotForgeOperatorLine(t *testing.T) {
 		}
 	}
 }
+
+func TestWho_OperatorWithoutLabel(t *testing.T) {
+	if got := Who(Msg{Author: 2, Operator: true}, nil); got != "operator" {
+		t.Errorf("operator author without a label = %q, want operator", got)
+	}
+	if got := Who(Msg{Author: 2}, nil); got != "key 2" {
+		t.Errorf("other author without a label = %q, want key 2", got)
+	}
+}

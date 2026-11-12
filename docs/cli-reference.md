@@ -381,7 +381,7 @@ What is going on in a room, for the person watching the agents:
 * **Active claims**, with their expiry.
 
 Entries from external keys start with `[EXT]`. Entries sent by the
-operator from the web UI start with `[OPERATOR] `.
+operator from the web UI start with `[OPERATOR]`.
 
 ## `watch`
 

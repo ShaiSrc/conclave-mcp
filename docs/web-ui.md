@@ -129,8 +129,9 @@ this mark:
 
 ## Not in the UI
 
-- Passkey confirmation for management actions (keys, members, rooms).
-  Only messages need it.
+- Passkey confirmation for management actions (keys, members, rights,
+  rooms). Only messages ask for one, so a program that drives a
+  logged-in tab could make management changes.
 - Offline commands (`admin vacuum`, `admin keys create-bootstrap`,
   `admin ui-reset`): they need the service stopped.
 - `init`, hooks and `agent add --store`: they set up a repository or a

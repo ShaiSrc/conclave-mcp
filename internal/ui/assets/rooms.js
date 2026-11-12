@@ -22,7 +22,8 @@ async function listMessages(roomID, since = '', maxPages = Infinity, keep = () =
 
 const replyTo = m => (m.metadata && Number(m.metadata.reply_to)) || 0;
 
-// unanswered: requests no other key has replied to, as `conclave-mcp status`.
+// unanswered: requests no other key has replied to, as `conclave-mcp status`,
+// without the operator's own messages (they are not requests to the operator).
 function unanswered(msgs) {
   const author = new Map(msgs.map(m => [m.id, m.author_key_id]));
   const answered = new Set();
@@ -31,7 +32,7 @@ function unanswered(msgs) {
     if (to && author.get(to) !== m.author_key_id) answered.add(to);
   }
   const requests = ['question', 'task_assignment', 'handoff', 'alert', 'decision'];
-  return msgs.filter(m => requests.includes(m.message_type) && !answered.has(m.id));
+  return msgs.filter(m => !m.operator && requests.includes(m.message_type) && !answered.has(m.id));
 }
 
 const TYPES = ['question', 'answer', 'decision', 'handoff', 'status_update', 'task_assignment', 'alert', 'system'];
@@ -168,7 +169,7 @@ export async function roomPage(view, id) {
         text.value = '';
         reply(0);
         draw();
-      }, 'Waiting for your passkey…'),
+      }, 'Waiting for your passkey…', false), // 401 here may be a rejected passkey: show it, keep the text
     }, 'Send — confirm with passkey'),
     h('p', { class: 'muted' }, 'Each message needs your passkey. Only confirm a prompt you started here.'),
     sendMsg);

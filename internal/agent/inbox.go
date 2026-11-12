@@ -186,10 +186,13 @@ func ReplyTo(m Msg) int64 {
 }
 
 // Who names m's author: its label (on one line, without control
-// characters), else its key id.
+// characters), else "operator" for an operator message, else its key id.
 func Who(m Msg, labels map[int64]string) string {
 	if l := OneLine(labels[m.Author]); l != "" {
 		return l
+	}
+	if m.Operator { // member lists hide admin keys, the operator's among them
+		return "operator"
 	}
 	return fmt.Sprintf("key %d", m.Author)
 }
