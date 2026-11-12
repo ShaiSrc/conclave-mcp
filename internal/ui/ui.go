@@ -40,6 +40,10 @@ type Service struct {
 	origin string    // http://localhost:<port>, the only origin the UI runs on
 	hosts  [2]string // the Host headers /ui and UI sessions accept: localhost:<port>, 127.0.0.1:<port>
 
+	// SendAsOperator stores an operator message (messages.Service's,
+	// set at wiring time). Only a passkey-confirmed finish calls it.
+	SendAsOperator func(w http.ResponseWriter, r *http.Request, roomID string)
+
 	mu         sync.Mutex
 	ceremonies map[string]ceremony // by hashToken(ceremony cookie)
 }
@@ -126,6 +130,8 @@ func (s *Service) Routes(r chi.Router) {
 		r.Post("/auth/register/finish", s.registerFinish)
 		r.Post("/auth/login/begin", s.loginBegin)
 		r.Post("/auth/login/finish", s.loginFinish)
+		r.Post("/auth/message/begin", s.messageBegin)
+		r.Post("/auth/message/finish", s.messageFinish)
 		r.Post("/auth/logout", s.logout)
 		r.Get("/auth/state", s.state)
 		r.Get("/auth/credentials", s.listCredentials)

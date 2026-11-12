@@ -169,6 +169,9 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
 		messagesBroker = deps.Broker
 	}
 	messagesSvc := messages.NewService(deps.DB, deps.MaxMessageBytes, messagesBroker)
+	if uiSvc != nil {
+		uiSvc.SendAsOperator = messagesSvc.SendAsOperator
+	}
 	auditSvc := audit.NewService(deps.DB)
 	claimsSvc := claims.NewService(deps.DB)
 

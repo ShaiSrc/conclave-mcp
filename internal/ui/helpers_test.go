@@ -180,18 +180,47 @@ func (p *passkey) register(b *browser, setupToken string) (int, []byte) {
 	return p.finishRegistration(b, opts)
 }
 
+// beginAssertion posts body to /ui/auth/<what>/begin and returns the
+// request options, or nil and the error response.
+func (p *passkey) beginAssertion(b *browser, what string, body any) (*virtualwebauthn.AssertionOptions, int, []byte) {
+	b.t.Helper()
+	status, resp := b.do("POST", "/ui/auth/"+what+"/begin", body)
+	if status != http.StatusOK {
+		return nil, status, resp
+	}
+	opts, err := virtualwebauthn.ParseAssertionOptions(string(resp))
+	if err != nil {
+		b.t.Fatalf("request options: %v\n%s", err, resp)
+	}
+	return opts, status, resp
+}
+
+// finishAssertion signs opts with the passkey and posts the assertion
+// to /ui/auth/<what>/finish.
+func (p *passkey) finishAssertion(b *browser, what string, opts *virtualwebauthn.AssertionOptions) (int, []byte) {
+	b.t.Helper()
+	return b.do("POST", "/ui/auth/"+what+"/finish", virtualwebauthn.CreateAssertionResponse(p.rp, p.auth, p.cred, *opts))
+}
+
 // login runs a discoverable login and returns the last response.
 func (p *passkey) login(b *browser) (int, []byte) {
 	b.t.Helper()
-	status, body := b.do("POST", "/ui/auth/login/begin", nil)
-	if status != http.StatusOK {
+	opts, status, body := p.beginAssertion(b, "login", nil)
+	if opts == nil {
 		return status, body
 	}
-	opts, err := virtualwebauthn.ParseAssertionOptions(string(body))
-	if err != nil {
-		b.t.Fatalf("request options: %v\n%s", err, body)
+	return b.keepSession(p.finishAssertion(b, "login", opts))
+}
+
+// confirm sends a message confirmed with the passkey (begin, assertion,
+// finish) and returns the last response.
+func (p *passkey) confirm(b *browser, body any) (int, []byte) {
+	b.t.Helper()
+	opts, status, resp := p.beginAssertion(b, "message", body)
+	if opts == nil {
+		return status, resp
 	}
-	return b.keepSession(b.do("POST", "/ui/auth/login/finish", virtualwebauthn.CreateAssertionResponse(p.rp, p.auth, p.cred, *opts)))
+	return p.finishAssertion(b, "message", opts)
 }
 
 // loggedIn sets the UI up with a setup token and returns the logged-in
