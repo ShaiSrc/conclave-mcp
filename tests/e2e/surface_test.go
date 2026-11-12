@@ -227,11 +227,11 @@ func TestE2E_Surface_RoomsCRUD(t *testing.T) {
 }
 
 // TestE2E_Surface_RoomsMembership covers invite and remove
-// (SPEC-0003 §4.1), plus the 403 path for a non-owner trying
+// (SPEC-0003 §4.1), plus the 403 path for a key that is not an admin key trying
 // to invite (SPEC-0003 §3.3).
 func TestE2E_Surface_RoomsMembership(t *testing.T) {
 	env, owner := bootstrapKeyFor(t)
-	other := env.createBootstrapKey("surface-membership-other")
+	other := env.createAgentKey("surface-membership-other")
 
 	create := env.call("POST", "/v1/rooms", owner.Plaintext, map[string]any{
 		"name": "e2e-membership-" + fmt.Sprint(time.Now().UnixNano()),
@@ -255,7 +255,7 @@ func TestE2E_Surface_RoomsMembership(t *testing.T) {
 		t.Fatalf("invite: %d %s", inv.Status, inv.Body)
 	}
 
-	// Non-owner cannot invite (403, SPEC-0003 §3.3).
+	// A key that is not an admin key cannot invite (403).
 	nonOwnerInvite := env.call("POST", "/v1/rooms/"+room.ID+"/members", other.Plaintext, map[string]any{
 		"key_id": owner.ID,
 		"role":   "reader",

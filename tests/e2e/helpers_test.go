@@ -102,7 +102,7 @@ func (e *testEnv) waitReady(timeout time.Duration) error {
 // not collide on the api_keys.label UNIQUE constraint.
 var createKeyCounter int64
 
-func (e *testEnv) createKey(label string) apiKey {
+func (e *testEnv) createKey(label string, admin bool) apiKey {
 	e.t.Helper()
 
 	plaintext, hash, err := auth.GenerateToken()
@@ -126,9 +126,13 @@ func (e *testEnv) createKey(label string) apiKey {
 	}
 	defer db.Close()
 
+	isAdmin := 0
+	if admin {
+		isAdmin = 1
+	}
 	res, err := db.Exec(
-		`INSERT INTO api_keys(prefix, hash, label, created_at) VALUES (?, ?, ?, ?)`,
-		prefix, hash, unique, time.Now().UTC().Format(time.RFC3339Nano),
+		`INSERT INTO api_keys(prefix, hash, label, created_at, is_admin) VALUES (?, ?, ?, ?, ?)`,
+		prefix, hash, unique, time.Now().UTC().Format(time.RFC3339Nano), isAdmin,
 	)
 	if err != nil {
 		e.t.Fatalf("insert key: %v", err)
@@ -419,6 +423,19 @@ type subprocessAPIKey struct {
 // prefix (for completeness).
 func (s *subprocessEnv) createBootstrapKey(label string) subprocessAPIKey {
 	s.t.Helper()
+	return s.insertKey(label, true)
+}
+
+// createAgentKey inserts a key that is not an admin key, like the key
+// an agent gets from agent add.
+func (s *subprocessEnv) createAgentKey(label string) subprocessAPIKey {
+	s.t.Helper()
+	return s.insertKey(label, false)
+}
+
+// insertKey inserts a key directly into the server's SQLite file.
+func (s *subprocessEnv) insertKey(label string, admin bool) subprocessAPIKey {
+	s.t.Helper()
 
 	plaintext, hash, err := auth.GenerateToken()
 	if err != nil {
@@ -442,9 +459,13 @@ func (s *subprocessEnv) createBootstrapKey(label string) subprocessAPIKey {
 	}
 	defer db.Close()
 
+	isAdmin := 0
+	if admin {
+		isAdmin = 1
+	}
 	res, err := db.Exec(
-		`INSERT INTO api_keys(prefix, hash, label, created_at, is_admin) VALUES (?, ?, ?, ?, 1)`,
-		prefix, hash, unique, time.Now().UTC().Format(time.RFC3339Nano),
+		`INSERT INTO api_keys(prefix, hash, label, created_at, is_admin) VALUES (?, ?, ?, ?, ?)`,
+		prefix, hash, unique, time.Now().UTC().Format(time.RFC3339Nano), isAdmin,
 	)
 	if err != nil {
 		s.t.Fatalf("insert key: %v", err)
@@ -583,8 +604,9 @@ func newTestEnvAt(t *testing.T, dir string, _ bool) *testEnv {
 		t.Fatalf("server did not become ready: %v", err)
 	}
 
-	env.keyA = env.createKey("key-a")
-	env.keyB = env.createKey("key-b")
+	// keyA is an admin key (it creates rooms); keyB is an agent key.
+	env.keyA = env.createKey("key-a", true)
+	env.keyB = env.createKey("key-b", false)
 
 	return env
 }

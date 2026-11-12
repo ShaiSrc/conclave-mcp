@@ -52,7 +52,7 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", s.send)
 	r.Get("/rooms/{id}/messages", s.list)
-	// Soft-delete (SPEC-0001 Q8). Owner only; see delete()
+	// Soft-delete (SPEC-0001 Q8). Admin keys only; see delete()
 	// for the role check.
 	r.Delete("/rooms/{id}/messages/{msgid}", s.delete)
 }
@@ -449,13 +449,12 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// delete soft-deletes a single message (SPEC-0001 Q8). Owner
-// only. The row is kept (with deleted_at set) for audit; the
-// GET /messages list endpoint filters it out.
+// delete soft-deletes a single message (SPEC-0001 Q8). Admin keys
+// only; they need not be members. The row is kept (with
+// deleted_at set) for audit; the GET /messages list endpoint filters it out.
 //
 // Idempotent: a second DELETE on an already-deleted message
-// returns 404 because the row is no longer visible to the
-// owner-check query.
+// returns 404 because the row is no longer visible.
 func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
@@ -470,18 +469,14 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the caller is the **owner** of the room (not
-	// just a writer). SPEC-0003 §3.3: `message.delete`
-	// requires `owner`.
-	var role string
+	if !auth.IsAdmin(r.Context()) {
+		writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
+		return
+	}
 	var archived sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT m.role, r.archived_at
-		 FROM rooms r
-		 INNER JOIN room_members m ON m.room_id = r.id
-		 WHERE r.id = ? AND m.key_id = ?`,
-		roomID, caller,
-	).Scan(&role, &archived); err != nil {
+		`SELECT archived_at FROM rooms WHERE id = ?`, roomID,
+	).Scan(&archived); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
 			return
@@ -491,10 +486,6 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	if archived.Valid {
 		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
-		return
-	}
-	if role != "owner" {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "only the room owner can delete messages")
 		return
 	}
 

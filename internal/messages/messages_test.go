@@ -77,12 +77,12 @@ func seedRoom(t *testing.T, db *sql.DB, ownerID int64, name string) string {
 	return id
 }
 
-func newServer(t *testing.T, db *sql.DB, callerID int64) *chi.Mux {
+func newServer(t *testing.T, db *sql.DB, callerID int64, scopes ...string) *chi.Mux {
 	t.Helper()
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: callerID})
+			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: callerID, Scopes: scopes})
 			next.ServeHTTP(w, req.WithContext(ctx))
 		})
 	})
@@ -411,5 +411,25 @@ func TestMessages_ReplyToIsCheckedAndKeptInMetadata(t *testing.T) {
 		if code, _ := send(`{"content":"x","reply_to":` + bad + `}`); code != http.StatusBadRequest {
 			t.Errorf("reply_to %s: status %d, want 400", bad, code)
 		}
+	}
+}
+
+func TestMessages_DeleteIsAdminOnly(t *testing.T) {
+	r, db, owner, roomID := setupAs(t)
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, ?, 'x', 'text/plain')`,
+		roomID, owner, storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	path := "/rooms/" + roomID + "/messages/1"
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "admin key required") {
+		t.Errorf("room owner (not admin): %d %s, want 403", rec.Code, rec.Body.String())
+	}
+	admin := newServer(t, db, seedKey(t, db, "admin"), auth.ScopeAdmin) // not a member
+	rec = httptest.NewRecorder()
+	admin.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
+	if rec.Code != http.StatusNoContent {
+		t.Errorf("admin delete: %d %s, want 204", rec.Code, rec.Body.String())
 	}
 }
