@@ -3,7 +3,7 @@
 // Endpoints:
 //
 //	POST   /v1/keys       -- create; returns plaintext once
-//	GET    /v1/keys       -- list (id, label, prefix, created_at,
+//	GET    /v1/keys       -- list, admin only (id, label, prefix, created_at,
 //	                         last_used_at, revoked_at)
 //	DELETE /v1/keys/{id}  -- soft-revoke (set revoked_at), admin only
 //	GET    /v1/whoami     -- the caller's own key
@@ -214,6 +214,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
+	if !requireAdmin(w, r) {
+		return
+	}
 	rows, err := s.DB.QueryContext(r.Context(),
 		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin
 		 FROM api_keys

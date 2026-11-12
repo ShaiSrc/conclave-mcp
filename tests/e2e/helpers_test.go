@@ -31,6 +31,7 @@ import (
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, same as the server
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/server"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
@@ -572,6 +573,7 @@ func newTestEnvAt(t *testing.T, dir string, _ bool) *testEnv {
 	srv, err := server.New(cfg, server.Deps{
 		DB:     db,
 		Logger: logger,
+		Broker: events.NewBroker(),
 	})
 	if err != nil {
 		t.Fatalf("server.New: %v", err)

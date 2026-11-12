@@ -77,22 +77,23 @@ func newTestServerAs(t *testing.T, scopes []string) (*chi.Mux, *sql.DB) {
 	return r, db
 }
 
-func TestKeys_NonAdminCannotCreateOrRevoke(t *testing.T) {
+func TestKeys_NonAdminCannotManageOrList(t *testing.T) {
 	r, _ := newTestServerAs(t, nil)
 	for _, req := range []*http.Request{
 		httptest.NewRequest(http.MethodPost, "/keys", strings.NewReader(`{"label":"x"}`)),
 		httptest.NewRequest(http.MethodDelete, "/keys/1", nil),
+		httptest.NewRequest(http.MethodGet, "/keys", nil),
 	} {
 		rec := httptest.NewRecorder()
 		r.ServeHTTP(rec, req)
-		if rec.Code != http.StatusForbidden {
-			t.Errorf("%s %s: got %d, want 403", req.Method, req.URL.Path, rec.Code)
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "admin key required") {
+			t.Errorf("%s %s: got %d %s, want 403 admin key required", req.Method, req.URL.Path, rec.Code, rec.Body.String())
 		}
 	}
 	rec := httptest.NewRecorder()
-	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/keys", nil))
-	if rec.Code != http.StatusOK {
-		t.Errorf("GET /keys: got %d, want 200 (list stays open so agents can find each other)", rec.Code)
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/whoami", nil))
+	if rec.Code == http.StatusForbidden {
+		t.Error("GET /whoami must stay open to every key")
 	}
 }
 

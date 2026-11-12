@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"net/http"
 	"strconv"
 	"time"
@@ -174,39 +175,22 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		metadata = sql.NullString{String: string(req.Metadata), Valid: true}
 	}
 
-	// Verify caller is a member of an active room, with the
-	// correct role. SPEC-0003 §3.3: `room.send` requires
-	// owner or writer; reader cannot send. We also pick up
-	// the caller's trust_origin here so it can be
-	// denormalised onto the new message (SPEC-0001 Q11).
-	var (
-		role              string
-		archived          sql.NullString
-		callerTrustOrigin string
-	)
-	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT m.role, r.archived_at, k.trust_origin
-		 FROM rooms r
-		 INNER JOIN room_members m ON m.room_id = r.id
-		 INNER JOIN api_keys k ON k.id = m.key_id
-		 WHERE r.id = ? AND m.key_id = ?`,
-		roomID, caller,
-	).Scan(&role, &archived, &callerTrustOrigin); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-			return
-		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
+	// The message type is the right the caller needs; a message
+	// without a type is stored as system (SPEC-0001 Q7). The caller's
+	// trust_origin is denormalised onto the message (SPEC-0001 Q11).
+	messageType := req.MessageType
+	if messageType == "" {
+		messageType = rights.System
+	}
+	mem, ok := rights.Require(w, r, s.DB, roomID, messageType)
+	if !ok {
 		return
 	}
-	if archived.Valid {
+	if mem.Archived {
 		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
 		return
 	}
-	if role != "owner" && role != "writer" {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "reader role cannot send messages")
-		return
-	}
+	callerTrustOrigin := mem.TrustOrigin
 
 	// A reply_to inside metadata gets the same check as the field (the
 	// field wins when both are set).
@@ -250,15 +234,6 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := storage.FormatTS(time.Now())
-	// message_type is NOT NULL with DEFAULT 'system'; we
-	// send an explicit value rather than rely on the column
-	// default, so the SQLite CHECK on the 8 enum values
-	// fires (or doesn't) consistently. Empty string from the
-	// client becomes 'system' (the unstructured default).
-	messageType := req.MessageType
-	if messageType == "" {
-		messageType = "system"
-	}
 	res, err := s.DB.ExecContext(r.Context(),
 		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -311,19 +286,8 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	}
 	roomID := chi.URLParam(r, "id")
 
-	// Membership check (and 404 to non-members).
-	var archived sql.NullString
-	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT archived_at FROM rooms
-		 INNER JOIN room_members ON room_members.room_id = rooms.id
-		 WHERE rooms.id = ? AND room_members.key_id = ?`,
-		roomID, caller,
-	).Scan(&archived); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-			return
-		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
+	// 404 to non-members, 403 missing_right without read.
+	if _, ok := rights.Require(w, r, s.DB, roomID, rights.Read); !ok {
 		return
 	}
 

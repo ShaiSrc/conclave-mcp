@@ -475,3 +475,42 @@ func itoa(n int64) string {
 	}
 	return string(buf[i:])
 }
+
+func TestRooms_GetMembersAndListForAgents(t *testing.T) {
+	r, db, _ := setupAs(t)
+	mine := createRoom(t, r, "mine")
+	if rec := do(r, http.MethodPost, "/rooms", `{"name":"other","visibility":"public"}`); rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	agent := seedKey(t, db, "agent")
+	if rec := do(r, http.MethodPost, "/rooms/"+mine.ID+"/invite", `{"key_id":`+itoa(agent)+`,"rights":["read"]}`); rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	rAgent := newServer(t, db, agent)
+
+	if rec := do(rAgent, http.MethodGet, "/rooms", ""); !strings.Contains(rec.Body.String(), mine.ID) || strings.Contains(rec.Body.String(), `"other"`) {
+		t.Errorf("agent list must hold only its own room: %s", rec.Body.String())
+	}
+	if rec := do(r, http.MethodGet, "/rooms", ""); !strings.Contains(rec.Body.String(), `"other"`) {
+		t.Errorf("admin list must hold every room: %s", rec.Body.String())
+	}
+	if rec := do(rAgent, http.MethodGet, "/rooms/"+mine.ID, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"my_rights":["read"]`) {
+		t.Errorf("agent get: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(rAgent, http.MethodGet, "/rooms/"+mine.ID+"/members", ""); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"label":"agent"`) || strings.Contains(rec.Body.String(), `"rights"`) {
+		t.Errorf("agent members (no rights field): %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(r, http.MethodGet, "/rooms/"+mine.ID+"/members", ""); !strings.Contains(rec.Body.String(), `"rights":["read"]`) {
+		t.Errorf("admin members must show rights: %s", rec.Body.String())
+	}
+	if _, err := db.Exec(`UPDATE room_members SET rights = '' WHERE key_id = ?`, agent); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(rAgent, http.MethodGet, "/rooms/"+mine.ID, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"my_rights":[]`) {
+		t.Errorf("member without rights still gets the room: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := do(rAgent, http.MethodGet, "/rooms/"+mine.ID+"/members", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("members without read: %d, want 403", rec.Code)
+	}
+}

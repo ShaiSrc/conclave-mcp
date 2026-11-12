@@ -4,12 +4,13 @@
 // handler of `conclave-mcp hook` refuses edits of paths another key
 // holds.
 //
-// Endpoints (room members only, 404 otherwise):
+// Endpoints (GET needs the read right, the others the claim right;
+// 404 to non-members; admin keys pass without being members):
 //
 //	GET  /v1/rooms/{id}/claims            -- active claims
 //	POST /v1/rooms/{id}/claims            -- claim paths, all-or-nothing (409 on overlap)
 //	POST /v1/rooms/{id}/claims/heartbeat  -- extend the caller's claims
-//	POST /v1/rooms/{id}/claims/release    -- release; the room owner may release others'
+//	POST /v1/rooms/{id}/claims/release    -- release; an admin key may release others'
 package claims
 
 import (
@@ -28,7 +29,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/audit"
-	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 )
 
 // TTL bounds; hooks refresh claims while the agent works.
@@ -133,28 +134,20 @@ func active(ctx context.Context, q queryer, roomID string, now time.Time) ([]Cla
 	return out, rows.Err()
 }
 
-// access returns the caller and their role in the room, or answers
-// 404/500 itself and returns ok=false.
-func (s *Service) access(w http.ResponseWriter, r *http.Request, roomID string) (caller int64, role string, ok bool) {
-	caller = callerKeyID(r)
-	err := s.DB.QueryRowContext(r.Context(),
-		`SELECT m.role FROM room_members m JOIN rooms r ON r.id = m.room_id
-		 WHERE m.room_id = ? AND m.key_id = ? AND r.archived_at IS NULL`,
-		roomID, caller).Scan(&role)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
+// access answers 404 (no room, not a member, or archived) or 403
+// missing_right itself and returns ok=false.
+func (s *Service) access(w http.ResponseWriter, r *http.Request, roomID, need string) (rights.Member, bool) {
+	mem, ok := rights.Require(w, r, s.DB, roomID, need)
+	if ok && mem.Archived {
 		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-	case err != nil:
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "membership lookup")
-	default:
-		return caller, role, true
+		return mem, false
 	}
-	return 0, "", false
+	return mem, ok
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	roomID := chi.URLParam(r, "id")
-	if _, _, ok := s.access(w, r, roomID); !ok {
+	if _, ok := s.access(w, r, roomID, rights.Read); !ok {
 		return
 	}
 	list, err := active(r.Context(), s.DB, roomID, s.Now())
@@ -174,14 +167,11 @@ type claimRequest struct {
 
 func (s *Service) claim(w http.ResponseWriter, r *http.Request) {
 	roomID := chi.URLParam(r, "id")
-	caller, role, ok := s.access(w, r, roomID)
+	mem, ok := s.access(w, r, roomID, rights.Claim)
 	if !ok {
 		return
 	}
-	if role != "owner" && role != "writer" {
-		writeErr(w, r, http.StatusForbidden, "forbidden", "reader role cannot claim")
-		return
-	}
+	caller := mem.KeyID
 	var req claimRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
@@ -302,10 +292,11 @@ func (s *Service) own(ctx context.Context, roomID string, keyID int64, now time.
 
 func (s *Service) heartbeat(w http.ResponseWriter, r *http.Request) {
 	roomID := chi.URLParam(r, "id")
-	caller, _, ok := s.access(w, r, roomID)
+	mem, ok := s.access(w, r, roomID, rights.Claim)
 	if !ok {
 		return
 	}
+	caller := mem.KeyID
 	var req struct {
 		TTLSeconds int `json:"ttl_seconds"`
 	}
@@ -326,10 +317,11 @@ func (s *Service) heartbeat(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) release(w http.ResponseWriter, r *http.Request) {
 	roomID := chi.URLParam(r, "id")
-	caller, role, ok := s.access(w, r, roomID)
+	mem, ok := s.access(w, r, roomID, rights.Claim)
 	if !ok {
 		return
 	}
+	caller := mem.KeyID
 	var req struct {
 		Paths []string `json:"paths"`
 		KeyID int64    `json:"key_id"`
@@ -339,8 +331,8 @@ func (s *Service) release(w http.ResponseWriter, r *http.Request) {
 	}
 	target := caller
 	if req.KeyID != 0 && req.KeyID != caller {
-		if role != "owner" {
-			writeErr(w, r, http.StatusForbidden, "forbidden", "only the room owner can release other keys' claims")
+		if !mem.Admin {
+			writeErr(w, r, http.StatusForbidden, "forbidden", "only an admin key can release other keys' claims")
 			return
 		}
 		target = req.KeyID
@@ -401,14 +393,6 @@ func boolInt(b bool) int {
 func jsonString(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
-}
-
-func callerKeyID(r *http.Request) int64 {
-	c, ok := auth.FromContext(r.Context())
-	if !ok {
-		return 0
-	}
-	return c.KeyID
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

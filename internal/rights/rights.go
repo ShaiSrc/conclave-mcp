@@ -1,12 +1,19 @@
 // Package rights is what a key may do in a room: the set of rights on
-// its membership (room_members.rights, migration 0008).
+// its membership (room_members.rights, migration 0008), and the check
+// every room-scoped handler runs (Require).
 package rights
 
 import (
+	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/hermes/conclave-mcp/internal/auth"
 )
 
 // Rights a membership can hold besides the message types. Each message
@@ -80,3 +87,79 @@ func (s Set) Storage() string { return strings.Join(s, ",") }
 
 // Has reports whether s holds right.
 func (s Set) Has(right string) bool { return slices.Contains(s, right) }
+
+// Member is the caller's standing in one room.
+type Member struct {
+	KeyID       int64
+	Admin       bool
+	Rights      Set    // an admin key holds All
+	TrustOrigin string // the caller key's mark, copied onto its messages
+	Archived    bool
+}
+
+// DB is what Lookup needs; *sql.DB satisfies it.
+type DB interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Lookup reads the caller's membership of roomID. It runs on every
+// request (no cache), so a change of rights applies to the next one.
+// ok is false when the room does not exist or the caller is neither a
+// member nor an admin key.
+func Lookup(ctx context.Context, db DB, roomID string) (mem Member, ok bool, err error) {
+	c, _ := auth.FromContext(ctx)
+	mem = Member{KeyID: c.KeyID, Admin: auth.IsAdmin(ctx)}
+	var archived, stored sql.NullString
+	err = db.QueryRowContext(ctx,
+		`SELECT r.archived_at, k.trust_origin, m.rights
+		 FROM rooms r
+		 JOIN api_keys k ON k.id = ?
+		 LEFT JOIN room_members m ON m.room_id = r.id AND m.key_id = k.id
+		 WHERE r.id = ?`,
+		c.KeyID, roomID,
+	).Scan(&archived, &mem.TrustOrigin, &stored)
+	if errors.Is(err, sql.ErrNoRows) {
+		return mem, false, nil
+	}
+	if err != nil {
+		return mem, false, err
+	}
+	switch {
+	case mem.Admin:
+		mem.Rights = All()
+	case stored.Valid:
+		mem.Rights = FromStorage(stored.String)
+	default:
+		return mem, false, nil // not a member
+	}
+	mem.Archived = archived.Valid
+	return mem, true, nil
+}
+
+// Require answers the request itself and returns ok=false unless the
+// caller may act in roomID: 404 when the room does not exist or the
+// caller is neither a member nor an admin key (a key cannot tell which),
+// 403 missing_right when need is not "" and the caller lacks it.
+// Archived rooms are left to the handler.
+func Require(w http.ResponseWriter, r *http.Request, db DB, roomID, need string) (Member, bool) {
+	mem, ok, err := Lookup(r.Context(), db, roomID)
+	switch {
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "membership lookup")
+	case !ok:
+		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
+	case need != "" && !mem.Rights.Has(need):
+		writeErr(w, r, http.StatusForbidden, "missing_right", "missing right: "+need)
+	default:
+		return mem, true
+	}
+	return mem, false
+}
+
+func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]any{"code": code, "message": msg, "request_id": r.Header.Get("X-Request-Id")},
+	})
+}

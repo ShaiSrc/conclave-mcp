@@ -20,6 +20,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -69,8 +70,8 @@ func seedRoom(t *testing.T, db *sql.DB, ownerID int64, name string) string {
 		t.Fatalf("seed room: %v", err)
 	}
 	if _, err := db.Exec(
-		`INSERT INTO room_members(room_id, key_id, role, joined_at) VALUES (?, ?, 'owner', ?)`,
-		id, ownerID, storage.FormatTS(time.Now()),
+		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'owner', ?, ?)`,
+		id, ownerID, storage.FormatTS(time.Now()), rights.All().Storage(),
 	); err != nil {
 		t.Fatalf("seed member: %v", err)
 	}
@@ -431,5 +432,39 @@ func TestMessages_DeleteIsAdminOnly(t *testing.T) {
 	admin.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, path, nil))
 	if rec.Code != http.StatusNoContent {
 		t.Errorf("admin delete: %d %s, want 204", rec.Code, rec.Body.String())
+	}
+}
+
+func TestMessages_RightsPerMessageType(t *testing.T) {
+	_, db, _, roomID := setupAs(t)
+	agent := seedKey(t, db, "agent")
+	if _, err := db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, 'read,handoff')`,
+		roomID, agent, storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	r := newServer(t, db, agent)
+	for _, c := range []struct {
+		method, body string
+		want         int
+		missing      string
+	}{
+		{http.MethodPost, `{"content":"x","message_type":"handoff"}`, http.StatusCreated, ""},
+		{http.MethodPost, `{"content":"x","message_type":"question"}`, http.StatusForbidden, "question"},
+		{http.MethodPost, `{"content":"x"}`, http.StatusForbidden, "system"}, // untyped = system
+		{http.MethodGet, ``, http.StatusOK, ""},
+	} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(c.method, "/rooms/"+roomID+"/messages", strings.NewReader(c.body)))
+		if rec.Code != c.want || (c.missing != "" && !strings.Contains(rec.Body.String(), `"message":"missing right: `+c.missing+`"`)) {
+			t.Errorf("%s %s: %d %s, want %d", c.method, c.body, rec.Code, rec.Body.String(), c.want)
+		}
+	}
+	if _, err := db.Exec(`UPDATE room_members SET rights = '' WHERE key_id = ?`, agent); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages", nil))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"missing_right"`) {
+		t.Errorf("list without read: %d %s, want 403 missing_right", rec.Code, rec.Body.String())
 	}
 }
