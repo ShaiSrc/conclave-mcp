@@ -7,9 +7,9 @@ const LIST_PAGES = 4; // the rooms list reads at most this many pages per room
 
 // listMessages returns a room's messages after since, oldest first: all
 // of them, or the first maxPages pages.
-async function listMessages(roomID, since = '', maxPages = Infinity) {
+async function listMessages(roomID, since = '', maxPages = Infinity, keep = () => true) {
   const all = [];
-  for (let i = 0; i < maxPages; i++) {
+  for (let i = 0; i < maxPages && keep(); i++) {
     let path = `/v1/rooms/${encodeURIComponent(roomID)}/messages?limit=${PAGE}`;
     if (since) path += '&since=' + encodeURIComponent(since);
     const page = (await api('GET', path)).messages || [];
@@ -40,9 +40,12 @@ export async function roomsPage(view) {
   // GET /v1/rooms lists active rooms only. Per room just the last 24 h,
   // at most LIST_PAGES pages (marked when there may be more); a room that
   // fails shows its error in its row.
-  // The router's render generation: false as soon as any newer render starts
-  // (another page, the same page again, or coming back to this one).
-  const current = () => view.current();
+  // Current while this is the router's newest render (false once any newer
+  // render starts: another page, the same page again, coming back) AND the
+  // address is still the one it started with (covers the moment between a
+  // hash change and the next render starting).
+  const route = location.hash;
+  const current = () => view.current() && location.hash === route;
   const rooms = (await api('GET', '/v1/rooms')).rooms || [];
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const rows = rooms.map(r => h('tr', {},
@@ -51,7 +54,7 @@ export async function roomsPage(view) {
   const fill = async (r, i) => {
     const link = rows[i].firstChild;
     try {
-      const msgs = await listMessages(r.id, since, LIST_PAGES);
+      const msgs = await listMessages(r.id, since, LIST_PAGES, current);
       const cut = msgs.length >= PAGE * LIST_PAGES ? ` (first ${msgs.length} messages)` : '';
       rows[i].replaceChildren(link, h('td', {}, String(unanswered(msgs).length) + cut),
         h('td', {}, msgs.length ? when(msgs[msgs.length - 1].ts) + (cut ? ' or later' + cut : '') : 'none in 24 h'));
