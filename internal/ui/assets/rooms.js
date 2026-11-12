@@ -76,6 +76,8 @@ export async function roomsPage(view) {
       },
     }, h('label', {}, 'Name ', name), h('button', {}, 'Create')),
     msg);
+  // The page is visible; now fill each room's summary (a 401 still reaches the router).
+  await mapLimit(rooms.map((_, i) => i), i => fill(rooms[i], i));
 }
 
 export async function roomPage(view, id) {

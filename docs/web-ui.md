@@ -44,7 +44,7 @@ If an active admin key labelled `operator` exists that setup did not
 create, registering the passkey fails with 409 and the setup link is then
 used up. No command renames keys, so: revoke that key (`conclave-mcp keys
 revoke <id>` with the admin key), stop the service, run `conclave-mcp
-admin ui-reset` (it renames revoked `operator` keys), start the service
+admin ui-reset --db /path/to/data.db` (it renames revoked `operator` keys), start the service
 and run `ui setup` again.
 
 Do the setup right after upgrading: until the first passkey exists, any
@@ -69,7 +69,7 @@ the service and run `conclave-mcp ui setup` again; setup then creates a
 fresh operator key. An active `operator` key that setup did not create
 is left alone, and registering a passkey fails with 409 while it exists:
 revoke it first (`conclave-mcp keys revoke <id>`), then run `admin
-ui-reset`, which renames it as well. Whoever can stop
+ui-reset --db /path/to/data.db`, which renames it as well. Whoever can stop
 the service and write the database file is the operator already, as with
 `admin keys create-bootstrap`.
 
@@ -84,7 +84,7 @@ the service and write the database file is the operator already, as with
 | `/v1` with a session | Accepted only with the token in `X-Conclave-UI` (a site cannot send it cross-origin without CORS, which the server does not allow, nor does it know the token), a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (against DNS rebinding) and, for anything but GET, the `Origin` `http://localhost:<port>`. No cookie counts as a session. `/v1/mcp` takes bearer keys only. |
 | `/ui` requests | A foreign `Host` gets 403. Every non-GET request needs the exact `Origin`. Bodies are capped at 64 KiB. |
 | Pages | Every `/ui` response, 404 and 405 included, carries `Content-Security-Policy: default-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The scripts put message text, labels and every other value into the page as text, never as markup. External messages appear in a marked block between `--- external content from <label> ---` and `--- end of external content ---`, as in the CLI. |
-| Revoking `operator` | Locks the UI out of `/v1` at once. To use the UI again: `admin ui-reset` (it renames the revoked key, so the next setup creates a fresh one), then `ui setup`. |
+| Revoking `operator` | Locks the UI out of `/v1` at once. To use the UI again: stop the service, `admin ui-reset --db /path/to/data.db` (it renames the revoked key, so the next setup creates a fresh one), start the service, then `ui setup`. |
 
 ## Audit actions
 
