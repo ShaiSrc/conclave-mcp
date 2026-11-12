@@ -144,6 +144,7 @@ async function render() {
   if (leave) { leave(); leave = null; }
   const mine = ++seq;
   const view = h('div');
+  view.current = () => mine === seq; // false as soon as any newer render starts
   const show = (links = []) => {
     if (mine !== seq) return false;
     nav.replaceChildren(...links);

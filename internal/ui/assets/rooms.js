@@ -40,11 +40,9 @@ export async function roomsPage(view) {
   // GET /v1/rooms lists active rooms only. Per room just the last 24 h,
   // at most LIST_PAGES pages (marked when there may be more); a room that
   // fails shows its error in its row.
-  // This render is current while its view is attached AND the address is
-  // still the one it started with (taken before the first await): render()
-  // keeps the old view attached while the next page loads.
-  const route = location.hash;
-  const current = () => view.isConnected && location.hash === route;
+  // The router's render generation: false as soon as any newer render starts
+  // (another page, the same page again, or coming back to this one).
+  const current = () => view.current();
   const rooms = (await api('GET', '/v1/rooms')).rooms || [];
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const rows = rooms.map(r => h('tr', {},
@@ -82,17 +80,11 @@ export async function roomsPage(view) {
     }, h('label', {}, 'Name ', name), h('button', {}, 'Create')),
     msg);
   // Not awaited: the router shows the page now and each row fills as its
-  // summary arrives (rows of a page left meanwhile are detached, so harmless).
-  // fill shows other errors in its row; a 401 sends the router to the login page.
-  // Start one tick later, after the router has attached this view (it only
-  // does so for the newest render). From then on a summary request starts
-  // only while this very view is on screen: a stale render, leaving the
-  // page, or leaving and coming back (a new view) all detach it for good.
-  // Requests already in flight finish into detached rows.
-  setTimeout(() => {
-    mapLimit(rooms.map((_, i) => i), i => (current() ? fill(rooms[i], i) : null))
-      .catch(err => { if (err.status === 401 && current()) rerender(); });
-  }, 0);
+  // summary arrives. A summary request starts, and a 401 sends the router to
+  // the login page, only while this render is the newest one; requests
+  // already in flight finish into rows nobody sees.
+  mapLimit(rooms.map((_, i) => i), i => (current() ? fill(rooms[i], i) : null))
+    .catch(err => { if (err.status === 401 && current()) rerender(); });
 }
 
 export async function roomPage(view, id) {
