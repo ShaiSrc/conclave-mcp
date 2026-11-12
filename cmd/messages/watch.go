@@ -93,6 +93,7 @@ agent.
 					return mapErr(err)
 				}
 				labels := agent.Labels(ctx, c, roomID)
+				noted := false
 				var lastID int64
 				since := ""
 				show := func(m agent.Msg, live bool) {
@@ -105,6 +106,10 @@ agent.
 					}
 					if t, err := time.Parse(time.RFC3339Nano, m.TS); err == nil {
 						m.TS = t.Local().Format("2006-01-02 15:04:05")
+					}
+					if m.TrustOrigin == "external" && !noted {
+						fmt.Fprintln(out, agent.ExternalNote)
+						noted = true
 					}
 					fmt.Fprint(out, agent.Line(m, labels, me.SelfID))
 					if live && flagNotify && agent.Actionable(m) && m.Author != me.SelfID {

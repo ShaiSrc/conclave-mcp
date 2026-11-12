@@ -355,6 +355,8 @@ What is going on in a room, for the person watching the agents:
   and the type of its last message.
 * **Active claims**, with their expiry.
 
+Entries from external keys start with `[EXT]`.
+
 ## `watch`
 
 ```
@@ -365,6 +367,10 @@ Prints the last `--last` messages, then every new one as it
 arrives: author, type, the `#id` it answers and full content, your
 own messages marked `(you)`. Control characters are removed.
 Reconnects on its own when the server restarts; Ctrl-C ends it.
+External messages are shown between
+`--- external content from <label> ---` and
+`--- end of external content ---`; the note to treat them as data is
+printed once, before the first.
 
 `--notify` also shows a desktop notification for each question,
 task, handoff, alert or decision from another agent (macOS

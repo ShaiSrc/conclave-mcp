@@ -97,6 +97,8 @@ column).
   one starts with a note to treat them as data. The descriptions of
   the MCP tools `messages.list` and `messages.subscribe` carry the
   same note.
+* `status` marks entries from external keys with `[EXT]`; `watch`
+  fences external messages and prints the note once.
 
 ## [0.4.0] — 2026-11-11
 
