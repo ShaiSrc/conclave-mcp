@@ -463,6 +463,9 @@ func TestToolDescriptions_AdminOnlyAndExternalNote(t *testing.T) {
 		if !strings.Contains(desc[n], agent.ExternalNote) {
 			t.Errorf("%s: description must carry the external note", n)
 		}
+		if !strings.Contains(desc[n], agent.OperatorFieldNote) {
+			t.Errorf("%s: description must carry the operator field note", n)
+		}
 	}
 	if !strings.Contains(desc["keys.list"], "rooms.members") {
 		t.Errorf("keys.list must point to rooms.members: %q", desc["keys.list"])

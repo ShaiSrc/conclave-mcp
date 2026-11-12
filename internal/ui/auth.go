@@ -39,12 +39,25 @@ func (o operator) WebAuthnName() string                       { return OperatorL
 func (o operator) WebAuthnDisplayName() string                { return "Conclave operator" }
 func (o operator) WebAuthnCredentials() []webauthn.Credential { return o.creds }
 
+// ceremonyKind tells which finish step a ceremony is for. The zero
+// value matches none.
+type ceremonyKind int
+
+const (
+	kindLogin ceremonyKind = iota + 1
+	kindRegister
+	kindMessage
+)
+
 // ceremony is what a begin step keeps in memory for its finish step.
 type ceremony struct {
-	register   bool
+	kind       ceremonyKind
 	data       webauthn.SessionData
 	setupToken string // registration with a setup token; "" when logged in
 	name       string // passkey name (registration)
+	roomID     string // message: the room it goes to
+	message    []byte // message: the send body, the only thing finish posts
+	session    string // message: hashToken of the session that began it
 	expires    time.Time
 }
 
@@ -271,7 +284,7 @@ func (s *Service) startCeremony(w http.ResponseWriter, r *http.Request, c ceremo
 
 // takeCeremony returns the request's ceremony of the given kind and
 // forgets it: every ceremony finishes at most once.
-func (s *Service) takeCeremony(w http.ResponseWriter, r *http.Request, register bool) (ceremony, bool) {
+func (s *Service) takeCeremony(w http.ResponseWriter, r *http.Request, kind ceremonyKind) (ceremony, bool) {
 	http.SetCookie(w, &http.Cookie{Name: ceremonyCookie, Path: "/ui/auth/", MaxAge: -1,
 		HttpOnly: true, SameSite: http.SameSiteStrictMode})
 	ck, err := r.Cookie(ceremonyCookie)
@@ -283,7 +296,7 @@ func (s *Service) takeCeremony(w http.ResponseWriter, r *http.Request, register 
 	c, ok := s.ceremonies[hash]
 	delete(s.ceremonies, hash)
 	s.mu.Unlock()
-	return c, ok && c.register == register && s.now().Before(c.expires)
+	return c, ok && c.kind == kind && s.now().Before(c.expires)
 }
 
 // registerGate decides who may register a passkey: a logged-in
@@ -346,7 +359,7 @@ func (s *Service) registerBegin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin registration")
 		return
 	}
-	if !s.startCeremony(w, r, ceremony{register: true, data: *data, setupToken: token, name: name}) {
+	if !s.startCeremony(w, r, ceremony{kind: kindRegister, data: *data, setupToken: token, name: name}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, creation.Response)
@@ -354,7 +367,7 @@ func (s *Service) registerBegin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) registerFinish(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	c, ok := s.takeCeremony(w, r, true)
+	c, ok := s.takeCeremony(w, r, kindRegister)
 	if !ok {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "no passkey registration in progress, or it took longer than 5 minutes")
 		return
@@ -420,29 +433,16 @@ func (s *Service) registerFinish(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
-func (s *Service) loginBegin(w http.ResponseWriter, r *http.Request) {
-	assertion, data, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
-	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin login")
-		return
-	}
-	if !s.startCeremony(w, r, ceremony{data: *data}) {
-		return
-	}
-	writeJSON(w, http.StatusOK, assertion.Response)
-}
-
-func (s *Service) loginFinish(w http.ResponseWriter, r *http.Request) {
+// verifyAssertion checks the assertion in r against the ceremony c: one
+// of the operator's passkeys, user verified, its signature counter not
+// gone backwards. It stores the passkey's new counter and flags and
+// returns its id. On refusal it audits action and writes the response.
+func (s *Service) verifyAssertion(w http.ResponseWriter, r *http.Request, c ceremony, action string) (string, bool) {
 	ctx := r.Context()
-	c, ok := s.takeCeremony(w, r, false)
-	if !ok {
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "no login in progress, or it took longer than 5 minutes")
-		return
-	}
 	op, err := s.operator(ctx)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "load passkeys")
-		return
+		return "", false
 	}
 	_, cred, err := s.wa.FinishPasskeyLogin(func(_, handle []byte) (webauthn.User, error) {
 		if !bytes.Equal(handle, op.handle) {
@@ -451,13 +451,45 @@ func (s *Service) loginFinish(w http.ResponseWriter, r *http.Request) {
 		return op, nil
 	}, c.data, r)
 	if err != nil {
-		s.auditFail(ctx, "ui.login", "error:rejected", err.Error())
+		s.auditFail(ctx, action, "error:rejected", err.Error())
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "passkey not accepted")
-		return
+		return "", false
 	}
 	if cred.Authenticator.CloneWarning {
-		s.auditFail(ctx, "ui.login", "error:clone_warning", "sign counter went backwards")
+		s.auditFail(ctx, action, "error:clone_warning", "sign counter went backwards")
 		writeErr(w, r, http.StatusForbidden, "forbidden", "the passkey's signature counter went backwards: possibly a cloned authenticator")
+		return "", false
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE ui_credentials SET sign_count = ?, flags = ?, last_used_at = ? WHERE id = ?`,
+		cred.Authenticator.SignCount, int(cred.Flags.ProtocolValue()), storage.FormatTS(s.now()), credID(cred.ID)); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "update passkey")
+		return "", false
+	}
+	return credID(cred.ID), true
+}
+
+func (s *Service) loginBegin(w http.ResponseWriter, r *http.Request) {
+	assertion, data, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin login")
+		return
+	}
+	if !s.startCeremony(w, r, ceremony{kind: kindLogin, data: *data}) {
+		return
+	}
+	writeJSON(w, http.StatusOK, assertion.Response)
+}
+
+func (s *Service) loginFinish(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	c, ok := s.takeCeremony(w, r, kindLogin)
+	if !ok {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "no login in progress, or it took longer than 5 minutes")
+		return
+	}
+	id, ok := s.verifyAssertion(w, r, c, "ui.login")
+	if !ok {
 		return
 	}
 	keyID, err := operatorKeyID(ctx, s.db)
@@ -465,18 +497,12 @@ func (s *Service) loginFinish(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "the operator key is revoked or missing: run admin ui-reset with the service stopped, then ui setup")
 		return
 	}
-	if _, err := s.db.ExecContext(ctx,
-		`UPDATE ui_credentials SET sign_count = ?, flags = ?, last_used_at = ? WHERE id = ?`,
-		cred.Authenticator.SignCount, int(cred.Flags.ProtocolValue()), storage.FormatTS(s.now()), credID(cred.ID)); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "update passkey")
-		return
-	}
 	token, err := s.createSession(ctx)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "start session")
 		return
 	}
-	_ = audit.Write(ctx, s.db, keyID, "ui.login", "passkey", credID(cred.ID), "", "ok", "")
+	_ = audit.Write(ctx, s.db, keyID, "ui.login", "passkey", id, "", "ok", "")
 	writeJSON(w, http.StatusOK, map[string]string{"session": token})
 }
 

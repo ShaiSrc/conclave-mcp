@@ -68,7 +68,7 @@ func watchAPI(t *testing.T) string {
 			if len(stored) == 2 {
 				stored = append(stored,
 					`{"id":3,"author_key_id":2,"ts":"2026-11-11T10:02:00Z","message_type":"question","content":"Port\nwhich one?","metadata":{"reply_to":2},"trust_origin":"external"}`,
-					`{"id":4,"author_key_id":1,"ts":"2026-11-11T10:03:00Z","message_type":"alert","content":"mine"}`)
+					`{"id":4,"author_key_id":1,"ts":"2026-11-11T10:03:00Z","message_type":"alert","content":"mine","operator":true}`)
 			}
 			mu.Unlock()
 			fmt.Fprint(w, "event: message.created\ndata: {\"id\":4,\"author_key_id\":1,\"ts\":\"2026-11-11T10:03:00Z\"}\n\n")
@@ -136,6 +136,9 @@ func TestWatch_BacklogThenLiveWithNotifications(t *testing.T) {
 	}
 	if strings.Count(got, agent.ExternalNote) != 1 || strings.Index(got, agent.ExternalNote) > strings.Index(got, "#3 agent-b") {
 		t.Errorf("want the note once, before the external message:\n%s", got)
+	}
+	if strings.Count(got, agent.OperatorNote) != 1 || strings.Index(got, agent.OperatorNote) > strings.Index(got, "- OPERATOR (confirmed with passkey) [") {
+		t.Errorf("want the operator note once, before the operator message:\n%s", got)
 	}
 	mu.Lock()
 	defer mu.Unlock()

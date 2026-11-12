@@ -93,7 +93,7 @@ agent.
 					return mapErr(err)
 				}
 				labels := agent.Labels(ctx, c, roomID)
-				noted := false
+				noted, opNoted := false, false
 				var lastID int64
 				since := ""
 				show := func(m agent.Msg, live bool) {
@@ -110,6 +110,10 @@ agent.
 					if m.TrustOrigin == "external" && !noted {
 						fmt.Fprintln(out, agent.ExternalNote)
 						noted = true
+					}
+					if m.Operator && !opNoted {
+						fmt.Fprintln(out, agent.OperatorNote)
+						opNoted = true
 					}
 					fmt.Fprint(out, agent.Line(m, labels, me.SelfID))
 					if live && flagNotify && agent.Actionable(m) && m.Author != me.SelfID {

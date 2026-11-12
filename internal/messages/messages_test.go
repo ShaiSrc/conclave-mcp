@@ -578,3 +578,78 @@ func TestMessages_SendFailsWhenTheNewestTimestampCannotBeRead(t *testing.T) {
 		t.Errorf("%d messages stored, want only the broken one", n)
 	}
 }
+
+func TestMessages_OperatorMark(t *testing.T) {
+	db := setupDB(t)
+	id := seedKey(t, db, "op")
+	roomID := seedRoom(t, db, id, "opmark")
+	pub := &capBroker{}
+	svc := NewService(db, 262144, pub)
+	withClaims := func(scopes ...string) func(*http.Request) *http.Request {
+		return func(req *http.Request) *http.Request {
+			return req.WithContext(context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: id, Scopes: scopes}))
+		}
+	}
+	operatorCount := func() (n int) {
+		_ = db.QueryRow(`SELECT COUNT(*) FROM messages WHERE operator = 1`).Scan(&n)
+		return
+	}
+
+	// SendAsOperator stores, returns and lists the mark, and audits it.
+	req := withClaims(auth.ScopeAdmin)(httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"content":"hi"}`)))
+	rec := httptest.NewRecorder()
+	svc.SendAsOperator(rec, req, roomID)
+	if rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"operator":true`) {
+		t.Fatalf("operator send: %d %s", rec.Code, rec.Body.String())
+	}
+	if operatorCount() != 1 {
+		t.Fatalf("operator rows = %d, want 1", operatorCount())
+	}
+	if len(pub.payloads) != 1 || !strings.Contains(pub.payloads[0], `"operator":true`) {
+		t.Errorf("live event lacks the mark: %q", pub.payloads)
+	}
+	var detail string
+	if err := db.QueryRow(`SELECT detail FROM audit WHERE action = 'message.send'`).Scan(&detail); err != nil || !strings.Contains(detail, `"operator":true`) {
+		t.Errorf("audit detail %q, err %v", detail, err)
+	}
+	r := newServer(t, db, id, auth.ScopeAdmin)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages", nil))
+	if !strings.Contains(rec.Body.String(), `"operator":true`) {
+		t.Errorf("list lacks the mark: %s", rec.Body.String())
+	}
+
+	// A normal send cannot claim the mark.
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages",
+		strings.NewReader(`{"content":"x","operator":true,"metadata":{"operator":true}}`)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("normal send: %d %s", rec.Code, rec.Body.String())
+	}
+	var mv messageView
+	_ = json.Unmarshal(rec.Body.Bytes(), &mv)
+	if mv.Operator || operatorCount() != 1 {
+		t.Errorf("normal send got the mark: %+v, rows %d", mv, operatorCount())
+	}
+
+	// A UI session cannot post through the normal route.
+	r = newServer(t, db, id, auth.ScopeAdmin, auth.ScopeUI)
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", strings.NewReader(`{"content":"nope"}`)))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "operator messages need a passkey confirmation: send them from the web UI") {
+		t.Errorf("session post: %d %s", rec.Code, rec.Body.String())
+	}
+	var n int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n)
+	if n != 2 {
+		t.Errorf("messages stored = %d, want 2", n)
+	}
+}
+
+// capBroker records published payloads.
+type capBroker struct{ payloads []string }
+
+func (b *capBroker) Publish(_ string, payload []byte) int {
+	b.payloads = append(b.payloads, string(payload))
+	return 1
+}

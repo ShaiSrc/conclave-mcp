@@ -203,6 +203,80 @@ func TestE2E_WebUI(t *testing.T) {
 		t.Errorf("a forged request created a room: %d %s", r.Status, r.Body)
 	}
 
+	// Operator messages: a session alone cannot post; a passkey
+	// confirmation can, and agents see the mark.
+	roomResp := env.call("POST", "/v1/rooms", admin.Plaintext, map[string]any{"name": "e2e-operator-msg"})
+	var opRoom struct {
+		ID string `json:"id"`
+	}
+	if roomResp.Status != 201 || json.Unmarshal(roomResp.Body, &opRoom) != nil {
+		t.Fatalf("create room: %d %s", roomResp.Status, roomResp.Body)
+	}
+	agent := env.call("POST", "/v1/keys", admin.Plaintext, map[string]any{"label": "e2e-agent", "trust_origin": "internal"})
+	var agentKey struct {
+		ID  int64  `json:"id"`
+		Key string `json:"key"`
+	}
+	if agent.Status != 201 || json.Unmarshal(agent.Body, &agentKey) != nil {
+		t.Fatalf("create agent key: %d %s", agent.Status, agent.Body)
+	}
+	if r := env.call("POST", "/v1/rooms/"+opRoom.ID+"/invite", admin.Plaintext, map[string]any{"key_id": agentKey.ID, "rights": []string{"all"}}); r.Status != 201 {
+		t.Fatalf("invite agent: %d %s", r.Status, r.Body)
+	}
+	q := env.call("POST", "/v1/rooms/"+opRoom.ID+"/messages", agentKey.Key, map[string]any{"content": "may I deploy?", "message_type": "question"})
+	var question struct {
+		ID int64 `json:"id"`
+	}
+	if q.Status != 201 || json.Unmarshal(q.Body, &question) != nil {
+		t.Fatalf("agent question: %d %s", q.Status, q.Body)
+	}
+	msgsPath := "/v1/rooms/" + opRoom.ID + "/messages"
+	if resp, b := do("POST", msgsPath, `{"content":"sneaky"}`, nil); resp.StatusCode != 403 || !strings.Contains(b, "operator messages need a passkey confirmation: send them from the web UI") {
+		t.Errorf("session POST of a message: %d %s, want 403 with the passkey message", resp.StatusCode, b)
+	}
+	begin := `{"room_id":"` + opRoom.ID + `","content":"yes, deploy","message_type":"answer","reply_to":` + strconv.FormatInt(question.ID, 10) + `}`
+	resp, body = do("POST", "/ui/auth/message/begin", begin, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("message begin: %d %s", resp.StatusCode, body)
+	}
+	confirm, err := virtualwebauthn.ParseAssertionOptions(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := do("POST", "/ui/auth/message/finish", virtualwebauthn.CreateAssertionResponse(rp, pk, cred, *confirm), nil); resp.StatusCode != 201 || !strings.Contains(body, `"operator":true`) {
+		t.Fatalf("message finish: %d %s, want 201 with operator true", resp.StatusCode, body)
+	}
+	var listed struct {
+		Messages []struct {
+			Content     string `json:"content"`
+			Operator    bool   `json:"operator"`
+			AuthorKeyID int64  `json:"author_key_id"`
+		} `json:"messages"`
+	}
+	if r := env.call("GET", msgsPath, agentKey.Key, nil); r.Status != 200 || json.Unmarshal(r.Body, &listed) != nil {
+		t.Fatalf("agent list: %d %s", r.Status, r.Body)
+	}
+	found := false
+	for _, m := range listed.Messages {
+		if m.Content == "yes, deploy" {
+			found = true
+			if !m.Operator || m.AuthorKeyID != firstOperator {
+				t.Errorf("operator message: operator=%v author=%d, want true and %d", m.Operator, m.AuthorKeyID, firstOperator)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("agent does not see the operator message: %+v", listed.Messages)
+	}
+	if resp, b := do("GET", msgsPath, "", nil); resp.StatusCode != 200 || !strings.Contains(b, "yes, deploy") {
+		t.Errorf("session GET of messages: %d %s", resp.StatusCode, b)
+	}
+	inbox := exec.Command(env.BinaryPath(), "messages", "inbox", opRoom.ID, "--state", filepath.Join(t.TempDir(), "cursor"))
+	inbox.Env = []string{"PATH=" + os.Getenv("PATH"), "CONCLAVE_API_KEY=" + agentKey.Key, "CONCLAVE_SERVER=" + env.URL()}
+	if out, err := inbox.CombinedOutput(); err != nil || !strings.Contains(string(out), "- OPERATOR (confirmed with passkey) [") {
+		t.Errorf("inbox: %v\n%s, want a line starting with the operator mark", err, out)
+	}
+
 	// Logout ends the session on the server: the same token is dead.
 	if resp, _ := do("POST", "/ui/auth/logout", "", nil); resp.StatusCode != 204 {
 		t.Errorf("logout: %d", resp.StatusCode)

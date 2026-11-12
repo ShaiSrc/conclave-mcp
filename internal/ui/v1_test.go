@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -37,7 +38,7 @@ func withV1(s *Service, r chi.Router) {
 		s.V1Routes(r)
 		r.Get("/whoami", func(w http.ResponseWriter, r *http.Request) {
 			c, _ := auth.FromContext(r.Context())
-			writeJSON(w, http.StatusOK, map[string]any{"id": c.KeyID, "admin": auth.IsAdmin(r.Context())})
+			writeJSON(w, http.StatusOK, map[string]any{"id": c.KeyID, "admin": auth.IsAdmin(r.Context()), "ui": slices.Contains(c.Scopes, auth.ScopeUI)})
 		})
 		r.Post("/rooms", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusCreated) })
 	})
@@ -53,9 +54,10 @@ func TestSessionAuth_HeaderHostOriginSession(t *testing.T) {
 	var me struct {
 		ID    int64 `json:"id"`
 		Admin bool  `json:"admin"`
+		UI    bool  `json:"ui"`
 	}
 	status, body := b.do("GET", "/v1/whoami", nil)
-	if status != http.StatusOK || json.Unmarshal(body, &me) != nil || me.ID != opID || !me.Admin {
+	if status != http.StatusOK || json.Unmarshal(body, &me) != nil || me.ID != opID || !me.Admin || !me.UI {
 		t.Fatalf("whoami with the session token: %d %s, want the operator key %d as admin", status, body, opID)
 	}
 	for _, c := range []struct {
