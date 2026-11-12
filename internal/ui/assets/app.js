@@ -1,5 +1,6 @@
 // The page: routing, the header, passkey login and setup, passkeys.
 import { h, api, errorBox, confirmButton, table, when } from './lib.js';
+import { roomsPage, roomPage } from './rooms.js';
 
 const main = document.getElementById('app');
 const nav = document.getElementById('nav');
@@ -7,7 +8,14 @@ const nav = document.getElementById('nav');
 // registerPasskey runs a registration ceremony: with a setup token for
 // the first passkey, else as the logged-in operator.
 async function registerPasskey(name, setupToken = '') {
-  const options = await api('POST', '/ui/auth/register/begin', { name, setup_token: setupToken });
+  let options;
+  try {
+    options = await api('POST', '/ui/auth/register/begin', { name, setup_token: setupToken });
+  } catch (err) {
+    // an expired or used token is of no use: drop it from the address bar
+    if (setupToken && err.status >= 400 && err.status < 500) history.replaceState(null, '', '#/');
+    throw err;
+  }
   const cred = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) });
   await api('POST', '/ui/auth/register/finish', cred.toJSON());
 }
@@ -18,13 +26,26 @@ async function login() {
   await api('POST', '/ui/auth/login/finish', cred.toJSON());
 }
 
-// action makes a click handler that shows errors in msg.
-function action(msg, fn) {
-  return async () => {
-    msg.replaceChildren();
-    try { await fn(); } catch (err) { msg.replaceChildren(errorBox(err)); }
+// action makes a click handler that shows errors in msg. While fn runs
+// the button is disabled (no second run) and status, if given, is shown.
+function action(msg, fn, status = '') {
+  return async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    msg.replaceChildren(status);
+    try {
+      await fn();
+      msg.replaceChildren();
+    } catch (err) {
+      if (err.status === 401) render(); // the session ended: show the login page
+      else msg.replaceChildren(errorBox(err));
+    } finally {
+      btn.disabled = false;
+    }
   };
 }
+
+const WAITING = 'Waiting for your passkey…';
 
 function loginPage(view, state) {
   if (state.setup_needed) {
@@ -36,7 +57,7 @@ function loginPage(view, state) {
   }
   const msg = h('div');
   view.replaceChildren(h('h1', {}, 'Log in'),
-    h('button', { onclick: action(msg, async () => { await login(); await render(); }) }, 'Log in with a passkey'),
+    h('button', { onclick: action(msg, async () => { await login(); await render(); }, WAITING) }, 'Log in with a passkey'),
     msg);
 }
 
@@ -51,7 +72,7 @@ function setupPage(view, token) {
         await registerPasskey(name.value, token);
         history.replaceState(null, '', '#/'); // drop the used token from the address bar
         await render();
-      }),
+      }, WAITING),
     }, 'Register passkey'),
     msg);
 }
@@ -71,18 +92,24 @@ async function passkeysPage(view) {
         : h('span', { class: 'muted' }, 'the last passkey cannot be removed'))))),
     h('h2', {}, 'Add a passkey'),
     h('label', {}, 'Name ', name), ' ',
-    h('button', { onclick: action(msg, async () => { await registerPasskey(name.value); await render(); }) }, 'Add passkey'),
+    h('button', { onclick: action(msg, async () => { await registerPasskey(name.value); await render(); }, WAITING) }, 'Add passkey'),
     msg);
 }
 
 // header returns the navigation: pages, the rooms, logout.
 async function header() {
-  const { rooms } = await api('GET', '/v1/rooms');
+  let rooms = [];
   const msg = h('span');
+  try {
+    rooms = (await api('GET', '/v1/rooms')).rooms || [];
+  } catch (err) {
+    if (err.status === 401) throw err;
+    msg.append(errorBox(err)); // the page itself still renders
+  }
   return [
     h('a', { href: '#/' }, 'Rooms'), h('a', { href: '#/keys' }, 'Keys'),
     h('a', { href: '#/audit' }, 'Audit'), h('a', { href: '#/passkeys' }, 'Passkeys'),
-    h('span', { class: 'rooms' }, (rooms || []).map(r => h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name))),
+    h('span', { class: 'rooms' }, rooms.map(r => h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name))),
     msg,
     h('button', { onclick: action(msg, async () => { await api('POST', '/ui/auth/logout'); await render(); }) }, 'Log out'),
   ];
@@ -92,6 +119,8 @@ async function header() {
 // it gets and may return a function that stops what it started (the
 // live stream of a room).
 const routes = [
+  [/^#\/?$/, roomsPage],
+  [/^#\/rooms\/([^/]+)$/, roomPage],
   [/^#\/passkeys$/, passkeysPage],
 ];
 

@@ -45,8 +45,9 @@ export async function api(method, path, body) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = null; }
   if (!res.ok) {
-    const e = data && data.error ? data.error : { code: String(res.status), message: text.trim() || res.statusText };
-    throw new APIError(res.status, e.code, e.message);
+    const e = (data && data.error) || {};
+    throw new APIError(res.status, e.code || String(res.status),
+      e.message || (data ? '' : text.trim().slice(0, 200)) || res.statusText || 'request failed');
   }
   return data;
 }
@@ -71,8 +72,29 @@ export function confirmButton(label, question, action) {
       h('button', { onclick: reset }, 'No'));
   }
   async function run() {
-    try { await action(); } catch (err) { wrap.replaceChildren(errorBox(err)); }
+    try { await action(); } catch (err) {
+      if (err.status === 401) rerender(); // the session ended: show the login page
+      else wrap.replaceChildren(errorBox(err));
+    }
   }
   reset();
   return wrap;
+}
+
+// Every right a membership can hold, in the server's order.
+export const RIGHTS = ['read', 'claim', 'question', 'answer', 'decision', 'handoff',
+  'status_update', 'task_assignment', 'alert', 'system'];
+
+// rerender draws the current page again (app.js listens for this).
+export function rerender() {
+  window.dispatchEvent(new Event('hashchange'));
+}
+
+// rightsPicker is a checkbox per right; value() returns the checked ones.
+export function rightsPicker(selected = []) {
+  const boxes = RIGHTS.map(r => h('input', { type: 'checkbox', value: r, checked: selected.includes(r) }));
+  return {
+    el: h('span', { class: 'rights' }, boxes.map((b, i) => h('label', {}, b, ' ' + RIGHTS[i]))),
+    value: () => boxes.filter(b => b.checked).map(b => b.value),
+  };
 }
