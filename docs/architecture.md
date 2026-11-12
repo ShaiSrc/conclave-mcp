@@ -239,7 +239,9 @@ What a key may do in a room is the set of rights on its membership
   `trust_origin`.
 * A non-member gets `404` (a key cannot tell whether a room exists), a
   member without the right `403 missing_right` ("missing right:
-  <right>"), an archived room `410` where it did before.
+  <right>"). An archived room answers `403 missing_right` first when
+  the member lacks the right (send, live stream, claims), otherwise its
+  old answer (`410` for send and the live stream, `404` for claims).
 * Rights are read from the database on every request, so a change
   applies to the next one. A live stream checks `read` again before
   each message and ends when it is gone.

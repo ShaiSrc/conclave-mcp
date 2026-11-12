@@ -68,7 +68,7 @@ acme/widgets; --room overrides), then:
   .claude/settings.json  conclave-mcp hook added for all events, other hooks kept
   CLAUDE.md              coordination rules between conclave markers
 
-Safe to re-run. Next: conclave-mcp agent add <label>, once per agent.`,
+Safe to re-run. Next: conclave-mcp agent add <label> --rights all --trust-origin internal, once per agent.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			wd, err := os.Getwd()

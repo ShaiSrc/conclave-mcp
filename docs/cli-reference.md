@@ -221,7 +221,7 @@ conclave-mcp rooms archive 01ABC...
 ```
 
 Soft-archives a room. The room is hidden from `rooms list`
-for non-admin members, but the messages remain. Admin key only.
+for every caller, but the messages remain. Admin key only.
 
 ## `rooms invite`
 

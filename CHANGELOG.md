@@ -19,8 +19,11 @@ Upgrading:
 3. Replace the binary and restart the service. Migration 0008 gives
    existing `owner`/`writer` members all rights and `reader` members
    `read`.
-4. Check that `rooms members` lists every existing member with all
-   rights, that `inbox` and the wake hook still work for existing
+4. Update the CLI and hook binary wherever agents run: older
+   clients read labels from `/v1/keys`, now admin-only, and silently
+   fall back to key ids.
+5. Check that `rooms members` shows every existing member with the
+   rights of the old role (`owner`/`writer` all, `reader` `read`), that `inbox` and the wake hook still work for existing
    agents, and that an agent key gets 403 on `/v1/audit`.
 
 Rollback: the previous binary plus the backup (it ignores the new

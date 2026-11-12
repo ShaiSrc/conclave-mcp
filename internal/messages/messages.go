@@ -53,8 +53,8 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", s.send)
 	r.Get("/rooms/{id}/messages", s.list)
-	// Soft-delete (SPEC-0001 Q8). Admin keys only; see delete()
-	// for the role check.
+	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
+	// 403 forbidden to every other caller.
 	r.Delete("/rooms/{id}/messages/{msgid}", s.delete)
 }
 

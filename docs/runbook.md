@@ -55,7 +55,7 @@ systemd, with a reverse proxy in front of it for TLS.
    can create more keys (SPEC-0003 §3.3), so store the returned
    plaintext in a password manager immediately:
    ```sh
-   /usr/local/bin/conclave-mcp keys create --label bootstrap
+   /usr/local/bin/conclave-mcp admin keys create-bootstrap --label bootstrap
    ```
 9. Configure the reverse proxy (nginx or Caddy — see
    `packaging/reverse-proxy/`). Verify TLS works end-to-end
@@ -111,10 +111,10 @@ chown -R conclave:conclave /var/lib/conclave-mcp
 systemctl start conclave-mcp
 ```
 
-The server will refuse to start if the on-disk schema is
-**ahead** of the binary's understanding (i.e. downgrading the
-binary after upgrading the DB). Recover by restoring a backup
-from before the upgrade.
+Downgrading the binary after upgrading the DB is not detected:
+migrations at or below the stored version are skipped, so an older
+binary runs against a schema it does not know. Recover by restoring
+a backup from before the upgrade.
 
 ## Monitoring
 
@@ -150,7 +150,7 @@ Mirrors the v0.1 security constraints (SPEC-0001 §4):
 - [ ] `CONCLAVE_API_KEY` is **not** in `conclave.env`; each
       caller (operator, agent) holds their own key.
 - [ ] The first API key was created via
-      `conclave-mcp keys create --label bootstrap` and the
+      `conclave-mcp admin keys create-bootstrap --label bootstrap` and the
       plaintext is in a password manager.
 - [ ] The systemd unit has `NoNewPrivileges=yes`,
       `ProtectSystem=strict`, `ProtectHome=yes`,

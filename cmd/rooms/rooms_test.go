@@ -337,3 +337,31 @@ func TestMapErr(t *testing.T) {
 		t.Errorf("mapErr(APIError)=%d", ec)
 	}
 }
+
+func TestGet_ShowsEmptyMyRights(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"id":"r1","name":"n","owner_key_id":1,"created_at":"t"}`)
+	}))
+	defer srv.Close()
+	oldOC := openClient
+	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
+		return client.New(client.Options{Server: srv.URL, Token: "stub"})
+	}
+	defer func() { openClient = oldOC }()
+
+	var buf bytes.Buffer
+	sub := newGetCmd()
+	sub.SetOut(&buf)
+	sub.SetErr(&buf)
+	sub.SetContext(context.Background())
+	if err := sub.RunE(sub, []string{"r1"}); err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := got["my_rights"].([]any); !ok || len(v) != 0 {
+		t.Errorf("my_rights = %#v, want empty list; out=%s", got["my_rights"], buf.String())
+	}
+}

@@ -257,7 +257,7 @@ var tools = []tool{
 	{"messages.list", "List messages in a room, oldest first, paginated by since. " + agent.ExternalNote,
 		map[string]any{"room_id": roomIDProp, "since": sinceProp, "limit": num("Max messages, default 50, max 500."), "trust_origin": trustOriginProp},
 		[]string{"room_id"}},
-	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With sinceProp: returns at once if anything newer than sinceProp exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as sinceProp. " + agent.ExternalNote,
+	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With since: returns at once if anything newer than since exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as since. " + agent.ExternalNote,
 		map[string]any{"room_id": roomIDProp, "since": sinceProp, "wait": num("Seconds to block, default 60, max 300.")},
 		[]string{"room_id"}},
 	{"messages.delete", "Soft-delete a message. Admin only.",

@@ -174,7 +174,7 @@ func ResolveRoom(ctx context.Context, c *client.Client, name string) (string, er
 			return r.ID, nil
 		}
 	}
-	return "", fmt.Errorf("%w %q (an admin can add this agent: conclave-mcp agent add <label>)", ErrNoRoom, name)
+	return "", fmt.Errorf("%w %q (an admin can add this agent: conclave-mcp agent add <label> --rights all --trust-origin internal)", ErrNoRoom, name)
 }
 
 // RoomID turns a command's room argument into a room id. A room id

@@ -211,9 +211,15 @@ func newGetCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
+				// Shadow MyRights without omitempty so a member with no
+				// rights sees an empty list instead of a missing field.
+				view := struct {
+					roomView
+					MyRights []string `json:"my_rights"`
+				}{r, append([]string{}, r.MyRights...)}
 				enc := json.NewEncoder(out)
 				enc.SetIndent("", "  ")
-				return enc.Encode(r)
+				return enc.Encode(view)
 			})
 		},
 	}
