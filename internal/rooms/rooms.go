@@ -346,7 +346,7 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 		`SELECT k.is_admin, EXISTS (
 		   SELECT 1 FROM room_members m JOIN rooms o ON o.id = m.room_id
 		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL)
-		 FROM api_keys k WHERE k.id = ?`,
+		 FROM api_keys k WHERE k.id = ? AND k.revoked_at IS NULL`,
 		id, req.KeyID,
 	).Scan(&isAdmin, &elsewhere)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -417,10 +417,15 @@ func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "member lookup")
 		return
 	}
-	if _, err := s.DB.ExecContext(r.Context(),
+	res, err := s.DB.ExecContext(r.Context(),
 		`UPDATE room_members SET rights = ? WHERE room_id = ? AND key_id = ?`, set.Storage(), id, keyid,
-	); err != nil {
+	)
+	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "update rights")
+		return
+	}
+	if n, _ := res.RowsAffected(); n == 0 { // removed between lookup and update
+		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{"room_id": id, "old": rights.FromStorage(old), "new": set})

@@ -53,9 +53,15 @@ systemd, with a reverse proxy in front of it for TLS.
    ```
 8. Bootstrap the first API key. This is the **only** key that
    can create more keys (SPEC-0003 §3.3), so store the returned
-   plaintext in a password manager immediately:
+   plaintext in a password manager immediately. The command writes
+   to the SQLite file directly, so stop the service first, point
+   `--db` (or `CONCLAVE_DATA_DIR`) at the service's database, run it
+   as the service user, and start the service again:
    ```sh
-   /usr/local/bin/conclave-mcp admin keys create-bootstrap --label bootstrap
+   systemctl stop conclave-mcp
+   sudo -u conclave /usr/local/bin/conclave-mcp admin keys create-bootstrap \
+     --db /var/lib/conclave-mcp/data.db --label bootstrap
+   systemctl start conclave-mcp
    ```
 9. Configure the reverse proxy (nginx or Caddy — see
    `packaging/reverse-proxy/`). Verify TLS works end-to-end

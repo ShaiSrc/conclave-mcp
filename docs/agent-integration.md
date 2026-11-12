@@ -55,7 +55,10 @@ CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp init
 git add .conclave.json .mcp.json .claude/settings.json CLAUDE.md && git commit -m "chore: conclave"
 
 # per agent: create its key, invite it, store the key, start Claude as it
-eval "$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add agent-a --rights all --trust-origin internal --store)" && claude
+# an inherited CONCLAVE_API_KEY would win over the stored agent key
+unset CONCLAVE_API_KEY
+out=$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add agent-a --rights all --trust-origin internal --store) \
+  && eval "$out" && claude
 ```
 
 `init` finds or creates the room for the repository (named after
@@ -128,8 +131,9 @@ agent's claims and posts the handoff. Do not set it for
 interactive sessions, where Stop fires after every turn.
 
 ```sh
-eval "$(conclave-mcp agent add worker-1 --rights all --trust-origin internal)"
-CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
+out=$(CONCLAVE_API_KEY=$ADMIN_KEY conclave-mcp agent add worker-1 --rights all --trust-origin internal) \
+  && eval "$out" \
+  && CONCLAVE_RELEASE_ON_STOP=1 claude -p "fix the flaky test in pkg/foo"
 ```
 
 ### How claims behave

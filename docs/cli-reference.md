@@ -18,7 +18,7 @@ conclave-mcp rooms create|list|get|archive|invite|rights|members|remove  # rooms
 conclave-mcp messages send|list|delete|subscribe|inbox  # send / receive
 conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
-conclave-mcp agent add <label> --rights all [--store]  # new agent key + invite
+conclave-mcp agent add <label> --rights all --trust-origin internal [--store]  # new agent key + invite
 conclave-mcp hook                                     # Claude Code hook (stdin JSON)
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help

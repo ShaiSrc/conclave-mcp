@@ -309,7 +309,7 @@ outside its room. It runs once through the CLI and once through
 2. Back up the database file.
 3. Replace the binary and restart the service.
 4. Check that:
-   - `rooms members` lists every existing member with `all`;
+   - `rooms members` lists every existing member with the rights of the old role (`all` for owners and writers, `read` for readers);
    - `inbox`, `status` and the wake hook still work for existing agents;
    - an agent key gets `403` on `/v1/audit`.
 5. **Rollback:** the previous binary plus the backup. The old binary

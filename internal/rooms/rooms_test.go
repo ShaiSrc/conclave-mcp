@@ -392,6 +392,34 @@ func TestRooms_InviteStoresRightsAndTranslatesRole(t *testing.T) {
 	if rec := do(r, http.MethodPost, "/rooms/"+rv.ID+"/invite", `{"key_id":9999,"rights":["read"]}`); rec.Code != http.StatusNotFound {
 		t.Errorf("unknown key: got %d, want 404", rec.Code)
 	}
+	revoked := seedKey(t, db, "revoked")
+	if _, err := db.Exec(`UPDATE api_keys SET revoked_at = ? WHERE id = ?`, time.Now().UTC().Format(time.RFC3339Nano), revoked); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(r, http.MethodPost, "/rooms/"+rv.ID+"/invite", `{"key_id":`+itoa(revoked)+`,"rights":["read"]}`); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "key not found") {
+		t.Errorf("revoked key: got %d %s, want 404 key not found", rec.Code, rec.Body.String())
+	}
+}
+
+// A member removed between the lookup and the UPDATE: the UPDATE hits
+// zero rows, which is a 404 and leaves no room.rights audit entry.
+func TestRooms_SetRightsZeroRowsIs404(t *testing.T) {
+	r, db, _ := setupAs(t)
+	rv := createRoom(t, r, "r1")
+	agent := seedKey(t, db, "agent")
+	if rec := do(r, http.MethodPost, "/rooms/"+rv.ID+"/invite", `{"key_id":`+itoa(agent)+`,"rights":["read"]}`); rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	// RAISE(IGNORE) makes the UPDATE a no-op, as if the row had vanished.
+	if _, err := db.Exec(`CREATE TRIGGER skip_upd BEFORE UPDATE ON room_members BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	rec := do(r, http.MethodPatch, "/rooms/"+rv.ID+"/members/"+itoa(agent), `{"rights":["claim"]}`)
+	var n int
+	_ = db.QueryRow(`SELECT count(*) FROM audit WHERE action = 'room.rights'`).Scan(&n)
+	if rec.Code != http.StatusNotFound || n != 0 {
+		t.Errorf("got %d %s with %d audit rows, want 404 and none", rec.Code, rec.Body.String(), n)
+	}
 }
 
 func TestRooms_OneRoomPerKey(t *testing.T) {

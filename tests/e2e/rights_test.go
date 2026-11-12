@@ -34,7 +34,7 @@ func newRightsEnv(t *testing.T) *rightsEnv {
 			t.Fatalf("invite key %d: %d %s", k.ID, resp.Status, resp.Body)
 		}
 	}
-	for _, right := range []string{"read", "claim", "handoff", "system"} {
+	for _, right := range []string{"read", "claim", "question", "answer", "decision", "handoff", "status_update", "task_assignment", "alert", "system"} {
 		k := env.createKey("holder-"+right, false)
 		invite(k, []string{right})
 		e.holder[right] = k
@@ -53,13 +53,22 @@ func TestRights_Matrix(t *testing.T) {
 	e := newRightsEnv(t)
 	base := "/v1/rooms/" + e.room
 	empty := func(apiKey) any { return map[string]any{} }
+	typed := func(mt string) func(apiKey) any {
+		return func(apiKey) any { return map[string]any{"content": "x", "message_type": mt} }
+	}
 	for _, c := range []struct {
 		method, path, right string
 		body                func(apiKey) any
 	}{
 		{"GET", base + "/messages", "read", nil},
 		{"GET", base + "/events?wait=1", "read", nil},
-		{"POST", base + "/messages", "handoff", func(apiKey) any { return map[string]any{"content": "x", "message_type": "handoff"} }},
+		{"POST", base + "/messages", "question", typed("question")},
+		{"POST", base + "/messages", "answer", typed("answer")},
+		{"POST", base + "/messages", "decision", typed("decision")},
+		{"POST", base + "/messages", "handoff", typed("handoff")},
+		{"POST", base + "/messages", "status_update", typed("status_update")},
+		{"POST", base + "/messages", "task_assignment", typed("task_assignment")},
+		{"POST", base + "/messages", "alert", typed("alert")},
 		{"POST", base + "/messages", "system", func(apiKey) any { return map[string]any{"content": "x"} }},
 		{"GET", base + "/claims", "read", nil},
 		{"POST", base + "/claims", "claim", func(k apiKey) any { return map[string]any{"paths": []string{fmt.Sprintf("k%d.go", k.ID)}} }},

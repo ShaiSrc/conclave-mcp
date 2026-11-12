@@ -98,6 +98,11 @@ func TestLifecycle_MigrationIdempotent_OnSecondStart(t *testing.T) {
 		t.Fatalf("create room: %d %s", cr.Status, cr.Body)
 	}
 	roomID := mustField(t, cr.Body, "id")
+	// keyA is an admin key and sees every room; keyB proves the
+	// membership itself survives.
+	if inv := env1.callAs("POST", "/v1/rooms/"+roomID+"/invite", env1.keyA, map[string]any{"key_id": env1.keyB.ID, "rights": []string{"read"}}); inv.Status != 201 {
+		t.Fatalf("invite keyB: %d %s", inv.Status, inv.Body)
+	}
 
 	// Second lifetime, same directory. We let env1 fully release
 	// its DB handle first (it does so on test cleanup), then
@@ -107,7 +112,7 @@ func TestLifecycle_MigrationIdempotent_OnSecondStart(t *testing.T) {
 
 	// The same key (prefix + plaintext) must still authenticate
 	// because we kept the api_keys rows.
-	listResp := env2.call("GET", "/v1/rooms", env1.keyA.Plaintext, nil)
+	listResp := env2.call("GET", "/v1/rooms", env1.keyB.Plaintext, nil)
 	if listResp.Status != 200 {
 		t.Fatalf("second start list: status=%d body=%s", listResp.Status, listResp.Body)
 	}

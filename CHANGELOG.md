@@ -15,7 +15,10 @@ Upgrading:
 
 1. Make sure no agent sends messages with the admin key: after the
    upgrade it reads every room and the audit log.
-2. Back up the database file.
+2. Back up the data directory with the service stopped, or take a SQLite
+   online backup (see `docs/runbook.md`, "Backup and restore"). Do not
+   copy the live database file alone: committed data can still be in the
+   WAL.
 3. Replace the binary and restart the service. Migration 0008 gives
    existing `owner`/`writer` members all rights and `reader` members
    `read`.
