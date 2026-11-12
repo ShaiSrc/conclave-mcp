@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/storage"
 	"github.com/hermes/conclave-mcp/internal/ui"
 	"github.com/hermes/conclave-mcp/migrations"
@@ -85,5 +86,32 @@ func TestServer_NoUIOffLoopback(t *testing.T) {
 		if rec.Code != want {
 			t.Errorf("%s: %d, want %d", path, rec.Code, want)
 		}
+	}
+}
+
+// The cookie reaches the SSE route (mounted outside the /v1 group) but
+// not /v1/mcp, which stays bearer-only.
+func TestServer_UICookieOnEventsAndMCP(t *testing.T) {
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: uiDB(t), Broker: events.NewBroker()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(req *http.Request) int {
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := do(uiRequest("GET", "/v1/rooms/nope/events", "localhost:7432")); got == http.StatusUnauthorized || got == http.StatusForbidden {
+		t.Errorf("events with cookie and header: %d, want it authenticated", got)
+	}
+	req := uiRequest("GET", "/v1/rooms/nope/events", "localhost:7432")
+	req.Header.Del(ui.HeaderName)
+	if got := do(req); got != http.StatusUnauthorized {
+		t.Errorf("events with cookie, no header: %d, want 401", got)
+	}
+	req = uiRequest("POST", "/v1/mcp", "localhost:7432")
+	req.Header.Set("Origin", "http://localhost:7432")
+	if got := do(req); got != http.StatusUnauthorized {
+		t.Errorf("/v1/mcp with cookie: %d, want 401", got)
 	}
 }

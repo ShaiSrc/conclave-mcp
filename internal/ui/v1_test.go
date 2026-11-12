@@ -70,6 +70,7 @@ func TestCookieAuth_HeaderHostOriginSession(t *testing.T) {
 		{"other port", "GET", nil, "localhost:9999", 403},
 		{"127.0.0.1 is a UI host", "GET", nil, "127.0.0.1:7432", 200},
 		{"POST from another origin", "POST", map[string]string{"Origin": "http://attacker.example"}, testHost, 403},
+		{"POST with Origin null", "POST", map[string]string{"Origin": "null"}, testHost, 403},
 		{"POST without Origin", "POST", map[string]string{"Origin": ""}, testHost, 403},
 		{"POST from the UI", "POST", nil, testHost, 201},
 	} {
@@ -148,7 +149,7 @@ func TestSetupTokenEndpoint(t *testing.T) {
 func TestLoopback(t *testing.T) {
 	for host, want := range map[string]bool{
 		"127.0.0.1": true, "localhost": true, "::1": true, "127.0.0.2": true,
-		"": false, "0.0.0.0": false, "192.168.1.10": false, "example.com": false,
+		"": false, "::": false, "0.0.0.0": false, "192.168.1.10": false, "example.com": false,
 	} {
 		if got := Loopback(host); got != want {
 			t.Errorf("Loopback(%q) = %v, want %v", host, got, want)

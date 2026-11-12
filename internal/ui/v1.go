@@ -2,7 +2,9 @@ package ui
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -48,8 +50,12 @@ func (s *Service) Auth(bearer func(http.Handler) http.Handler) func(http.Handler
 				return
 			}
 			id, err := operatorKeyID(r.Context(), s.db)
-			if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
 				writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "the operator key is revoked or missing")
+				return
+			}
+			if err != nil {
+				writeErr(w, r, http.StatusInternalServerError, "internal_error", "operator key lookup")
 				return
 			}
 			ctx := context.WithValue(r.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: id, Scopes: []string{auth.ScopeAdmin}})
