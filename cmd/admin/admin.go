@@ -23,12 +23,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	_ "modernc.org/sqlite" // pure-Go SQLite driver
 
+	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
 )
 
@@ -36,11 +38,12 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "admin",
-		Short: "Offline maintenance (vacuum, key bootstrap)",
+		Short: "Offline maintenance (vacuum, key bootstrap, web UI reset)",
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(newVacuumCmd())
 	cmd.AddCommand(newKeysCmd())
+	cmd.AddCommand(newUIResetCmd())
 	return cmd
 }
 
@@ -357,4 +360,122 @@ func indexOf(s, sub string) int {
 		}
 	}
 	return -1
+}
+
+// ---------- admin ui-reset ----------
+//
+// The way back in after losing every passkey. Offline like
+// create-bootstrap: whoever can stop the service and write the
+// database file is the operator already.
+
+func newUIResetCmd() *cobra.Command {
+	var flagDB string
+	cmd := &cobra.Command{
+		Use:   "ui-reset",
+		Short: "Remove all web UI passkeys and sessions (offline; stop the server first)",
+		Long: `Deletes every passkey, session and setup token of the web UI directly in
+the SQLite file, revokes the UI's operator key and records ui.reset in
+the audit log. Then start the server and run conclave-mcp ui setup to
+register a passkey again; setup creates a fresh operator key.
+
+The revoked operator key is renamed operator-revoked-<id>-<random hex>,
+because key labels are unique; so is any other revoked key labelled
+operator. An active key labelled operator that the UI did not create
+is left alone, and setup refuses with a conflict while it exists:
+revoke it first (conclave-mcp keys revoke <id>), then run this again.
+
+--db is required and must be the file the server runs on (the value
+of serve --db); there is no default.
+
+Like admin vacuum, this subcommand does NOT talk to a running server.
+Stop the server first.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// No default guessing: serve and the admin default can name
+			// different files, and a reset must hit the server's database.
+			if flagDB == "" {
+				return &exitError{Code: 2, Err: errors.New("--db is required: pass the SQLite file the server runs on (serve --db)")}
+			}
+			return runUIReset(cmd.Context(), cmd.ErrOrStderr(), flagDB)
+		},
+	}
+	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file the server runs on (required)")
+	return cmd
+}
+
+func runUIReset(ctx context.Context, errOut io.Writer, dbPath string) error {
+	// sql.Open would create a missing file; a typo must not.
+	if _, err := os.Stat(dbPath); err != nil {
+		return &exitError{Code: 1, Err: fmt.Errorf("stat db: %w", err)}
+	}
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		return &exitError{Code: 1, Err: fmt.Errorf("open db: %w", err)}
+	}
+	defer db.Close()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return &exitError{Code: 1, Err: fmt.Errorf("begin tx: %w", err)}
+	}
+	defer tx.Rollback()
+	fail := func(what string, err error) error {
+		if strings.Contains(err.Error(), "no such table") { // migration 0009 not applied yet
+			return &exitError{Code: 1, Err: fmt.Errorf("%s: %w (has the server run this version once?)", what, err)}
+		}
+		return &exitError{Code: 1, Err: fmt.Errorf("%s: %w", what, err)}
+	}
+	var passkeys, sessions int64
+	for _, d := range []struct {
+		q string
+		n *int64
+	}{
+		{`DELETE FROM ui_credentials`, &passkeys},
+		{`DELETE FROM ui_sessions`, &sessions},
+		{`DELETE FROM ui_setup_tokens`, new(int64)},
+	} {
+		res, err := tx.ExecContext(ctx, d.q)
+		if err != nil {
+			return fail(d.q, err)
+		}
+		*d.n, _ = res.RowsAffected()
+	}
+	// The recorded operator key: revoke it if still active, free its label.
+	// The random suffix keeps a label made beforehand from blocking this.
+	var opID int64
+	revoked := false
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'ui_operator_key_id'`).Scan(&opID); {
+	case err == nil:
+		res, err := tx.ExecContext(ctx,
+			`UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`,
+			time.Now().UTC().Format(time.RFC3339Nano), opID)
+		if err != nil {
+			return fail("revoke operator key", err)
+		}
+		n, _ := res.RowsAffected()
+		revoked = n > 0
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE api_keys SET label = 'operator-revoked-' || id || '-' || lower(hex(randomblob(4))) WHERE id = ? AND label = 'operator'`, opID); err != nil {
+			return fail("rename operator key", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM meta WHERE key = 'ui_operator_key_id'`); err != nil {
+			return fail("delete meta row", err)
+		}
+	case !errors.Is(err, sql.ErrNoRows):
+		return fail("read operator key id", err)
+	}
+	// Any other revoked key still holding the label would block setup too.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE api_keys SET label = 'operator-revoked-' || id || '-' || lower(hex(randomblob(4))) WHERE label = 'operator' AND revoked_at IS NOT NULL`); err != nil {
+		return fail("rename revoked operator key", err)
+	}
+	detail, _ := json.Marshal(map[string]any{"passkeys": passkeys, "sessions": sessions, "operator_key_revoked": revoked})
+	if err := audit.Write(ctx, tx, 0, "ui.reset", "ui", "", "", "ok", string(detail)); err != nil {
+		return &exitError{Code: 1, Err: fmt.Errorf("audit: %w", err)}
+	}
+	if err := tx.Commit(); err != nil {
+		return &exitError{Code: 1, Err: fmt.Errorf("commit: %w", err)}
+	}
+	fmt.Fprintf(errOut, "removed %d passkey(s) and %d session(s); start the server and run conclave-mcp ui setup\n", passkeys, sessions)
+	return nil
 }

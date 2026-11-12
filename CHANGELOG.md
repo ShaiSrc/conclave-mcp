@@ -6,6 +6,23 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Web admin UI at `http://localhost:<port>/ui/` when the server listens
+  on a loopback address: rooms, members and rights, keys (create, create
+  an agent, revoke), the audit log, and each room's messages with open
+  requests, claims and live updates. Login with a passkey only (WebAuthn,
+  user verification required); no password exists. `conclave-mcp ui
+  setup` prints the one-time setup URL, `conclave-mcp admin ui-reset`
+  (offline) removes all passkeys and sessions. The UI acts as a new admin
+  key labelled `operator`. New endpoint `POST /v1/ui/setup-tokens`
+  (admin), new audit actions `ui.setup_token`, `ui.passkey.add`,
+  `ui.passkey.remove`, `ui.login`, `ui.logout`, `ui.reset`, migration
+  0009. A session is a per-tab token that the page keeps in memory and
+  sends in `X-Conclave-UI`, never a cookie (browsers send `localhost`
+  cookies to every port) or browser storage (kept on disk): a reload or
+  a new tab logs in with the passkey again. See `docs/web-ui.md`.
+
 ## [0.5.1] — 2026-11-12
 
 ### Fixed

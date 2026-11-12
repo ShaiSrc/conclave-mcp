@@ -62,6 +62,7 @@ cmd/audit           audit subcommand
 cmd/mcp             MCP stdio / HTTP transport
 cmd/hook            Claude Code hook (inbox, claims, Stop, SessionEnd)
 cmd/setup           init and agent add
+cmd/ui              ui setup (asks the server for a setup URL)
 internal/server     HTTP routing, middleware (auth, ratelimit, audit)
 internal/auth       argon2id token generation + verification
 internal/keys       keys service + storage
@@ -72,6 +73,7 @@ internal/events     in-process broker (SSE fan-out)
 internal/mcp        MCP tool definitions (17 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
+internal/ui         web admin UI: embedded pages, passkey login, UI sessions on /v1
 internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
 internal/cli/client shared HTTP client for every subcommand (token resolution)
 internal/cli/keystore stored agent keys (macOS Keychain or 0600 files)
@@ -80,7 +82,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0008)
+migrations/         numbered SQL migrations (0001..0009)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -114,10 +116,16 @@ messages(id [auto-inc], room_id, author_key_id, ts, content_type,
 
 audit_log(id [auto-inc], ts, actor_key_id, action, room_id,
           message_id, metadata, request_id)
+
+ui_credentials(id, public_key, sign_count, transports, flags, name, created_at, last_used_at)
+ui_sessions(token_hash, created_at, last_seen_at, expires_at)
+ui_setup_tokens(token_hash, expires_at, used_at)
+  the web UI (migration 0009): passkey public keys, and the SHA-256 of
+  session and setup tokens
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0001..0008`. New migrations are added by creating
+`migrations/0001..0009`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
@@ -150,7 +158,12 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/rooms/{id}/claims/heartbeat` | Extend the caller's claims. | `claim` |
 | `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (an admin key may release another key's). | `claim` |
 | `GET` | `/v1/audit` | List audit entries. | admin |
+| `POST` | `/v1/ui/setup-tokens` | One-time token that registers the web UI's first passkey (409 once one exists). Loopback listen address only. | admin |
 | `POST` | `/v1/mcp` | MCP over HTTP; each tool calls the endpoints above with the caller's key. | any key |
+
+On a loopback listen address the server also serves the web UI
+under `/ui/` and its passkey and session endpoints under
+`/ui/auth/`; see [web-ui.md](web-ui.md).
 
 All endpoints return JSON. Errors are JSON of the form
 `{"error": {"code": "string", "message": "string",
@@ -204,6 +217,14 @@ The auth middleware (`internal/server/middleware.go`) is the
 only place that touches the hash. The rest of the codebase
 sees a `caller int64` (the `api_keys.id`) and a
 `trustOrigin string`.
+
+On a loopback listen address `/v1` (except `/v1/mcp`) also takes
+a web UI session token in the header `X-Conclave-UI`, together
+with a UI `Host` and, unless GET, the UI `Origin`. Such a request
+acts as the admin key labelled `operator` (`internal/ui`,
+[web-ui.md](web-ui.md)). The token is never a cookie: browsers
+send `localhost` cookies to every port, so the page holds it in
+memory only.
 
 The first API key on a fresh install is created with
 `admin keys create-bootstrap`, which mints the plaintext,
@@ -365,5 +386,6 @@ mirrored, open an issue.
 * [docs/cli-reference.md](cli-reference.md) — every CLI command.
 * [docs/agent-integration.md](agent-integration.md) — wiring an agent.
 * [docs/trust-model.md](trust-model.md) — internal vs external semantics.
+* [docs/web-ui.md](web-ui.md) — the web admin UI.
 * [docs/runbook.md](runbook.md) — operator runbook.
 * [docs/adr/](adr/) — Architecture Decision Records.
