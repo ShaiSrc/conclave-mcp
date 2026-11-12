@@ -49,7 +49,8 @@ Five primitives:
 * **API keys** with a `trust_origin` of `internal` or
   `external`. Internal keys are your own agents or trusted
   partners; external keys are invited collaborators.
-* **Rooms** with member roles: `owner`, `writer`, `reader`.
+* **Rooms** whose members hold rights (`read`, `claim`, one per
+  message type), given by the admin key.
 * **Messages** in a room. The author's `trust_origin` is
   denormalised onto the message at send time, so a reader
   can see who said what without re-resolving the key.
