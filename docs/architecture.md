@@ -219,10 +219,12 @@ sees a `caller int64` (the `api_keys.id`) and a
 `trustOrigin string`.
 
 On a loopback listen address `/v1` (except `/v1/mcp`) also takes
-the web UI's session cookie `conclave_ui`, together with the
-header `X-Conclave-UI: 1`, a UI `Host` and, unless GET, the UI
-`Origin`. Such a request acts as the admin key labelled
-`operator` (`internal/ui`, [web-ui.md](web-ui.md)).
+a web UI session token in the header `X-Conclave-UI`, together
+with a UI `Host` and, unless GET, the UI `Origin`. Such a request
+acts as the admin key labelled `operator` (`internal/ui`,
+[web-ui.md](web-ui.md)). The token is never a cookie: browsers
+send `localhost` cookies to every port, so the page holds it in
+memory only.
 
 The first API key on a fresh install is created with
 `admin keys create-bootstrap`, which mints the plaintext,

@@ -43,7 +43,7 @@ principal that part 2 needs.
 
 | Topic | Decision | Why |
 |---|---|---|
-| How the UI talks to the server | Static HTML/CSS/JS embedded in the binary calls the existing `/v1` API with a session cookie. | Parity with the CLI for free: every endpoint the CLI uses already exists and is already permission-checked. No second implementation of any rule. |
+| How the UI talks to the server | Static HTML/CSS/JS embedded in the binary calls the existing `/v1` API with a session token in the `X-Conclave-UI` header. | Parity with the CLI for free: every endpoint the CLI uses already exists and is already permission-checked. No second implementation of any rule. |
 | Frontend | Vanilla JS, no framework, no build step, embedded with `embed.FS`. | Small UI, single operator; nothing to install or keep updated. |
 | Login | Passkeys only (WebAuthn), user verification required, attestation none, discoverable credentials. | No secret an agent can read; Touch ID needs physical presence. |
 | Server library | `github.com/go-webauthn/webauthn` v0.17.4. | The standard Go implementation; v0.17.4 is the newest release that builds with Go 1.25 (v0.18 needs Go 1.26). Hand-rolling CBOR/COSE parsing is not an option. |
@@ -52,11 +52,11 @@ principal that part 2 needs.
 | Trust anchor for registration | The first passkey can only be registered with a one-time setup token while no passkey exists. Later passkeys are added from a logged-in session. | Software authenticators can register too, so the ceremony is the only anchor. Once the operator has a passkey, an agent holding the admin key can no longer add its own. |
 | Setup token | `conclave-mcp ui setup` (needs an admin key, server running) asks the server for a token valid 10 minutes and prints `http://localhost:<port>/ui/#setup=<token>`. | The fragment never reaches server logs or proxies. |
 | Losing all passkeys | `conclave-mcp admin ui-reset` (offline, service stopped) deletes all passkeys and sessions and writes an audit entry; then `ui setup` again. | Same model as `create-bootstrap`: whoever can stop the service and write the database file is already the operator. |
-| Session | 32 random bytes; the database stores only the SHA-256 hash. Cookie `conclave_ui`: `HttpOnly`, `SameSite=Strict`, `Path=/`, no `Secure` (Safari rejects `Secure` cookies on `http://localhost`). Idle timeout 1 hour, absolute 12 hours. Logout deletes the row. | Server-side sessions can be revoked; hashing means a database read does not yield a usable cookie. |
-| CSRF and DNS rebinding | Cookie sessions are accepted on `/v1` only with header `X-Conclave-UI: 1`; non-GET requests also need `Origin` equal to the UI origin. Every `/ui` and cookie-authenticated `/v1` request needs `Host` to be `localhost:<port>` or `127.0.0.1:<port>`. | A custom header cannot be sent cross-site without CORS, which the server does not allow; the Host check stops a rebinding site from reaching the loopback server. |
+| Session | 32 random bytes; the database stores only the SHA-256 hash. `login/finish` and the first `register/finish` return it as `{"session": "<token>"}`. The page keeps it in a JavaScript variable only and sends it as `X-Conclave-UI: <token>`; there is no session cookie, and none is read. Each tab logs in on its own; a reload needs a passkey login. Idle timeout 1 hour, absolute 12 hours. Logout deletes the row. | Browsers send cookies for `localhost` to every port on `localhost` (RFC 6265 §8.5; `SameSite` ignores ports), so any local process listening on another port could collect a cookie and replay it. `localStorage` and `sessionStorage` are kept unencrypted in the browser profile on disk, readable by any process of the same user. Server-side sessions can be revoked; hashing means a database read does not yield a usable token. |
+| CSRF and DNS rebinding | Sessions are accepted on `/v1` only as the `X-Conclave-UI` header; non-GET requests also need `Origin` equal to the UI origin. Every `/ui` and session-authenticated `/v1` request needs `Host` to be `localhost:<port>` or `127.0.0.1:<port>`. | No credential is sent automatically, so a cross-site request carries none; a site cannot set the header cross-origin without CORS, which the server does not allow. The Host check stops a rebinding site from reaching the loopback server. |
 | Content safety | Strict CSP (`default-src 'self'`, no inline script or style, `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. The JS only ever sets `textContent`, never `innerHTML` with data. | Message content and labels come from agents, some external; they must never become markup. |
-| Live updates | The UI reads `/v1/rooms/{id}/events` with `fetch` streaming (so it can send the header), not `EventSource`. | Keeps one rule: no cookie-only access to `/v1`. |
-| When the UI is served | Only when the server listens on a loopback address; otherwise `/ui` returns 404 and cookie auth is off. | See remote access above. |
+| Live updates | The UI reads `/v1/rooms/{id}/events` with `fetch` streaming (so it can send the header), not `EventSource`. | `EventSource` cannot send headers; the token travels only in the header. |
+| When the UI is served | Only when the server listens on a loopback address; otherwise `/ui` returns 404 and UI sessions count for nothing. | See remote access above. |
 
 ## Server changes
 
@@ -97,10 +97,12 @@ registration. The WebAuthn user handle is a fixed random value stored in
 - `auth.go`: the WebAuthn ceremonies and session handling:
   - `POST /ui/auth/register/begin` and `/finish`: needs a valid setup token
     while no credential exists, or a valid session; the first registration
-    creates the `operator` key and logs the operator in.
+    creates the `operator` key and logs the operator in (the response
+    carries `session`).
   - `POST /ui/auth/login/begin` and `/finish`: discoverable login (no user
-    name); on success a session cookie is set.
+    name); on success the response is `{"session": "<token>"}`.
   - `POST /ui/auth/logout`.
+  - Endpoints that need a session read it from `X-Conclave-UI`.
   - `GET /ui/auth/state`: `{setup_needed, logged_in}`, for the start page.
   - Ceremony data between begin and finish stays in memory, keyed by a
     random cookie, valid 5 minutes.
@@ -109,9 +111,10 @@ registration. The WebAuthn user handle is a fixed random value stored in
   `DELETE /ui/auth/credentials/{id}` (not the last one).
 
 **`/v1` auth:** the verifier middleware accepts, in addition to the Bearer
-key, a `conclave_ui` session cookie when the request carries
-`X-Conclave-UI: 1`, passes the Host check, and (non-GET) the Origin check.
-Such a request gets the claims of the `operator` key. Nothing else in `/v1`
+key (which wins when both are sent), a session token in `X-Conclave-UI`
+when the request passes the Host check and (non-GET) the Origin check.
+Such a request gets the claims of the `operator` key. No cookie counts
+as a session. Nothing else in `/v1`
 changes. New admin-only endpoint `POST /v1/ui/setup-tokens` returns
 `{token, expires_at}`; `GET /v1/ui/setup-tokens` is not offered.
 
@@ -142,17 +145,18 @@ with their code and message.
 ## Testing
 
 - **Unit (Go):** session create/lookup/expiry; Host, Origin and header checks
-  (cookie without header is 401, wrong Origin 403, wrong Host 403); the
+  (no header 401, a valid token only as a cookie 401 and not logged in,
+  wrong Origin 403, wrong Host 403); the
   registration gate (setup token only while no credential exists; session
   otherwise; token single-use and expiring); setup-token endpoint admin-only;
   last passkey cannot be removed; UI disabled on non-loopback listen
   addresses; CSP and headers on `/ui`.
 - **Ceremonies end to end in Go** with a software authenticator in tests
   (`github.com/descope/virtualwebauthn`, test-only): setup → register →
-  login → `/v1` call with the cookie as `operator` → logout.
-- **e2e:** the real binary serves `/ui/` and the assets; a cookie session
-  reaches an admin endpoint; a forged cross-site request (wrong Origin, no
-  header) is refused.
+  login → `/v1` call with the session token as `operator` → logout.
+- **e2e:** the real binary serves `/ui/` and the assets; the token from the
+  finish response reaches an admin endpoint; a forged request (wrong
+  Origin, no header, the token only as a cookie) is refused.
 - **Browser smoke test** in the built-in browser: start page, setup page
   rendering, CSP has no violations in the console. The Touch ID step itself
   is checked by hand once.

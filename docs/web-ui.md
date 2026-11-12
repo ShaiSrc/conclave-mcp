@@ -14,7 +14,7 @@ file or a key store.
 
 - The server listens on a loopback address: `--host 127.0.0.1` (the
   default), `localhost` or `::1`. On any other address `/ui` answers 404
-  and the session cookie counts for nothing: passkeys need a secure
+  and UI sessions count for nothing: passkeys need a secure
   context, and plain HTTP is one only on `localhost`.
 - A current browser on the same machine. The passkey JSON helpers need
   Safari 18.4, Chrome 129 or Firefox 119, or newer.
@@ -35,6 +35,10 @@ file or a key store.
 3. Later, open `http://localhost:7432/ui/` and log in with the passkey.
    `http://127.0.0.1:7432/ui/` redirects there: a passkey belongs to
    `localhost`, and an IP address cannot hold one.
+
+Each browser tab logs in on its own, and reloading a page asks for the
+passkey again: the session lives only in the open page (see Session
+below).
 
 If an active admin key labelled `operator` exists that setup did not
 create, registering the passkey fails with 409 and the setup link is then
@@ -71,8 +75,8 @@ the service and write the database file is the operator already, as with
 | Who the UI acts as | An admin key labelled `operator`, created by the first registration. The UI knows it by its id, kept in the `meta` table (`ui_operator_key_id`), not by its label. Its secret is random and never shown or stored in plain text, so only UI sessions act as it. An agent holding the admin key already has every right the operator key has: the UI does not protect against that, it only keeps such an agent from getting its own UI login. The audit log shows UI actions as `operator`, apart from CLI use of the bootstrap admin key. |
 | Trust anchor | The first passkey needs a setup token (10 minutes, single use) and is accepted only while no passkey exists. Later passkeys can only be added from a logged-in session, so an agent holding the admin key cannot add its own. `POST /v1/ui/setup-tokens` answers 409 once a passkey exists. |
 | Passkeys | WebAuthn with user verification required, discoverable credentials, no attestation. The server stores public keys only. A failed registration or login answers `passkey not accepted` and is audited with the reason. A login whose sign counter went backwards (a possible cloned passkey) is refused and audited. At most 64 ceremonies are open at once; more get 503. |
-| Session | Cookie `conclave_ui`: 32 random bytes, `HttpOnly`, `SameSite=Strict`, `Path=/`, not `Secure` (Safari rejects `Secure` cookies on `http://localhost`). The database keeps only its SHA-256. A session ends after 1 hour without use and 12 hours after login; logout deletes it. |
-| `/v1` with the cookie | Accepted only with the header `X-Conclave-UI: 1` (a site cannot send it cross-origin without CORS, which the server does not allow), a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (against DNS rebinding) and, for anything but GET, the `Origin` `http://localhost:<port>`. `/v1/mcp` takes bearer keys only. |
+| Session | A token of 32 random bytes, returned by the passkey login (and the first registration). The page keeps it in memory only and sends it in the header `X-Conclave-UI`. It is not a cookie: browsers send `localhost` cookies to every port on `localhost`, so any local program listening on another port could collect one. It is not in `localStorage` or `sessionStorage` either: browsers keep those unencrypted on disk, readable by any program of the same user. Hence a reload or a new tab needs a passkey login. The database keeps only the token's SHA-256. A session ends after 1 hour without use and 12 hours after login; logout deletes it. |
+| `/v1` with a session | Accepted only with the token in `X-Conclave-UI` (a site cannot send it cross-origin without CORS, which the server does not allow, nor does it know the token), a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (against DNS rebinding) and, for anything but GET, the `Origin` `http://localhost:<port>`. No cookie counts as a session. `/v1/mcp` takes bearer keys only. |
 | `/ui` requests | A foreign `Host` gets 403. Every non-GET request needs the exact `Origin`. Bodies are capped at 64 KiB. |
 | Pages | Every `/ui` response, 404 and 405 included, carries `Content-Security-Policy: default-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The scripts put message text, labels and every other value into the page as text, never as markup. External messages appear in a marked block between `--- external content from <label> ---` and `--- end of external content ---`, as in the CLI. |
 | Revoking `operator` | Locks the UI out of `/v1` at once. To use the UI again: `admin ui-reset` (it renames the revoked key, so the next setup creates a fresh one), then `ui setup`. |
