@@ -90,7 +90,7 @@ answer; `Cancel reply` clears it. Archived rooms have no form.
   was sent outside it, for example with `conclave-mcp watch` in a
   terminal.
 - `begin` does not check the type or the room. Such errors show after
-  the passkey prompt. A message over the size limit is refused before
+  the passkey prompt. A message over 64 KiB is refused before
   it.
 - The `/ui` body cap of 64 KiB limits a message from the UI to just
   under 64 KiB.
@@ -133,7 +133,7 @@ mark:
 | `ui.passkey.add` | A passkey was registered (`via`: `setup_token` or `session`), or a registration was rejected (result `error:rejected`). |
 | `ui.passkey.remove` | A passkey was removed. |
 | `ui.login`, `ui.logout` | A session started or ended. A rejected login or a clone warning is a `ui.login` entry with an `error:` result and the reason. |
-| `message.send` | An operator message was sent (`"operator":true` in the detail), or a confirmation was rejected (result `error:rejected`, with the reason). |
+| `message.send` | An operator message was sent (`"operator":true` in the detail), or a confirmation was refused: `error:rejected` (with the reason), `error:clone_warning` (the sign counter went backwards) or `error:other_session` (finish from another session than begin). |
 | `ui.reset` | `admin ui-reset` ran (how many passkeys and sessions it removed). |
 
 ## Not in the UI
