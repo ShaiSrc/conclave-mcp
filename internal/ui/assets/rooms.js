@@ -34,20 +34,25 @@ function unanswered(msgs) {
 const extMark = trust => trust === 'external' ? h('span', { class: 'ext' }, 'EXTERNAL') : '';
 
 export async function roomsPage(view) {
+  // GET /v1/rooms lists active rooms only. Per room just the last 24 h,
+  // one page; a room that fails shows its error in its row.
   const rooms = (await api('GET', '/v1/rooms')).rooms || [];
-  const dayAgo = Date.now() - 24 * 3600 * 1000;
+  const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
   const rows = await Promise.all(rooms.map(async r => {
-    const msgs = await listMessages(r.id);
-    const open = unanswered(msgs).filter(m => Date.parse(m.ts) > dayAgo).length;
-    return h('tr', {},
-      h('td', {}, h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name)),
-      h('td', {}, String(open)),
-      h('td', {}, msgs.length ? when(msgs[msgs.length - 1].ts) : 'no messages'));
+    const link = h('td', {}, h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name));
+    try {
+      const msgs = (await api('GET', `/v1/rooms/${encodeURIComponent(r.id)}/messages?limit=${PAGE}&since=${encodeURIComponent(since)}`)).messages || [];
+      return h('tr', {}, link, h('td', {}, String(unanswered(msgs).length)),
+        h('td', {}, msgs.length ? when(msgs[msgs.length - 1].ts) : 'none in 24 h'));
+    } catch (err) {
+      if (err.status === 401) throw err;
+      return h('tr', {}, link, h('td', { colspan: 2 }, errorBox(err)));
+    }
   }));
   const name = h('input', { required: true, maxlength: 128 });
   const msg = h('div');
   view.replaceChildren(h('h1', {}, 'Rooms'),
-    rooms.length ? table(['Room', 'Open requests (24 h)', 'Last activity'], rows) : h('p', {}, 'No rooms yet.'),
+    rooms.length ? table(['Room', 'Open requests (24 h)', 'Last activity (24 h)'], rows) : h('p', {}, 'No rooms yet.'),
     h('h2', {}, 'Create a room'),
     h('form', {
       onsubmit: async e => {
@@ -76,6 +81,7 @@ export async function roomPage(view, id) {
   for (const m of await listMessages(id)) msgs.set(m.id, m);
 
   const list = h('div');
+  const live = h('p', { class: 'muted', role: 'status' });
   const requests = h('div');
   const opened = new Set(); // threads the operator expanded
 
@@ -145,14 +151,14 @@ export async function roomPage(view, id) {
     h('h1', {}, room.name),
     room.archived_at ? h('p', { class: 'muted' }, 'Archived ' + when(room.archived_at)) : '',
     h('h2', {}, 'Open requests'), requests,
-    h('h2', {}, 'Messages'), list,
+    h('h2', {}, 'Messages'), live, list,
     h('h2', {}, 'Active claims'), claimsTable(held.claims || []),
     h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys),
     room.archived_at ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
       await api('POST', base + '/archive');
       location.hash = '#/';
     })));
-  return room.archived_at ? null : follow(base, id, msgs, draw);
+  return room.archived_at ? null : follow(base, id, msgs, draw, live);
 }
 
 function claimsTable(claims) {
@@ -172,8 +178,10 @@ function membersSection(base, members, keys) {
         h('button', {
           onclick: async () => {
             msg.replaceChildren();
+            const rights = picker.value();
+            if (!rights.length && !confirm(`Save no rights for ${m.label}? This removes all its rights in this room.`)) return;
             try {
-              await api('PATCH', `${base}/members/${m.key_id}`, { rights: picker.value() });
+              await api('PATCH', `${base}/members/${m.key_id}`, { rights });
               msg.replaceChildren('Saved.');
             } catch (err) {
               if (err.status === 401) rerender();
@@ -214,16 +222,26 @@ function membersSection(base, members, keys) {
 }
 
 // follow reads the room's event stream with fetch (EventSource cannot
-// send the X-Conclave-UI header) and reconnects until stopped. On every
-// (re)connect it loads what arrived while it was not listening.
-function follow(base, id, msgs, draw) {
+// send the X-Conclave-UI header) and reconnects until stopped, with
+// backoff (1 s doubling to 30 s, reset by any event). An event is only a
+// trigger: each one re-lists the messages after the newest known, so
+// events dropped for a slow reader are recovered too.
+function follow(base, id, msgs, draw, note) {
   const stop = new AbortController();
-  const add = list => { for (const m of list) msgs.set(m.id, m); draw(); };
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  const sync = async () => {
+    const last = [...msgs.values()].reduce((ts, m) => (m.ts > ts ? m.ts : ts), '');
+    for (const m of await listMessages(id, last)) msgs.set(m.id, m);
+    draw();
+  };
   (async () => {
+    let delay = 1000;
     while (!stop.signal.aborted) {
       try {
         const res = await fetch(base + '/events?wait=300', { headers: { 'X-Conclave-UI': '1' }, signal: stop.signal });
-        if (!res.ok) return; // logged out (401) or archived (410)
+        if (res.status === 401) return rerender(); // the session ended
+        if (res.status === 404 || res.status === 410) return; // gone or archived
+        if (!res.ok) throw new Error('status ' + res.status);
         const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
         let buf = '';
         for (;;) {
@@ -234,19 +252,21 @@ function follow(base, id, msgs, draw) {
           while ((end = buf.indexOf('\n\n')) >= 0) {
             const event = buf.slice(0, end);
             buf = buf.slice(end + 2);
-            if (event.startsWith(': ok')) { // subscribed: catch up
-              const last = [...msgs.values()].reduce((ts, m) => (m.ts > ts ? m.ts : ts), '');
-              add(await listMessages(id, last));
-            } else if (event.startsWith('event: message.created')) {
-              const data = event.split('\n').find(l => l.startsWith('data: '));
-              if (data) add([JSON.parse(data.slice(6))]);
+            if (event.startsWith(': ok') || event.startsWith('event: message.created')) {
+              delay = 1000;
+              note.replaceChildren();
+              await sync(); // ': ok' catches up on what arrived before subscribing
             }
           }
         }
-      } catch {
+      } catch (err) {
         if (stop.signal.aborted) return;
-        await new Promise(r => setTimeout(r, 3000));
+        if (err.status === 401) return rerender();
+        note.replaceChildren('Live updates stopped — retrying');
       }
+      if (stop.signal.aborted) return;
+      await sleep(delay);
+      delay = Math.min(delay * 2, 30000);
     }
   })();
   return () => stop.abort();

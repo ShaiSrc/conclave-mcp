@@ -28,7 +28,9 @@ async function login() {
 
 // action makes a click handler that shows errors in msg. While fn runs
 // the button is disabled (no second run) and status, if given, is shown.
-function action(msg, fn, status = '') {
+// A 401 means the session ended (show the login page) unless loggedIn is
+// false: on the login and setup pages it is just a rejected passkey.
+function action(msg, fn, status = '', loggedIn = true) {
   return async e => {
     const btn = e.currentTarget;
     btn.disabled = true;
@@ -37,7 +39,7 @@ function action(msg, fn, status = '') {
       await fn();
       msg.replaceChildren();
     } catch (err) {
-      if (err.status === 401) render(); // the session ended: show the login page
+      if (loggedIn && err.status === 401) render(); // the session ended: show the login page
       else msg.replaceChildren(errorBox(err));
     } finally {
       btn.disabled = false;
@@ -57,7 +59,7 @@ function loginPage(view, state) {
   }
   const msg = h('div');
   view.replaceChildren(h('h1', {}, 'Log in'),
-    h('button', { onclick: action(msg, async () => { await login(); await render(); }, WAITING) }, 'Log in with a passkey'),
+    h('button', { onclick: action(msg, async () => { await login(); await render(); }, WAITING, false) }, 'Log in with a passkey'),
     msg);
 }
 
@@ -72,7 +74,7 @@ function setupPage(view, token) {
         await registerPasskey(name.value, token);
         history.replaceState(null, '', '#/'); // drop the used token from the address bar
         await render();
-      }, WAITING),
+      }, WAITING, false),
     }, 'Register passkey'),
     msg);
 }
