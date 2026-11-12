@@ -43,7 +43,7 @@ func Thread(msgs []Msg, id int64) []Msg {
 func FormatThread(room string, msgs []Msg, labels map[int64]string, self int64) string {
 	var b strings.Builder
 	writeNote(&b, msgs)
-	fmt.Fprintf(&b, "Conclave room %s, thread #%d: %d message(s). %s\n", room, msgs[0].ID, len(msgs), dataSentence(msgs))
+	fmt.Fprintf(&b, "Conclave room %s, thread #%d: %d message(s). %s\n", OneLine(room), msgs[0].ID, len(msgs), dataSentence(msgs))
 	for _, m := range msgs {
 		writeMsg(&b, m, labels, self, 0)
 	}

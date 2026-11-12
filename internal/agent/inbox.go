@@ -254,7 +254,9 @@ func FormatBody(room string, msgs []Msg, labels map[int64]string) string {
 	if HasOperator(msgs) {
 		from = "" // one of them is the operator's
 	}
-	fmt.Fprintf(&b, "Conclave room %s: %d new message(s)%s. %s\n", room, len(msgs), from, dataSentence(msgs))
+	// OneLine: the room name comes from the repository's config, which an
+	// agent can edit; it must not start a line of its own.
+	fmt.Fprintf(&b, "Conclave room %s: %d new message(s)%s. %s\n", OneLine(room), len(msgs), from, dataSentence(msgs))
 	for _, m := range msgs {
 		writeMsg(&b, m, labels, 0, maxRunes)
 	}
