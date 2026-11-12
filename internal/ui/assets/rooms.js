@@ -79,11 +79,15 @@ export async function roomsPage(view) {
   // Not awaited: the router shows the page now and each row fills as its
   // summary arrives (rows of a page left meanwhile are detached, so harmless).
   // fill shows other errors in its row; a 401 sends the router to the login page.
-  // Once the operator leaves the page (the route changes), no new summary
-  // requests start; those already in flight finish into detached rows.
-  const route = location.hash;
-  mapLimit(rooms.map((_, i) => i), i => (location.hash === route ? fill(rooms[i], i) : null))
-    .catch(err => { if (err.status === 401) rerender(); });
+  // Start one tick later, after the router has attached this view (it only
+  // does so for the newest render). From then on a summary request starts
+  // only while this very view is on screen: a stale render, leaving the
+  // page, or leaving and coming back (a new view) all detach it for good.
+  // Requests already in flight finish into detached rows.
+  setTimeout(() => {
+    mapLimit(rooms.map((_, i) => i), i => (view.isConnected ? fill(rooms[i], i) : null))
+      .catch(err => { if (err.status === 401) rerender(); });
+  }, 0);
 }
 
 export async function roomPage(view, id) {
