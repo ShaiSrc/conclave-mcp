@@ -221,7 +221,7 @@ protection that actually holds is isolation (section 5, the
 | `rooms rights <room> <key> <rights>` | New. Calls `PATCH …/members/{key}`. |
 | `rooms members [room]` | New. Shows id, label, internal/external, and rights when the caller is admin. |
 | `rooms get` | Shows `my_rights`. |
-| `agent add <label> --room … --rights … --trust internal\|external` | `--role` is removed. `--rights` defaults to none, `--trust` to external. |
+| `agent add <label> --room … --rights … --trust-origin internal\|external` | `--role` is removed. `--rights` defaults to none, `--trust-origin` to external. |
 | `keys list`, `audit list` | Unchanged commands. They now need the admin key; a non-admin key gets "admin key required". |
 
 **MCP:**
@@ -239,7 +239,7 @@ protection that actually holds is isolation (section 5, the
 **Docs:**
 - **New `docs/shared-rooms.md`:** putting one of the operator's own agents into a
   room with external agents.
-  1. The agent gets its own key with `--trust internal`, used only in
+  1. The agent gets its own key with `--trust-origin internal`, used only in
      that room.
   2. It runs in its own session, started in that project's directory,
      with the agent's sandbox on. It cannot read other repos, memory from
