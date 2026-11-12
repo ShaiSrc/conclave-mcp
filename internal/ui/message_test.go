@@ -106,6 +106,10 @@ func TestMessage_BeginNeedsSessionOriginAndRoom(t *testing.T) {
 	if st, body := b.do("POST", "/ui/auth/message/begin", map[string]any{"content": "x"}); st != http.StatusBadRequest || !strings.Contains(string(body), `"room_id is required"`) {
 		t.Errorf("begin without room_id: %d %s, want 400", st, body)
 	}
+	big := map[string]any{"room_id": "r1", "content": strings.Repeat("x", 70000)}
+	if st, body := b.do("POST", "/ui/auth/message/begin", big); st != http.StatusRequestEntityTooLarge || !strings.Contains(string(body), "at most 64 KiB") {
+		t.Errorf("begin with an oversized message: %d %s, want 413", st, body)
+	}
 	if f.calls != 0 {
 		t.Errorf("send called %d times", f.calls)
 	}
@@ -130,7 +134,7 @@ func TestMessage_WithoutUserVerificationRejected(t *testing.T) {
 // Every refused finish posts nothing; the ceremony is used up by the
 // first finish, refused or not.
 func TestMessage_FinishRefusals(t *testing.T) {
-	_, f, b, pk, base := newMessageUI(t)
+	s, f, b, pk, base := newMessageUI(t)
 	other := newBrowser(t, base)
 	if st, body := pk.login(other); st != http.StatusOK {
 		t.Fatalf("second session: %d %s", st, body)
@@ -159,6 +163,10 @@ func TestMessage_FinishRefusals(t *testing.T) {
 	st, body := finish()
 	b.session = own
 	refused("finish from another session", st, body, http.StatusForbidden, "this confirmation was started in another session")
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM audit WHERE action = 'message.send' AND result = 'error:other_session'`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("audit of the cross-session finish: %d (%v), want 1", n, err)
+	}
 	b.cookies[ceremonyCookie] = &ck
 	st, body = finish()
 	refused("retry after the refusal", st, body, http.StatusBadRequest, noCeremony)
@@ -179,6 +187,14 @@ func TestMessage_FinishRefusals(t *testing.T) {
 	}
 	st, body = pk.finishAssertion(b, "message", opts)
 	refused("message finish with a login ceremony", st, body, http.StatusBadRequest, noCeremony)
+
+	// A message ceremony does not log in.
+	opts, st, body = pk.beginAssertion(b, "message", msg)
+	if opts == nil {
+		t.Fatalf("message begin: %d %s", st, body)
+	}
+	st, body = pk.finishAssertion(b, "login", opts)
+	refused("login finish with a message ceremony", st, body, http.StatusBadRequest, "no login in progress, or it took longer than 5 minutes")
 
 	// The session that began it ended.
 	_, finish = begin()

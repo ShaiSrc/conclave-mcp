@@ -8,22 +8,30 @@ Status: decided (2026-11-12). Builds on part 1
 The operator writes to a room from the web UI: answers questions, makes
 decisions, gives approvals. Every agent in the room can tell such a
 message apart from anything an agent wrote, and no agent can produce
-one, not even an agent that holds the admin key or drives the
-operator's browser.
+one on its own, not even an agent that holds the admin key or drives
+the operator's browser: every operator message needs the operator's
+touch on the authenticator.
 
 ## Threats
 
 | Who | What they could try | Stopped by |
 |---|---|---|
-| Any member agent | Write text that looks like an operator message (in content, metadata or a reply) | The mark is a server-set field; text renderings put it where no content, metadata or label can reach (start of a line). |
+| Any member agent | Write text that looks like an operator message (in content, metadata, a reply or a claim path) | The mark is a server-set field; text renderings put it where no content, metadata, label or claim path can reach (start of a line). Claim lines in the SessionStart output start with `- claim `. |
 | An agent holding the admin key | Create a key with a label that imitates the mark, post as admin | The admin key is not the operator key; labels never reach the line start. |
 | An agent that drives the operator's browser (browser automation, a script in the page's tab) | Use the logged-in tab's session to post as the operator | Every operator message needs its own passkey assertion with user verification (Touch ID). A session alone cannot post messages. |
 | A local program on another `localhost` port | Collect the ceremony cookie | It cannot finish the ceremony: finish needs the session token of the tab that began it and the operator's authenticator. |
 
-Out of scope: an operator who confirms a Touch ID prompt they did not
-start. The prompt does not show the message (browsers do not offer
-that), so the page says what will be sent, and the docs say to confirm
-only prompts you started.
+Not stopped: an agent that drives the browser while the operator sends
+a message there can replace the text between what the page shows and
+what `begin` stores, or start a prompt of its own. The Touch ID prompt
+does not show the message (browsers do not offer that). The docs say:
+confirm only prompts you started, do not send operator messages while
+an agent drives the browser, and check what was sent outside the
+browser (`conclave-mcp watch` in a terminal).
+
+`status` is a summary for people: its `[OPERATOR]` column can be
+imitated by a label or claim path. The agent-facing renderings above
+carry the guarantee.
 
 ## Decisions
 

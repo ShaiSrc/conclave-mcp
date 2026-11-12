@@ -583,7 +583,8 @@ func TestMessages_OperatorMark(t *testing.T) {
 	db := setupDB(t)
 	id := seedKey(t, db, "op")
 	roomID := seedRoom(t, db, id, "opmark")
-	svc := NewService(db, 262144, nil)
+	pub := &capBroker{}
+	svc := NewService(db, 262144, pub)
 	withClaims := func(scopes ...string) func(*http.Request) *http.Request {
 		return func(req *http.Request) *http.Request {
 			return req.WithContext(context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: id, Scopes: scopes}))
@@ -603,6 +604,9 @@ func TestMessages_OperatorMark(t *testing.T) {
 	}
 	if operatorCount() != 1 {
 		t.Fatalf("operator rows = %d, want 1", operatorCount())
+	}
+	if len(pub.payloads) != 1 || !strings.Contains(pub.payloads[0], `"operator":true`) {
+		t.Errorf("live event lacks the mark: %q", pub.payloads)
 	}
 	var detail string
 	if err := db.QueryRow(`SELECT detail FROM audit WHERE action = 'message.send'`).Scan(&detail); err != nil || !strings.Contains(detail, `"operator":true`) {
@@ -640,4 +644,12 @@ func TestMessages_OperatorMark(t *testing.T) {
 	if n != 2 {
 		t.Errorf("messages stored = %d, want 2", n)
 	}
+}
+
+// capBroker records published payloads.
+type capBroker struct{ payloads []string }
+
+func (b *capBroker) Publish(_ string, payload []byte) int {
+	b.payloads = append(b.payloads, string(payload))
+	return 1
 }

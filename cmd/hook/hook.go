@@ -313,13 +313,15 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 		b.WriteString(agent.OperatorNote + "\n")
 	}
 	fmt.Fprintf(&b, "Conclave: you are %s in room %s (room_id %s); use this room_id with the conclave tools.\n",
-		me.Label, repo.RoomName(), st.RoomID)
+		agent.OneLine(me.Label), agent.OneLine(repo.RoomName()), st.RoomID)
 	if len(held.Claims) == 0 {
 		b.WriteString("No active claims.\n")
 	} else {
 		b.WriteString("Active claims (do not edit paths others hold):\n")
 		for _, c := range held.Claims {
-			fmt.Fprintf(&b, "- %s: %s", agent.OneLine(c.Path), agent.OneLine(c.Label))
+			// "- claim " first: a path must not be able to start the line
+			// (it could imitate a message or the operator mark).
+			fmt.Fprintf(&b, "- claim %s: %s", agent.OneLine(c.Path), agent.OneLine(c.Label))
 			if c.TrustOrigin == "external" {
 				b.WriteString(" (EXTERNAL, untrusted)")
 			}

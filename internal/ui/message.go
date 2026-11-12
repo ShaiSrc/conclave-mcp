@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 
@@ -27,6 +28,11 @@ func (s *Service) messageBegin(w http.ResponseWriter, r *http.Request) {
 		ReplyTo     *int64 `json:"reply_to"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeErr(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "message too large: the web UI sends at most 64 KiB")
+			return
+		}
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
 		return
 	}
@@ -77,6 +83,7 @@ func (s *Service) messageFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hashToken(token) != c.session {
+		s.auditFail(ctx, "message.send", "error:other_session", "finish from another session than begin")
 		writeErr(w, r, http.StatusForbidden, "forbidden", "this confirmation was started in another session")
 		return
 	}

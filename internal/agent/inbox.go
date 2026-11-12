@@ -331,6 +331,10 @@ func writeMsg(b *strings.Builder, m Msg, labels map[int64]string, self int64, li
 		if json.Compact(&meta, metadata) != nil { // one line, no injected newlines
 			meta.Reset()
 		}
+		// Compact keeps U+2028/U+2029 raw; escape them as JSON does.
+		escaped := strings.NewReplacer("\u2028", `\u2028`, "\u2029", `\u2029`).Replace(meta.String())
+		meta.Reset()
+		meta.WriteString(escaped)
 	}
 	if meta.Len() > 0 && !external { // external metadata goes inside the fence
 		fmt.Fprintf(b, " %s", meta.Bytes())
