@@ -1,5 +1,5 @@
 // Keys (create, create an agent, revoke) and the audit log.
-import { h, api, errorBox, confirmButton, table, when, rerender, rightsPicker, showSecret } from './lib.js';
+import { h, api, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, showSecret } from './lib.js';
 
 function trustSelect() {
   return h('select', {},
@@ -21,11 +21,17 @@ export async function keysPage(view) {
   const allKeys = keys.keys || [];
   const allRooms = rooms.rooms || [];
   const inRooms = new Map(); // key id -> names of its (active) rooms
-  await Promise.all(allRooms.map(async r => {
-    for (const m of (await api('GET', `/v1/rooms/${encodeURIComponent(r.id)}/members`)).members || []) {
-      inRooms.set(m.key_id, [...(inRooms.get(m.key_id) || []), r.name]);
+  const unread = []; // an error per room whose members could not be read
+  await mapLimit(allRooms, async r => {
+    try {
+      for (const m of (await api('GET', `/v1/rooms/${encodeURIComponent(r.id)}/members`)).members || []) {
+        inRooms.set(m.key_id, [...(inRooms.get(m.key_id) || []), r.name]);
+      }
+    } catch (err) {
+      if (err.status === 401) throw err; // the session ended: show the login page
+      unread.push(errorBox(`Members of room ${r.name} not loaded, so the Rooms column may miss it: ${err.message}`));
     }
-  }));
+  });
 
   const rows = allKeys.map(k => h('tr', {},
     h('td', {}, String(k.id)), h('td', {}, k.label), h('td', {}, k.trust_origin),
@@ -71,7 +77,7 @@ export async function keysPage(view) {
   }, h('label', {}, 'Label ', agent), h('label', {}, 'Trust ', agentTrust), h('label', {}, 'Room ', room),
   rights.el, h('button', {}, 'Create agent'));
 
-  view.replaceChildren(h('h1', {}, 'Keys'),
+  view.replaceChildren(h('h1', {}, 'Keys'), ...unread,
     table(['Id', 'Label', 'Trust', 'Rooms', 'Created', 'Revoked', ''], rows),
     h('h2', {}, 'Create a key'), keyForm, keyMsg,
     h('h2', {}, 'Create an agent'),

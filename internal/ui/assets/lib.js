@@ -58,7 +58,14 @@ export async function api(method, path, body) {
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch(path, opts);
+  let res;
+  for (let tries = 0; ; tries++) {
+    res = await fetch(path, opts);
+    // The rate limit (burst 30, then 10 a second) can refuse a page that
+    // reads many rooms: wait as the server says and try again, 3 times.
+    if (res.status !== 429 || tries === 3) break;
+    await new Promise(r => setTimeout(r, 1000 * (Number(res.headers.get('Retry-After')) || 1)));
+  }
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = null; }
@@ -68,6 +75,21 @@ export async function api(method, path, body) {
       e.message || (data ? '' : text.trim().slice(0, 200)) || res.statusText || 'request failed');
   }
   return data;
+}
+
+// mapLimit runs fn on every item, at most limit at a time, and returns
+// the results in order: a page does not fire a request per room at once.
+export async function mapLimit(items, fn, limit = 4) {
+  const out = [];
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
 }
 
 // errorBox shows an error, for /v1 errors with its code and message.

@@ -1,20 +1,23 @@
 // Rooms: the list, and one room with its messages (live), open
 // requests, claims and members.
-import { h, api, authHeaders, errorBox, confirmButton, table, when, rerender, rightsPicker } from './lib.js';
+import { h, api, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker } from './lib.js';
 
 const PAGE = 500; // the server's largest message page
+const LIST_PAGES = 4; // the rooms list reads at most this many pages per room
 
-// listMessages returns a room's messages after since, oldest first.
-async function listMessages(roomID, since = '') {
+// listMessages returns a room's messages after since, oldest first: all
+// of them, or the first maxPages pages.
+async function listMessages(roomID, since = '', maxPages = Infinity) {
   const all = [];
-  for (;;) {
+  for (let i = 0; i < maxPages; i++) {
     let path = `/v1/rooms/${encodeURIComponent(roomID)}/messages?limit=${PAGE}`;
     if (since) path += '&since=' + encodeURIComponent(since);
     const page = (await api('GET', path)).messages || [];
     all.push(...page);
-    if (page.length < PAGE) return all;
+    if (page.length < PAGE) break;
     since = page[page.length - 1].ts;
   }
+  return all;
 }
 
 const replyTo = m => (m.metadata && Number(m.metadata.reply_to)) || 0;
@@ -35,20 +38,22 @@ const extMark = trust => trust === 'external' ? h('span', { class: 'ext' }, 'EXT
 
 export async function roomsPage(view) {
   // GET /v1/rooms lists active rooms only. Per room just the last 24 h,
-  // one page; a room that fails shows its error in its row.
+  // at most LIST_PAGES pages (marked when there may be more); a room that
+  // fails shows its error in its row.
   const rooms = (await api('GET', '/v1/rooms')).rooms || [];
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-  const rows = await Promise.all(rooms.map(async r => {
+  const rows = await mapLimit(rooms, async r => {
     const link = h('td', {}, h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name));
     try {
-      const msgs = (await api('GET', `/v1/rooms/${encodeURIComponent(r.id)}/messages?limit=${PAGE}&since=${encodeURIComponent(since)}`)).messages || [];
-      return h('tr', {}, link, h('td', {}, String(unanswered(msgs).length)),
-        h('td', {}, msgs.length ? when(msgs[msgs.length - 1].ts) : 'none in 24 h'));
+      const msgs = await listMessages(r.id, since, LIST_PAGES);
+      const cut = msgs.length >= PAGE * LIST_PAGES ? ` (first ${msgs.length} messages)` : '';
+      return h('tr', {}, link, h('td', {}, String(unanswered(msgs).length) + cut),
+        h('td', {}, msgs.length ? when(msgs[msgs.length - 1].ts) + (cut ? ' or later' + cut : '') : 'none in 24 h'));
     } catch (err) {
       if (err.status === 401) throw err;
       return h('tr', {}, link, h('td', { colspan: 2 }, errorBox(err)));
     }
-  }));
+  });
   const name = h('input', { required: true, maxlength: 128 });
   const msg = h('div');
   view.replaceChildren(h('h1', {}, 'Rooms'),
