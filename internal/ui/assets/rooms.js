@@ -76,8 +76,11 @@ export async function roomsPage(view) {
       },
     }, h('label', {}, 'Name ', name), h('button', {}, 'Create')),
     msg);
-  // The page is visible; now fill each room's summary (a 401 still reaches the router).
-  await mapLimit(rooms.map((_, i) => i), i => fill(rooms[i], i));
+  // Not awaited: the router shows the page now and each row fills as its
+  // summary arrives (rows of a page left meanwhile are detached, so harmless).
+  // fill shows other errors in its row; a 401 sends the router to the login page.
+  mapLimit(rooms.map((_, i) => i), i => fill(rooms[i], i))
+    .catch(err => { if (err.status === 401) rerender(); });
 }
 
 export async function roomPage(view, id) {
