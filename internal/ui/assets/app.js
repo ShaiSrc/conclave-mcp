@@ -1,6 +1,7 @@
 // The page: routing, the header, passkey login and setup, passkeys.
 import { h, api, errorBox, confirmButton, table, when } from './lib.js';
 import { roomsPage, roomPage } from './rooms.js';
+import { keysPage, auditPage } from './keys.js';
 
 const main = document.getElementById('app');
 const nav = document.getElementById('nav');
@@ -123,6 +124,8 @@ async function header() {
 const routes = [
   [/^#\/?$/, roomsPage],
   [/^#\/rooms\/([^/]+)$/, roomPage],
+  [/^#\/keys$/, keysPage],
+  [/^#\/audit$/, auditPage],
   [/^#\/passkeys$/, passkeysPage],
 ];
 

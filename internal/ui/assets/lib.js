@@ -98,3 +98,17 @@ export function rightsPicker(selected = []) {
     value: () => boxes.filter(b => b.checked).map(b => b.value),
   };
 }
+
+// showSecret replaces the page in view with a secret shown only once.
+export function showSecret(view, title, secret) {
+  const copy = h('button', {
+    onclick: async () => {
+      await navigator.clipboard.writeText(secret);
+      copy.textContent = 'Copied';
+    },
+  }, 'Copy');
+  view.replaceChildren(h('h1', {}, title),
+    h('div', { class: 'secret' }, h('pre', {}, secret), copy),
+    h('p', {}, 'Shown once: the server keeps only a hash of the key.'),
+    h('button', { onclick: rerender }, 'Done'));
+}
