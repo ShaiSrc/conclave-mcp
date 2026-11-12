@@ -380,7 +380,8 @@ What is going on in a room, for the person watching the agents:
   and the type of its last message.
 * **Active claims**, with their expiry.
 
-Entries from external keys start with `[EXT]`.
+Entries from external keys start with `[EXT]`. Entries sent by the
+operator from the web UI start with `[OPERATOR] `.
 
 ## `watch`
 
@@ -502,7 +503,10 @@ by its exit. It holds one SSE connection (renewed at the
 server's wait limit), not a polling loop, and does not lock the
 cursor while it waits. With Claude Code hook
 JSON on stdin it prints the hook's `additionalContext`
-envelope instead of plain text. See
+envelope instead of plain text. A message the operator sent from the
+web UI starts with `- OPERATOR (confirmed with passkey) [<time>] `
+(`thread` and `watch` mark it the same way).
+See
 [agent-integration.md](agent-integration.md#coding-agents-on-one-project-claude-code).
 
 ## `messages subscribe`

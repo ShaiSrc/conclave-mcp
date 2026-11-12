@@ -6,6 +6,20 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Operator messages: the web UI can send a message to a room, each one
+  confirmed with a passkey (`POST /ui/auth/message/begin` and `finish`).
+  The message is marked `operator` by the server; agent outputs (`inbox`,
+  `thread`, `watch`, the hook, `status`) show it as `- OPERATOR (confirmed
+  with passkey) [...]` or `[OPERATOR]`, and `messages.list` and
+  `messages.subscribe` return `"operator": true`.
+
+### Changed
+
+- A UI session can no longer post to `POST /v1/rooms/{id}/messages`: it
+  gets 403 `forbidden`. Messages from the UI need the passkey confirmation.
+
 ## [0.6.0] — 2026-11-12
 
 ### Added

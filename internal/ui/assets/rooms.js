@@ -1,6 +1,6 @@
 // Rooms: the list, and one room with its messages (live), open
 // requests, claims and members.
-import { h, api, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker } from './lib.js';
+import { h, api, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, action } from './lib.js';
 
 const PAGE = 500; // the server's largest message page
 const LIST_PAGES = 4; // the rooms list reads at most this many pages per room
@@ -33,6 +33,8 @@ function unanswered(msgs) {
   const requests = ['question', 'task_assignment', 'handoff', 'alert', 'decision'];
   return msgs.filter(m => requests.includes(m.message_type) && !answered.has(m.id));
 }
+
+const TYPES = ['question', 'answer', 'decision', 'handoff', 'status_update', 'task_assignment', 'alert', 'system'];
 
 const extMark = trust => trust === 'external' ? h('span', { class: 'ext' }, 'EXTERNAL') : '';
 
@@ -123,9 +125,10 @@ export async function roomPage(view, id) {
     const content = [metaText ? h('pre', { class: 'muted' }, metaText) : '', h('pre', {}, m.content)];
     return h('div', { class: 'message' },
       h('div', { class: 'meta' },
-        [`#${m.id}`, when(m.ts), who(m)].map(t => h('span', {}, t)), extMark(m.trust_origin),
+        [`#${m.id}`, when(m.ts), who(m)].map(t => h('span', {}, t)), extMark(m.trust_origin), m.operator ? h('span', { class: 'operator' }, 'operator ✓') : '',
         m.message_type && m.message_type !== 'system' ? h('span', {}, `<${m.message_type}>`) : '',
         replyTo(m) ? h('span', {}, `re #${replyTo(m)}`) : '',
+        room.archived_at ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
         confirmButton('Delete', 'Delete this message?', async () => {
           await api('DELETE', `${base}/messages/${m.id}`);
           msgs.delete(m.id);
@@ -138,6 +141,37 @@ export async function roomPage(view, id) {
           h('div', { class: 'fence' }, '--- end of external content ---'))
         : content);
   }
+
+  // The compose form: each message is confirmed with a passkey.
+  let target = 0; // the message being answered
+  const type = h('select', {}, TYPES.map(t => h('option', { value: t, selected: t === 'answer' }, t)));
+  const text = h('textarea', { rows: 4, maxlength: 60000 });
+  const replying = h('span');
+  const sendMsg = h('div');
+  function reply(id) {
+    target = id;
+    replying.replaceChildren(...(id ? [`Replying to #${id} `, h('button', { type: 'button', onclick: () => reply(0) }, 'Cancel reply')] : []));
+    if (id) text.focus();
+  }
+  const compose = room.archived_at ? '' : h('form', { onsubmit: e => e.preventDefault() },
+    h('label', {}, 'Type ', type), replying, text,
+    h('button', {
+      type: 'button',
+      onclick: action(sendMsg, async () => {
+        if (!text.value.trim()) throw new Error('Write a message first.');
+        const body = { room_id: id, content: text.value, message_type: type.value };
+        if (target) body.reply_to = target;
+        const options = await api('POST', '/ui/auth/message/begin', body);
+        const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
+        const sent = await api('POST', '/ui/auth/message/finish', cred.toJSON());
+        msgs.set(sent.id, sent);
+        text.value = '';
+        reply(0);
+        draw();
+      }, 'Waiting for your passkey…'),
+    }, 'Send — confirm with passkey'),
+    h('p', { class: 'muted' }, 'Each message needs your passkey. Only confirm a prompt you started here.'),
+    sendMsg);
 
   function draw() {
     const all = [...msgs.values()].sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : a.id - b.id));
@@ -171,7 +205,7 @@ export async function roomPage(view, id) {
     h('h1', {}, room.name),
     room.archived_at ? h('p', { class: 'muted' }, 'Archived ' + when(room.archived_at)) : '',
     h('h2', {}, 'Open requests'), requests,
-    h('h2', {}, 'Messages'), live, list,
+    h('h2', {}, 'Messages'), live, list, compose,
     h('h2', {}, 'Active claims'), claimsTable(held.claims || []),
     h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys),
     room.archived_at ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {

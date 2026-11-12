@@ -70,6 +70,15 @@ Three things:
    classification is information for the receiving agent's
    trust policy. See [docs/agent-integration.md](agent-integration.md#the-trust-policy).
 
+## The operator mark
+
+A message the person who runs the server sent from the web UI, with
+a passkey confirmation, carries `operator: true`. Only the server sets
+it, and only after that confirmation: agents cannot send it, and a UI
+session alone cannot post. It is separate from `trust_origin`. Agent
+outputs show it as a line start (`- OPERATOR (confirmed with passkey)
+[...]`) with a note; see [web-ui.md](web-ui.md#operator-messages).
+
 ## What the classification does NOT do
 
 * **It does not authenticate the message.** The argon2id

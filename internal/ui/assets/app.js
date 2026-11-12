@@ -1,5 +1,5 @@
 // The page: routing, the header, passkey login and setup, passkeys.
-import { h, api, setSession, errorBox, confirmButton, table, when } from './lib.js';
+import { h, api, setSession, errorBox, confirmButton, table, when, action } from './lib.js';
 import { roomsPage, roomPage } from './rooms.js';
 import { keysPage, auditPage } from './keys.js';
 
@@ -33,27 +33,6 @@ async function login() {
 // even if that fails.
 async function logout() {
   try { await api('POST', '/ui/auth/logout'); } finally { setSession(''); }
-}
-
-// action makes a click handler that shows errors in msg. While fn runs
-// the button is disabled (no second run) and status, if given, is shown.
-// A 401 means the session ended (show the login page) unless loggedIn is
-// false: on the login and setup pages it is just a rejected passkey.
-function action(msg, fn, status = '', loggedIn = true) {
-  return async e => {
-    const btn = e.currentTarget;
-    btn.disabled = true;
-    msg.replaceChildren(status);
-    try {
-      await fn();
-      msg.replaceChildren();
-    } catch (err) {
-      if (loggedIn && err.status === 401) render(); // the session ended: show the login page
-      else msg.replaceChildren(errorBox(err));
-    } finally {
-      btn.disabled = false;
-    }
-  };
 }
 
 const WAITING = 'Waiting for your passkey…';

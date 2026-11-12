@@ -121,6 +121,27 @@ export function confirmButton(label, question, action) {
   return wrap;
 }
 
+// action makes a click handler that shows errors in msg. While fn runs
+// the button is disabled (no second run) and status, if given, is shown.
+// A 401 means the session ended (show the login page) unless loggedIn is
+// false: on the login and setup pages it is just a rejected passkey.
+export function action(msg, fn, status = '', loggedIn = true) {
+  return async e => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    msg.replaceChildren(status);
+    try {
+      await fn();
+      msg.replaceChildren();
+    } catch (err) {
+      if (loggedIn && err.status === 401) rerender(); // the session ended: show the login page
+      else msg.replaceChildren(errorBox(err));
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
 // Every right a membership can hold, in the server's order.
 export const RIGHTS = ['read', 'claim', 'question', 'answer', 'decision', 'handoff',
   'status_update', 'task_assignment', 'alert', 'system'];
