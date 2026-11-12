@@ -239,7 +239,7 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 }
 
 // members lists a room's members to keys holding read and to admin
-// keys; only admin keys also get each member's rights.
+// keys; only admin keys also see admin keys and each member's rights.
 func (s *Service) members(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	mem, ok := rights.Require(w, r, s.DB, id, rights.Read)
@@ -249,7 +249,7 @@ func (s *Service) members(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.DB.QueryContext(r.Context(),
 		`SELECT m.key_id, k.label, k.trust_origin, m.rights
 		 FROM room_members m JOIN api_keys k ON k.id = m.key_id
-		 WHERE m.room_id = ? ORDER BY m.key_id`, id)
+		 WHERE m.room_id = ? AND (? OR k.is_admin = 0) ORDER BY m.key_id`, id, mem.Admin)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "members query")
 		return

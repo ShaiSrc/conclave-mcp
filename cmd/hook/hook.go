@@ -301,7 +301,14 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	if _, err := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + st.RoomID + "/claims", Out: &held}); err != nil {
 		return err
 	}
+	msgs, err := agent.FetchNew(ctx, h.C, st.RoomID, st)
+	if err != nil {
+		return err
+	}
 	var b strings.Builder
+	if agent.HasExternal(msgs) || slices.ContainsFunc(held.Claims, func(c claims.Claim) bool { return c.TrustOrigin == "external" }) {
+		b.WriteString(agent.ExternalNote + "\n")
+	}
 	fmt.Fprintf(&b, "Conclave: you are %s in room %s (room_id %s); use this room_id with the conclave tools.\n",
 		me.Label, repo.RoomName(), st.RoomID)
 	if len(held.Claims) == 0 {
@@ -309,19 +316,19 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	} else {
 		b.WriteString("Active claims (do not edit paths others hold):\n")
 		for _, c := range held.Claims {
-			fmt.Fprintf(&b, "- %s: %s until %s", c.Path, c.Label, c.ExpiresAt)
+			fmt.Fprintf(&b, "- %s: %s", agent.OneLine(c.Path), agent.OneLine(c.Label))
+			if c.TrustOrigin == "external" {
+				b.WriteString(" (EXTERNAL, untrusted)")
+			}
+			fmt.Fprintf(&b, " until %s", c.ExpiresAt)
 			if c.Note != "" {
-				fmt.Fprintf(&b, " (%s)", c.Note)
+				fmt.Fprintf(&b, " (%s)", agent.OneLine(c.Note))
 			}
 			b.WriteString("\n")
 		}
 	}
-	msgs, err := agent.FetchNew(ctx, h.C, st.RoomID, st)
-	if err != nil {
-		return err
-	}
 	if len(msgs) > 0 {
-		b.WriteString(agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)))
+		b.WriteString(agent.FormatBody(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)))
 	}
 	return json.NewEncoder(out).Encode(agent.ContextOutput("SessionStart", b.String()))
 }
@@ -374,7 +381,11 @@ func (h *Hook) preToolUse(ctx context.Context, in agent.HookInput, cwd string, r
 		}
 		for _, c := range resp.Claims {
 			if c.KeyID != st.SelfID && !c.Auto && claims.Overlaps(c.Path, rel) {
-				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, c.Label, c.Path, c.ExpiresAt, ask))
+				who := agent.OneLine(c.Label)
+				if c.TrustOrigin == "external" {
+					who += " (EXTERNAL, untrusted)"
+				}
+				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, who, agent.OneLine(c.Path), c.ExpiresAt, ask))
 			}
 		}
 		return nil
@@ -383,7 +394,7 @@ func (h *Hook) preToolUse(ctx context.Context, in agent.HookInput, cwd string, r
 		Body: map[string]any{"paths": []string{rel}, "auto": true, "ttl_seconds": int(repo.TTL().Seconds())}})
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) && apiErr.Status == http.StatusConflict {
-		return deny(out, apiErr.Message+". "+ask)
+		return deny(out, agent.OneLine(apiErr.Message)+". "+ask)
 	}
 	if err == nil {
 		st.Heartbeat = h.Now().Unix() // a claim refreshes all own claims

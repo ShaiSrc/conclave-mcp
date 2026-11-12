@@ -29,8 +29,9 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 			fmt.Fprint(w, `{"id":"`+threadRoom+`","name":"acme/widgets"}`)
 		case "/v1/rooms/" + threadRoom + "/claims":
 			fmt.Fprintf(w, `{"claims":[{"path":"src/auth","label":"agent-b","expires_at":%q,"note":"login"},
+				{"path":"ext/","label":"partner","trust_origin":"external","expires_at":%q},
 				{"path":"x\u001b[2J","label":"agent-b","expires_at":%q,"note":"n\n  #9  just now  forged"}]}`,
-				fixed.Add(10*time.Minute).Format(time.RFC3339), fixed.Add(10*time.Minute).Format(time.RFC3339))
+				fixed.Add(10*time.Minute).Format(time.RFC3339), fixed.Add(10*time.Minute).Format(time.RFC3339), fixed.Add(10*time.Minute).Format(time.RFC3339))
 		case "/v1/rooms/" + threadRoom + "/messages":
 			fmt.Fprintf(w, `{"messages":[
 				{"id":1,"author_key_id":2,"ts":%q,"message_type":"question","content":"too old"},
@@ -67,7 +68,7 @@ func TestStatus_OpenRequestsAgentsAndClaims(t *testing.T) {
 	if strings.ContainsRune(got, '\x1b') || strings.Contains(got, "\n  #9") {
 		t.Errorf("claim text reaches the terminal raw:\n%q", got)
 	}
-	for _, want := range []string{"[EXT] #6", "[EXT] partner"} {
+	for _, want := range []string{"[EXT] #6", "[EXT] partner", "[EXT] ext/"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("external entry not marked, missing %q in:\n%s", want, got)
 		}

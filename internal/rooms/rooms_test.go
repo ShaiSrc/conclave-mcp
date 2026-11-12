@@ -542,3 +542,23 @@ func TestRooms_GetMembersAndListForAgents(t *testing.T) {
 		t.Errorf("members without read: %d, want 403", rec.Code)
 	}
 }
+
+func TestRooms_MembersHideAdminKeysFromNonAdmins(t *testing.T) {
+	r, db, adminID := setupAs(t)
+	if _, err := db.Exec(`UPDATE api_keys SET is_admin = 1 WHERE id = ?`, adminID); err != nil {
+		t.Fatal(err)
+	}
+	room := createRoom(t, r, "mine")
+	agent := seedKey(t, db, "agent")
+	if rec := do(r, http.MethodPost, "/rooms/"+room.ID+"/invite", `{"key_id":`+itoa(agent)+`,"rights":["read"]}`); rec.Code != http.StatusCreated {
+		t.Fatal(rec.Body.String())
+	}
+	body := do(newServer(t, db, agent), http.MethodGet, "/rooms/"+room.ID+"/members", "").Body.String()
+	if !strings.Contains(body, `"label":"agent"`) || strings.Contains(body, "k-"+t.Name()) {
+		t.Errorf("non-admin must not see admin keys: %s", body)
+	}
+	body = do(r, http.MethodGet, "/rooms/"+room.ID+"/members", "").Body.String()
+	if !strings.Contains(body, "k-"+t.Name()) || !strings.Contains(body, `"label":"agent"`) {
+		t.Errorf("admin sees every member: %s", body)
+	}
+}

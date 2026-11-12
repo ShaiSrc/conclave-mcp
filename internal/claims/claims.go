@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 
@@ -68,13 +69,20 @@ type Claim struct {
 	Auto      bool   `json:"auto"`
 	Note      string `json:"note,omitempty"`
 	ExpiresAt string `json:"expires_at"`
+	// TrustOrigin is the holder key's origin ("internal" or "external").
+	TrustOrigin string `json:"trust_origin,omitempty"`
 }
 
 var errBadPath = errors.New("paths must be relative to the repository root, without '..' (a trailing / claims a directory)")
 
+var errControlPath = errors.New("paths must not contain control characters (newline, tab, escape, ...)")
+
 // Normalize returns the stored form of a claim path: '/'-separated,
 // cleaned and relative, with a trailing '/' for directories.
 func Normalize(p string) (string, error) {
+	if strings.ContainsFunc(p, unicode.IsControl) { // before TrimSpace, which would drop a trailing "\n"
+		return "", errControlPath
+	}
 	p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
 	if p == "" || strings.HasPrefix(p, "/") {
 		return "", errBadPath
@@ -112,7 +120,7 @@ type queryer interface {
 // active returns the room's unexpired claims, labels included.
 func active(ctx context.Context, q queryer, roomID string, now time.Time) ([]Claim, error) {
 	rows, err := q.QueryContext(ctx,
-		`SELECT c.id, c.path, c.key_id, k.label, c.auto, COALESCE(c.note, ''), c.expires_at
+		`SELECT c.id, c.path, c.key_id, k.label, c.auto, COALESCE(c.note, ''), c.expires_at, k.trust_origin
 		 FROM claims c JOIN api_keys k ON k.id = c.key_id
 		 WHERE c.room_id = ? AND c.expires_at > ?
 		 ORDER BY c.path, c.key_id`,
@@ -125,7 +133,7 @@ func active(ctx context.Context, q queryer, roomID string, now time.Time) ([]Cla
 	for rows.Next() {
 		var c Claim
 		var exp int64
-		if err := rows.Scan(&c.ID, &c.Path, &c.KeyID, &c.Label, &c.Auto, &c.Note, &exp); err != nil {
+		if err := rows.Scan(&c.ID, &c.Path, &c.KeyID, &c.Label, &c.Auto, &c.Note, &exp, &c.TrustOrigin); err != nil {
 			return nil, err
 		}
 		c.ExpiresAt = time.Unix(exp, 0).UTC().Format(time.RFC3339)
@@ -222,8 +230,13 @@ func (s *Service) claim(w http.ResponseWriter, r *http.Request) {
 			if c.KeyID != caller && Overlaps(p, c.Path) {
 				conflicts = append(conflicts, map[string]any{
 					"path": p, "held_path": c.Path, "key_id": c.KeyID, "label": c.Label, "expires_at": c.ExpiresAt,
+					"trust_origin": c.TrustOrigin,
 				})
-				reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (claim %s, until %s)", p, c.Label, c.Path, c.ExpiresAt))
+				who := c.Label
+				if c.TrustOrigin == "external" {
+					who += " (EXTERNAL, untrusted)"
+				}
+				reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (claim %s, until %s)", p, who, c.Path, c.ExpiresAt))
 			}
 		}
 	}

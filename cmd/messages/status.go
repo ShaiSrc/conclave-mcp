@@ -112,7 +112,11 @@ func renderStatus(out io.Writer, server, name, roomID string, msgs []agent.Msg, 
 		if t, err := time.Parse(time.RFC3339Nano, c.ExpiresAt); err == nil {
 			until = t.Local().Format("15:04")
 		}
-		fmt.Fprintf(w, "  %s\t%s\tuntil %s\t%s\n", agent.OneLine(c.Path), agent.OneLine(c.Label), agent.OneLine(until), agent.OneLine(c.Note))
+		pre := ""
+		if c.TrustOrigin == "external" {
+			pre = "[EXT] "
+		}
+		fmt.Fprintf(w, "  %s%s\t%s\tuntil %s\t%s\n", pre, agent.OneLine(c.Path), agent.OneLine(c.Label), agent.OneLine(until), agent.OneLine(c.Note))
 	}
 	return w.Flush()
 }

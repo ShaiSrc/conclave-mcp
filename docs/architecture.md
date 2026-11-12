@@ -138,7 +138,7 @@ may call them (see [Permissions](#permissions)):
 | `GET` | `/v1/rooms/{id}` | Room details and `my_rights`. | member, admin |
 | `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. | admin |
 | `POST` | `/v1/rooms/{id}/members` | Invite a key with rights (`/invite` is an alias). | admin |
-| `GET` | `/v1/rooms/{id}/members` | List members (admin keys also get rights). | `read`, admin |
+| `GET` | `/v1/rooms/{id}/members` | List members (admin callers also see admin keys and rights). | `read`, admin |
 | `PATCH` | `/v1/rooms/{id}/members/{key_id}` | Replace a member's rights. | admin |
 | `DELETE` | `/v1/rooms/{id}/members/{key_id}` | Remove a member. | admin |
 | `GET` | `/v1/rooms/{id}/messages` | List messages. | `read` |

@@ -263,7 +263,8 @@ conclave-mcp rooms members [ROOM]
 ```
 
 Lists a room's members: `ID`, `LABEL`, `TRUST` (internal/external),
-and `RIGHTS` when the caller is an admin key. Needs the `read` right.
+and `RIGHTS` when the caller is an admin key. Admin keys are listed
+only to admin callers. Needs the `read` right.
 `ROOM` is a room id or name; without it `$CONCLAVE_ROOM`, then the
 room in the repository's `.conclave.json`. MCP: `rooms.members`.
 
