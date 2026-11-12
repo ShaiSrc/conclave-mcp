@@ -191,6 +191,8 @@ func TestAccess(t *testing.T) {
 		want         int
 	}{
 		{3, "POST", "/rooms/R/claims", `{"paths":["a.go"]}`, 403}, // reader
+		{3, "POST", "/rooms/R/claims/heartbeat", "", 403},         // reader: no claim right
+		{3, "POST", "/rooms/R/claims/release", "", 403},
 		{3, "GET", "/rooms/R/claims", "", 200},
 		{4, "GET", "/rooms/R/claims", "", 404}, // not a member
 		{1, "POST", "/rooms/R/claims", `{"paths":["../x"]}`, 400},

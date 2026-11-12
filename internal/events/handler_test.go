@@ -3,6 +3,7 @@ package events
 import (
 	"bufio"
 	"context"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -27,7 +28,7 @@ func TestHandle_StreamEndsWhenReadIsRevoked(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = closeFn() })
 	_, thisFile, _, _ := runtime.Caller(0)
-	if _, err := storage.Migrate(ctx, db, os.DirFS(filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations")), slog.Default()); err != nil {
+	if _, err := storage.Migrate(ctx, db, os.DirFS(filepath.Join(filepath.Dir(thisFile), "..", "..", "migrations")), slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatal(err)
 	}
 	for _, q := range []string{

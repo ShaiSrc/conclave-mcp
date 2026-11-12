@@ -13,7 +13,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"github.com/hermes/conclave-mcp/internal/rights"
 	"net/http"
 	"strconv"
 	"time"
@@ -22,6 +21,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -143,7 +143,7 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// SPEC-0001 Q7: optional intent tag. Empty / missing
-	// means "unstructured" (NULL in the DB). The trigger in
+	// is allowed and is stored as system (see below). The trigger in
 	// migration 0003 rejects unknown values; we pre-validate
 	// here for a friendlier 400.
 	if req.MessageType != "" {
