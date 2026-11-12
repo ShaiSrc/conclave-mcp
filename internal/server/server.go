@@ -31,6 +31,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/mcp"
 	"github.com/hermes/conclave-mcp/internal/messages"
 	"github.com/hermes/conclave-mcp/internal/rooms"
+	"github.com/hermes/conclave-mcp/internal/ui"
 )
 
 // Server is the Conclave MCP HTTP server. Construct with New and
@@ -69,7 +70,16 @@ func New(cfg Config, deps Deps) (*Server, error) {
 
 	s := &Server{cfg: cfg, logger: cfg.Logger}
 
-	s.router = s.buildRouter(deps)
+	// The web UI and its cookie sessions exist only on a loopback
+	// listen address (docs/web-ui.md).
+	var uiSvc *ui.Service
+	if ui.Loopback(cfg.Host) {
+		var err error
+		if uiSvc, err = ui.New(deps.DB, cfg.Port); err != nil {
+			return nil, fmt.Errorf("web ui: %w", err)
+		}
+	}
+	s.router = s.buildRouter(deps, uiSvc)
 	s.http = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:           s.router,
@@ -120,7 +130,7 @@ type DBHealthChecker interface {
 	PingContext(ctx context.Context) error
 }
 
-func (s *Server) buildRouter(deps Deps) chi.Router {
+func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
 	r := chi.NewRouter()
 	r.Use(RequestIDMiddleware())
 	r.Use(RecoveryMiddleware(s.logger))
@@ -136,6 +146,14 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 	// bootstrap key can call them) — see SPEC-0003 §3.
 	keysSvc := keys.NewService(deps.DB)
 	verifier := auth.NewVerifier(keysSvc, deps.MaxConcurrentVerify)
+
+	// authMW is the bearer verifier; with the web UI it also accepts a
+	// UI session cookie and acts as the operator key (internal/ui).
+	authMW := verifier.Middleware()
+	if uiSvc != nil {
+		authMW = uiSvc.Auth(authMW)
+		uiSvc.Routes(r)
+	}
 
 	// --- Service composition root ---
 	//
@@ -155,7 +173,7 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.
-		r.Use(verifier.Middleware())
+		r.Use(authMW)
 
 		// Rate limiting sits *inside* auth so we don't burn a
 		// verify on requests that will be 429'd anyway. The
@@ -171,6 +189,9 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 		messagesSvc.Routes(r)
 		auditSvc.Routes(r)
 		claimsSvc.Routes(r)
+		if uiSvc != nil {
+			uiSvc.V1Routes(r)
+		}
 
 		// 404/405 envelopes apply AFTER the routes are mounted,
 		// otherwise the NotFound handler shadows the routes.
@@ -193,7 +214,7 @@ func (s *Server) buildRouter(deps Deps) chi.Router {
 	// would kill long-lived connections.
 	if deps.Broker != nil {
 		evH := events.NewHandler(deps.DB, deps.Broker)
-		r.With(verifier.Middleware()).Get("/v1/rooms/{id}/events", evH.Handle)
+		r.With(authMW).Get("/v1/rooms/{id}/events", evH.Handle)
 	}
 
 	return r

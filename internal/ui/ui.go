@@ -6,6 +6,7 @@ package ui
 import (
 	"database/sql"
 	"fmt"
+	"net"
 	"sync"
 	"time"
 
@@ -33,7 +34,8 @@ const (
 type Service struct {
 	store
 	wa     *webauthn.WebAuthn
-	origin string // http://localhost:<port>, the only origin the UI runs on
+	origin string    // http://localhost:<port>, the only origin the UI runs on
+	hosts  [2]string // the Host headers cookie sessions accept: localhost:<port>, 127.0.0.1:<port>
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony // by hashToken(ceremony cookie)
@@ -65,9 +67,24 @@ func New(db *sql.DB, port int) (*Service, error) {
 		store:      store{db: db, now: time.Now},
 		wa:         wa,
 		origin:     origin,
+		hosts:      [2]string{fmt.Sprintf("localhost:%d", port), fmt.Sprintf("127.0.0.1:%d", port)},
 		ceremonies: map[string]ceremony{},
 	}, nil
 }
+
+// Loopback reports whether the listen host is a loopback address. The
+// UI and cookie sessions exist only then: passkeys need a secure
+// context, and plain HTTP is one only on localhost.
+func Loopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// uiHost reports whether host (a request's Host header) is the UI's.
+func (s *Service) uiHost(host string) bool { return host == s.hosts[0] || host == s.hosts[1] }
 
 // Routes mounts the /ui endpoints on r.
 func (s *Service) Routes(r chi.Router) {
