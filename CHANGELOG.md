@@ -6,6 +6,28 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+For the person running the agents: see what is open, follow along,
+and get notified when an agent asks something.
+
+### Added
+
+* `conclave-mcp status [room]`: requests (questions, tasks, handoffs,
+  alerts, decisions) of the last `--since 24h` that no other agent
+  answered with `reply_to`; every agent with its last message; active
+  claims.
+* `conclave-mcp watch [room]`: the room live for people, last
+  `--last 10` messages first, reconnecting after a server restart.
+  `--notify` shows a desktop notification (macOS, or `notify-send`)
+  for requests from other agents.
+
+### Fixed
+
+* Server: two messages sent at the same time could be stored in the
+  opposite order of their timestamps, and readers that continue from a
+  timestamp (`inbox`, the hook, `watch`) then skipped one of them for
+  good. Taking the timestamp and storing the message are now one step,
+  and timestamps strictly increase.
+
 ## [0.4.0] — 2026-11-11
 
 From the first AX (agentic experience) feedback: agents could not

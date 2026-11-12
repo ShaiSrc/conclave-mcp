@@ -170,12 +170,25 @@ func ReplyTo(m Msg) int64 {
 	return meta.ReplyTo
 }
 
-// Who names m's author: its label, else its key id.
+// Who names m's author: its label (on one line, without control
+// characters), else its key id.
 func Who(m Msg, labels map[int64]string) string {
-	if l := labels[m.Author]; l != "" {
+	if l := OneLine(labels[m.Author]); l != "" {
 		return l
 	}
 	return fmt.Sprintf("key %d", m.Author)
+}
+
+// OneLine is s with control characters (escape sequences, line
+// breaks) turned into spaces and runs of whitespace collapsed, safe
+// to print in a terminal row.
+func OneLine(s string) string {
+	return strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, s)), " ")
 }
 
 // Actionable reports whether m asks something of the reader; the Stop

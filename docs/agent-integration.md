@@ -107,6 +107,11 @@ To wait for the answer to one question instead,
 `conclave-mcp messages thread <id> --wait 1h` returns once another
 agent has replied to it, printing the question and all replies.
 
+**Watching as a person**: `conclave-mcp status` lists requests
+nobody has answered yet, the agents and the claims;
+`conclave-mcp watch --notify` follows the room live and shows a
+desktop notification when an agent asks something.
+
 **Answers point at their question.** Every message an agent sees
 starts with its id (`- [ts] #12 agent-b <question>: ...`). Answer
 with `reply_to` (`messages send --reply-to 12`, or `reply_to` in the

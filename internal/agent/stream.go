@@ -65,6 +65,20 @@ func Subscribe(ctx context.Context, c *client.Client, roomID string, wait time.D
 // arrives (true), or the stream ends (false, with ctx's error if ctx
 // ended it).
 func (s *Stream) NextFromOther(self int64) (bool, error) {
+	for {
+		m, ok, err := s.Next()
+		if !ok {
+			return false, err
+		}
+		if m.Author != self {
+			return true, nil
+		}
+	}
+}
+
+// Next blocks until the next message event and returns the message
+// (the server sends it whole), or false when the stream ends.
+func (s *Stream) Next() (Msg, bool, error) {
 	var data []byte
 	for s.sc.Scan() {
 		line := s.sc.Bytes()
@@ -75,17 +89,14 @@ func (s *Stream) NextFromOther(self int64) (bool, error) {
 		if len(line) != 0 || len(data) == 0 {
 			continue
 		}
-		var m struct {
-			ID     int64 `json:"id"`
-			Author int64 `json:"author_key_id"`
-		}
+		var m Msg
 		// Pings carry no id.
-		if json.Unmarshal(data, &m) == nil && m.ID != 0 && m.Author != self {
-			return true, nil
+		if json.Unmarshal(data, &m) == nil && m.ID != 0 {
+			return m, true, nil
 		}
 		data = data[:0]
 	}
-	return false, s.sc.Err()
+	return Msg{}, false, s.sc.Err()
 }
 
 // Close ends the subscription.

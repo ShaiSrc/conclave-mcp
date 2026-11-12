@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -411,5 +413,113 @@ func TestMessages_ReplyToIsCheckedAndKeptInMetadata(t *testing.T) {
 		if code, _ := send(`{"content":"x","reply_to":` + bad + `}`); code != http.StatusBadRequest {
 			t.Errorf("reply_to %s: status %d, want 400", bad, code)
 		}
+	}
+}
+
+// sendAs posts content to roomID through r and fails the test on error.
+func sendAs(t *testing.T, r http.Handler, roomID, content string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", bytes.NewBufferString(`{"content":"`+content+`"}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("send %s: %d %s", content, rec.Code, rec.Body.String())
+	}
+}
+
+// tsByID returns the room's timestamps in insert (id) order.
+func tsByID(t *testing.T, db *sql.DB, roomID string) []string {
+	t.Helper()
+	rows, err := db.Query(`SELECT ts FROM messages WHERE room_id = ? ORDER BY id`, roomID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var ts string
+		_ = rows.Scan(&ts)
+		out = append(out, ts)
+	}
+	return out
+}
+
+func TestMessages_TimestampsFollowInsertOrder(t *testing.T) {
+	// The first send stalls right after taking its timestamp while a
+	// second send goes through. If stamping and inserting were not one
+	// step, the second message would be stored first with the later
+	// timestamp, and a reader whose `since` passed it would never see
+	// the first.
+	r, db, _, roomID := setupAs(t)
+	release := make(chan struct{})
+	var calls atomic.Int32
+	old := clock
+	clock = func() time.Time {
+		now := time.Now()
+		if calls.Add(1) == 1 {
+			<-release
+		}
+		return now
+	}
+	t.Cleanup(func() { clock = old })
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); sendAs(t, r, roomID, "first") }()
+	time.Sleep(50 * time.Millisecond)
+	go func() { defer wg.Done(); sendAs(t, r, roomID, "second") }()
+	time.AfterFunc(200*time.Millisecond, func() { close(release) })
+	wg.Wait()
+	ts := tsByID(t, db, roomID)
+	if len(ts) != 2 || !(ts[0] < ts[1]) {
+		t.Errorf("timestamps in insert order: %v, want strictly increasing", ts)
+	}
+}
+
+func TestMessages_TimestampsAreUniqueWithinOneInstant(t *testing.T) {
+	r, db, _, roomID := setupAs(t)
+	fixed := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	old := clock
+	clock = func() time.Time { return fixed }
+	t.Cleanup(func() { clock = old })
+	for _, c := range []string{"a", "b", "c"} {
+		sendAs(t, r, roomID, c)
+	}
+	ts := tsByID(t, db, roomID)
+	if len(ts) != 3 || !(ts[0] < ts[1] && ts[1] < ts[2]) {
+		t.Errorf("timestamps: %v, want strictly increasing", ts)
+	}
+}
+
+func TestMessages_TimestampsStayAboveStoredOnesAfterARestart(t *testing.T) {
+	// A fresh Service (a restarted server) whose clock is behind the
+	// newest stored message must still stamp after it.
+	r, db, keyID, roomID := setupAs(t)
+	const stored = "2099-01-01T00:00:00.000000000Z"
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, trust_origin)
+		VALUES (?, ?, ?, 'from before the restart', 'text/plain', 'system', 'internal')`, roomID, keyID, stored); err != nil {
+		t.Fatal(err)
+	}
+	sendAs(t, r, roomID, "after")
+	if ts := tsByID(t, db, roomID); len(ts) != 2 || !(ts[1] > stored) {
+		t.Errorf("timestamps: %v, want the new one after %s", ts, stored)
+	}
+}
+
+func TestMessages_SendFailsWhenTheNewestTimestampCannotBeRead(t *testing.T) {
+	// Without the stored high-water mark a lagging clock could stamp
+	// before it; refuse the send instead of risking a skipped message.
+	r, db, keyID, roomID := setupAs(t)
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, trust_origin)
+		VALUES (?, ?, 'not a time', 'broken', 'text/plain', 'system', 'internal')`, roomID, keyID); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", bytes.NewBufferString(`{"content":"x"}`))
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status %d, want 500", rec.Code)
+	}
+	if n := len(tsByID(t, db, roomID)); n != 1 {
+		t.Errorf("%d messages stored, want only the broken one", n)
 	}
 }
