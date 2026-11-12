@@ -102,7 +102,7 @@ file has grown.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--db` | `./conclave.db` | Path to the SQLite file. |
+| `--db` | `$CONCLAVE_DATA_DIR/data.db`, else `./.conclave-mcp/data.db` | Path to the SQLite file. |
 | `--force` | `false` | Skip the free-disk-space warning. |
 
 **Stop the server first.** WAL and VACUUM are incompatible
@@ -127,7 +127,7 @@ plaintext is printed to STDOUT once. The argon2id hash is stored in the
 |---|---|---|
 | `--label` | (required) | Unique label. |
 | `--trust-origin` | `internal` | `internal` or `external`. `keys create` and `agent add` default to `external`. |
-| `--db` | `./conclave.db` | Path to the SQLite file. |
+| `--db` | `$CONCLAVE_DATA_DIR/data.db`, else `./.conclave-mcp/data.db` | Path to the SQLite file. |
 
 **Stop the server first.** A running server's WAL writer can
 clobber the insert.
@@ -146,7 +146,8 @@ in the SQLite file, revokes the operator key the UI created and
 renames it `operator-revoked-<id>`, and records `ui.reset` in the
 audit log. Then start the server and run `ui setup`: it creates a
 fresh operator key. An active `operator` key that the UI did not
-create is left alone; rename it, or setup answers 409. See
+create is left alone; rename it, or registering the passkey fails with 409
+(the setup link is then used up), and run `ui setup` again. See
 [web-ui.md](web-ui.md).
 
 | Flag | Default | Notes |

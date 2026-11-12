@@ -17,7 +17,7 @@ file or a key store.
   and the session cookie counts for nothing: passkeys need a secure
   context, and plain HTTP is one only on `localhost`.
 - A current browser on the same machine. The passkey JSON helpers need
-  Safari 18, Chrome 129 or Firefox 119, or newer.
+  Safari 18.4, Chrome 129 or Firefox 119, or newer.
 
 ## Setup
 
@@ -37,7 +37,8 @@ file or a key store.
    `localhost`, and an IP address cannot hold one.
 
 If an active admin key labelled `operator` exists that setup did not
-create, setup answers 409. Rename that key and run `ui setup` again.
+create, registering the passkey fails with 409 and the setup link is then
+used up. Rename that key and run `ui setup` again.
 
 Do the setup right after upgrading: until the first passkey exists, any
 holder of the admin key can ask for a setup token.
@@ -59,7 +60,7 @@ operator key the UI created and renames it `operator-revoked-<id>`,
 clears the record of it, and writes `ui.reset` to the audit log. Start
 the service and run `conclave-mcp ui setup` again; setup then creates a
 fresh operator key. An active `operator` key that setup did not create
-is left alone (setup reports 409 until it is renamed). Whoever can stop
+is left alone (registering the passkey fails with 409 until it is renamed; run `ui setup` again after renaming). Whoever can stop
 the service and write the database file is the operator already, as with
 `admin keys create-bootstrap`.
 
@@ -67,7 +68,7 @@ the service and write the database file is the operator already, as with
 
 | Topic | How |
 |---|---|
-| Who the UI acts as | An admin key labelled `operator`, created by the first registration. The UI knows it by its id, kept in the `meta` table (`ui_operator_key_id`), not by its label. Its secret is random and never shown or stored in plain text, so only UI sessions act as it. The audit log shows UI actions as `operator`, apart from CLI use of the bootstrap admin key. |
+| Who the UI acts as | An admin key labelled `operator`, created by the first registration. The UI knows it by its id, kept in the `meta` table (`ui_operator_key_id`), not by its label. Its secret is random and never shown or stored in plain text, so only UI sessions act as it. An agent holding the admin key already has every right the operator key has: the UI does not protect against that, it only keeps such an agent from getting its own UI login. The audit log shows UI actions as `operator`, apart from CLI use of the bootstrap admin key. |
 | Trust anchor | The first passkey needs a setup token (10 minutes, single use) and is accepted only while no passkey exists. Later passkeys can only be added from a logged-in session, so an agent holding the admin key cannot add its own. `POST /v1/ui/setup-tokens` answers 409 once a passkey exists. |
 | Passkeys | WebAuthn with user verification required, discoverable credentials, no attestation. The server stores public keys only. A failed registration or login answers `passkey not accepted` and is audited with the reason. A login whose sign counter went backwards (a possible cloned passkey) is refused and audited. At most 64 ceremonies are open at once; more get 503. |
 | Session | Cookie `conclave_ui`: 32 random bytes, `HttpOnly`, `SameSite=Strict`, `Path=/`, not `Secure` (Safari rejects `Secure` cookies on `http://localhost`). The database keeps only its SHA-256. A session ends after 1 hour without use and 12 hours after login; logout deletes it. |
