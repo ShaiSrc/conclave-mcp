@@ -133,13 +133,14 @@ func newCreateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a new API key (plaintext shown once, to STDOUT)",
-		Long: `Creates a new API key. The plaintext key is written to STDOUT
-exactly once. Pipe to a file or password manager; it cannot be retrieved
-later. Use --label to attach a human-readable identifier (max 128 chars).
-Use --trust-origin=external to mark the key as belonging to an invited
-collaborator whose agent we do not trust by default; the server will
-denormalise the value onto every message the key writes (SPEC-0001 Q11,
-ADR-0008 revision). Default: 'internal'.`,
+		Long: `Creates a new API key (admin key only). The plaintext key is written
+to STDOUT exactly once. Pipe to a file or password manager; it cannot be
+retrieved later. Use --label to attach a human-readable identifier (max
+128 chars). Without --trust-origin the key is 'external' (an invited
+collaborator whose agent we do not trust by default); use
+--trust-origin=internal for your own agents. The server denormalises the
+value onto every message the key writes (SPEC-0001 Q11, ADR-0008
+revision).`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out, errOut io.Writer) error {
@@ -198,7 +199,7 @@ ADR-0008 revision). Default: 'internal'.`,
 	cmd.Flags().StringVar(&flagScopes, "scopes", "", "comma-separated scopes (server-defined, optional)")
 	cmd.Flags().StringVar(&flagFormat, "format", "plain", "output format: plain|json")
 	cmd.Flags().StringVar(&flagTrustOrigin, "trust-origin", "",
-		"trust classification: 'internal' (default) or 'external' (SPEC-0001 Q11)")
+		"trust classification: 'external' (default) or 'internal' (SPEC-0001 Q11)")
 	return cmd
 }
 

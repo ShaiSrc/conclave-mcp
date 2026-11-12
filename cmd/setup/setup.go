@@ -216,7 +216,7 @@ shell (Claude desktop app, IDE) pick the agent up from
 	}
 	cmd.Flags().StringVar(&flagRoom, "room", "", "room name (default: the current repository's room)")
 	cmd.Flags().StringVar(&flagRole, "role", "writer", "room role: writer or reader")
-	cmd.Flags().StringVar(&flagTrust, "trust-origin", "internal", "internal or external")
+	cmd.Flags().StringVar(&flagTrust, "trust-origin", "external", "external (default) or internal (your own agents)")
 	cmd.Flags().BoolVar(&flagStore, "store", false, "store the key (macOS Keychain or a 0600 file) and print export CONCLAVE_AGENT=<label>")
 	return cmd
 }

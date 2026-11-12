@@ -143,6 +143,9 @@ func TestAgentAdd_PrintsExportAndInvites(t *testing.T) {
 	if !strings.Contains(strings.Join(*calls, "\n"), `POST /v1/rooms/R/invite {"key_id":7,"role":"writer"}`) {
 		t.Errorf("invite not sent as expected: %v", *calls)
 	}
+	if !strings.Contains(strings.Join(*calls, "\n"), `POST /v1/keys {"label":"agent-c","trust_origin":"external"}`) {
+		t.Errorf("agent keys must default to external: %v", *calls)
+	}
 }
 
 func TestAgentAdd_RevokesKeyWhenInviteFails(t *testing.T) {

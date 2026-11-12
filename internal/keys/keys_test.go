@@ -318,3 +318,16 @@ func itoa(n int64) string {
 
 // silence unused imports
 var _ = io.EOF
+
+func TestKeys_CreateDefaultsToExternal(t *testing.T) {
+	r, db := newTestServer(t)
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/keys", strings.NewReader(`{"label":"partner"}`)))
+	var resp createKeyResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	var stored string
+	_ = db.QueryRow(`SELECT trust_origin FROM api_keys WHERE id = ?`, resp.ID).Scan(&stored)
+	if rec.Code != http.StatusCreated || resp.TrustOrigin != TrustOriginExternal || stored != TrustOriginExternal {
+		t.Errorf("create without trust_origin: %d %s (stored %q), want external", rec.Code, rec.Body.String(), stored)
+	}
+}

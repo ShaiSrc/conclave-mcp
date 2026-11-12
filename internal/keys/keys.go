@@ -155,11 +155,11 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, r, http.StatusBadRequest, "bad_request", "label must be 1..128 chars")
 		return
 	}
-	// Default trust_origin to 'internal' if missing; reject
-	// anything outside the closed set before the SQL CHECK
-	// fires (so we return 400, not 500). SPEC-0001 Q11.
+	// A key without a trust mark is external: an invited agent is
+	// untrusted unless the operator says otherwise. Values outside the
+	// closed set get 400 before the SQL CHECK fires. SPEC-0001 Q11.
 	if req.TrustOrigin == "" {
-		req.TrustOrigin = TrustOriginInternal
+		req.TrustOrigin = TrustOriginExternal
 	}
 	if !AllowedTrustOrigins[req.TrustOrigin] {
 		writeJSONError(w, r, http.StatusBadRequest, "bad_request",
