@@ -384,15 +384,22 @@ operator. An active key labelled operator that the UI did not create
 is left alone, and setup refuses with a conflict while it exists:
 revoke it first (conclave-mcp keys revoke <id>), then run this again.
 
+--db is required and must be the file the server runs on (the value
+of serve --db); there is no default.
+
 Like admin vacuum, this subcommand does NOT talk to a running server.
 Stop the server first.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			dbPath, _ := resolveVacuumPaths(flagDB)
-			return runUIReset(cmd.Context(), cmd.ErrOrStderr(), dbPath)
+			// No default guessing: serve and the admin default can name
+			// different files, and a reset must hit the server's database.
+			if flagDB == "" {
+				return &exitError{Code: 2, Err: errors.New("--db is required: pass the SQLite file the server runs on (serve --db)")}
+			}
+			return runUIReset(cmd.Context(), cmd.ErrOrStderr(), flagDB)
 		},
 	}
-	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file (overrides CONCLAVE_DATA_DIR)")
+	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file the server runs on (required)")
 	return cmd
 }
 
@@ -462,12 +469,12 @@ func runUIReset(ctx context.Context, errOut io.Writer, dbPath string) error {
 		`UPDATE api_keys SET label = 'operator-revoked-' || id || '-' || lower(hex(randomblob(4))) WHERE label = 'operator' AND revoked_at IS NOT NULL`); err != nil {
 		return fail("rename revoked operator key", err)
 	}
+	detail, _ := json.Marshal(map[string]any{"passkeys": passkeys, "sessions": sessions, "operator_key_revoked": revoked})
+	if err := audit.Write(ctx, tx, 0, "ui.reset", "ui", "", "", "ok", string(detail)); err != nil {
+		return &exitError{Code: 1, Err: fmt.Errorf("audit: %w", err)}
+	}
 	if err := tx.Commit(); err != nil {
 		return &exitError{Code: 1, Err: fmt.Errorf("commit: %w", err)}
-	}
-	detail, _ := json.Marshal(map[string]any{"passkeys": passkeys, "sessions": sessions, "operator_key_revoked": revoked})
-	if err := audit.Write(ctx, db, 0, "ui.reset", "ui", "", "", "ok", string(detail)); err != nil {
-		return &exitError{Code: 1, Err: fmt.Errorf("audit: %w", err)}
 	}
 	fmt.Fprintf(errOut, "removed %d passkey(s) and %d session(s); start the server and run conclave-mcp ui setup\n", passkeys, sessions)
 	return nil

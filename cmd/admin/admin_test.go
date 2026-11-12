@@ -288,3 +288,15 @@ func TestUIReset_MissingDBIsExit1(t *testing.T) {
 		t.Errorf("missing db: %v (exit %d), want exit 1", err, ExitCode(err))
 	}
 }
+
+func TestUIReset_RequiresDB(t *testing.T) {
+	t.Setenv("CONCLAVE_DATA_DIR", t.TempDir())
+	cmd := newUIResetCmd()
+	cmd.SetArgs(nil)
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "--db is required") {
+		t.Errorf("no --db: %v, want --db is required", err)
+	}
+}

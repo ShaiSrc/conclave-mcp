@@ -136,6 +136,7 @@ export function rightsPicker(selected = []) {
   return {
     el: h('span', { class: 'rights' }, boxes.map((b, i) => h('label', {}, b, ' ' + RIGHTS[i]))),
     value: () => boxes.filter(b => b.checked).map(b => b.value),
+    set: rights => boxes.forEach(b => { b.checked = rights.includes(b.value); }),
   };
 }
 

@@ -60,6 +60,8 @@ export async function keysPage(view) {
   const agentMsg = h('div');
   const agentForm = h('form', {
     onsubmit: submit(agentMsg, async () => {
+      // A key with no rights can neither read nor send in its room.
+      if (!rights.value().length) throw new Error('Pick at least one right for the agent.');
       const created = await api('POST', '/v1/keys', { label: agent.value, trust_origin: agentTrust.value });
       try {
         await api('POST', `/v1/rooms/${encodeURIComponent(room.value)}/invite`, { key_id: created.id, rights: rights.value() });
@@ -94,7 +96,9 @@ export async function auditPage(view) {
   const since = h('input', { type: 'datetime-local' });
   const out = h('div');
 
+  let latest = 0; // only the newest request may draw
   async function load() {
+    const mine = ++latest;
     const q = new URLSearchParams({ limit: '500' });
     if (actor.value) q.set('actor', actor.value);
     if (action.value.trim()) q.set('action', action.value.trim());
@@ -102,6 +106,7 @@ export async function auditPage(view) {
     if (since.value) q.set('since', new Date(since.value).toISOString());
     try {
       const entries = (await api('GET', '/v1/audit?' + q)).entries || [];
+      if (mine !== latest) return;
       out.replaceChildren(entries.length
         ? table(['Time', 'Actor', 'Action', 'Target', 'Room', 'Result', 'Detail'], entries.map(e => h('tr', {},
           h('td', {}, when(e.ts)),
@@ -109,7 +114,7 @@ export async function auditPage(view) {
           h('td', {}, e.action), h('td', {}, `${e.target_type} ${e.target_id}`),
           h('td', {}, e.room_id || ''), h('td', {}, e.result), h('td', {}, h('code', {}, e.detail || '')))))
         : h('p', {}, 'No entries.'));
-    } catch (err) { out.replaceChildren(errorBox(err)); }
+    } catch (err) { if (mine === latest) out.replaceChildren(errorBox(err)); }
   }
 
   view.replaceChildren(h('h1', {}, 'Audit log'),

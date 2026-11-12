@@ -10,7 +10,6 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -76,15 +75,17 @@ func New(db *sql.DB, port int) (*Service, error) {
 	}, nil
 }
 
-// Loopback reports whether the listen host is a loopback address. The
-// UI and its sessions exist only then: passkeys need a secure
-// context, and plain HTTP is one only on localhost.
+// Loopback reports whether the listen host is localhost, 127.0.0.1 or
+// ::1. The UI and its sessions exist only then: passkeys need a secure
+// context (plain HTTP is one only on localhost), and the UI accepts
+// only the Hosts localhost and 127.0.0.1, so other 127/8 addresses
+// would mount a UI nobody can reach.
 func Loopback(host string) bool {
-	if host == "localhost" {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return false
 }
 
 // uiHost reports whether host (a request's Host header) is the UI's.

@@ -163,7 +163,12 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 // string for none. The roomID is optional and denormalised into
 // audit.room_id (SPEC-0001 Q10); pass empty string for actions
 // that are not tied to a room.
-func Write(ctx context.Context, db *sql.DB, actorKeyID int64, action, targetType, targetID, roomID, result, detail string) error {
+// execer is satisfied by *sql.DB and *sql.Tx.
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func Write(ctx context.Context, db execer, actorKeyID int64, action, targetType, targetID, roomID, result, detail string) error {
 	if result != "ok" && !strings.HasPrefix(result, "error:") {
 		return errors.New("audit: result must be 'ok' or 'error:<code>'")
 	}

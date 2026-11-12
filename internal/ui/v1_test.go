@@ -172,7 +172,7 @@ func TestSetupTokenEndpoint(t *testing.T) {
 
 func TestLoopback(t *testing.T) {
 	for host, want := range map[string]bool{
-		"127.0.0.1": true, "localhost": true, "::1": true, "127.0.0.2": true,
+		"127.0.0.1": true, "localhost": true, "::1": true, "127.0.0.2": false,
 		"": false, "::": false, "0.0.0.0": false, "192.168.1.10": false, "example.com": false,
 	} {
 		if got := Loopback(host); got != want {

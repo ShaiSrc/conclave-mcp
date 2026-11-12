@@ -12,8 +12,8 @@ file or a key store.
 
 ## Requirements
 
-- The server listens on a loopback address: `--host 127.0.0.1` (the
-  default), `localhost` or `::1`. On any other address `/ui` answers 404
+- The server listens on `--host 127.0.0.1` (the default), `localhost`
+  or `::1`. On any other address (including other 127.x.x.x ones) `/ui` answers 404
   and UI sessions count for nothing: passkeys need a secure
   context, and plain HTTP is one only on `localhost`.
 - A current browser on the same machine. The passkey JSON helpers need

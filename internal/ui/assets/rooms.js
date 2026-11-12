@@ -42,18 +42,21 @@ export async function roomsPage(view) {
   // fails shows its error in its row.
   const rooms = (await api('GET', '/v1/rooms')).rooms || [];
   const since = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
-  const rows = await mapLimit(rooms, async r => {
-    const link = h('td', {}, h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name));
+  const rows = rooms.map(r => h('tr', {},
+    h('td', {}, h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name)),
+    h('td', { colspan: 2, class: 'muted' }, 'Loading…')));
+  const fill = async (r, i) => {
+    const link = rows[i].firstChild;
     try {
       const msgs = await listMessages(r.id, since, LIST_PAGES);
       const cut = msgs.length >= PAGE * LIST_PAGES ? ` (first ${msgs.length} messages)` : '';
-      return h('tr', {}, link, h('td', {}, String(unanswered(msgs).length) + cut),
+      rows[i].replaceChildren(link, h('td', {}, String(unanswered(msgs).length) + cut),
         h('td', {}, msgs.length ? when(msgs[msgs.length - 1].ts) + (cut ? ' or later' + cut : '') : 'none in 24 h'));
     } catch (err) {
       if (err.status === 401) throw err;
-      return h('tr', {}, link, h('td', { colspan: 2 }, errorBox(err)));
+      rows[i].replaceChildren(link, h('td', { colspan: 2 }, errorBox(err)));
     }
-  });
+  };
   const name = h('input', { required: true, maxlength: 128 });
   const msg = h('div');
   view.replaceChildren(h('h1', {}, 'Rooms'),
@@ -177,23 +180,27 @@ function membersSection(base, members, keys) {
   const rows = members.map(m => {
     const picker = rightsPicker(m.rights || []);
     const msg = h('span');
+    const save = h('button', {
+      onclick: async () => {
+        msg.replaceChildren();
+        const rights = picker.value();
+        if (!rights.length && !confirm(`Save no rights for ${m.label}? This removes all its rights in this room.`)) return;
+        save.disabled = true; // one save at a time, so an older one cannot land last
+        try {
+          const saved = await api('PATCH', `${base}/members/${m.key_id}`, { rights });
+          if (Array.isArray(saved && saved.rights)) picker.set(saved.rights);
+          msg.replaceChildren('Saved.');
+        } catch (err) {
+          if (err.status === 401) rerender();
+          else msg.replaceChildren(errorBox(err));
+        } finally {
+          save.disabled = false;
+        }
+      },
+    }, 'Save rights');
     return h('tr', {},
       h('td', {}, m.label), h('td', {}, m.trust_origin, ' ', extMark(m.trust_origin)),
-      h('td', {}, picker.el, ' ',
-        h('button', {
-          onclick: async () => {
-            msg.replaceChildren();
-            const rights = picker.value();
-            if (!rights.length && !confirm(`Save no rights for ${m.label}? This removes all its rights in this room.`)) return;
-            try {
-              await api('PATCH', `${base}/members/${m.key_id}`, { rights });
-              msg.replaceChildren('Saved.');
-            } catch (err) {
-              if (err.status === 401) rerender();
-              else msg.replaceChildren(errorBox(err));
-            }
-          },
-        }, 'Save rights'), ' ', msg),
+      h('td', {}, picker.el, ' ', save, ' ', msg),
       h('td', {}, confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
         await api('DELETE', `${base}/members/${m.key_id}`);
         rerender();
@@ -254,15 +261,17 @@ function follow(base, id, msgs, draw, note) {
           if (done) break;
           buf += value;
           let end;
+          let catchUp = false;
           while ((end = buf.indexOf('\n\n')) >= 0) {
             const event = buf.slice(0, end);
             buf = buf.slice(end + 2);
             if (event.startsWith(': ok') || event.startsWith('event: message.created')) {
               delay = 1000;
               note.replaceChildren();
-              await sync(); // ': ok' catches up on what arrived before subscribing
+              catchUp = true; // ': ok' catches up on what arrived before subscribing
             }
           }
+          if (catchUp) await sync(); // once per read, not per event
         }
       } catch (err) {
         if (stop.signal.aborted) return;

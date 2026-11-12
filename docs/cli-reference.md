@@ -13,7 +13,7 @@ bug.
 conclave-mcp serve --host H --port P --db PATH        # run the server
 conclave-mcp admin keys create-bootstrap --label L     # first-time key
 conclave-mcp admin vacuum [--db PATH] [--force]        # offline maintenance
-conclave-mcp admin ui-reset [--db PATH]               # offline: drop all web UI passkeys
+conclave-mcp admin ui-reset --db PATH                # offline: drop all web UI passkeys
 conclave-mcp keys create|list|revoke                  # manage keys (admin key)
 conclave-mcp rooms create|list|get|archive|invite|rights|members|remove  # rooms and rights
 conclave-mcp messages send|list|thread|delete|subscribe|inbox  # send / receive
@@ -138,7 +138,7 @@ code 1 and an error message naming the conflicting label.
 ## `admin ui-reset`
 
 ```
-conclave-mcp admin ui-reset [--db PATH]
+conclave-mcp admin ui-reset --db PATH
 ```
 
 Deletes every passkey, session and setup token of the web UI directly
@@ -153,7 +153,7 @@ exists (the setup link is then used up): revoke it first with
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--db` | `${CONCLAVE_DATA_DIR}/data.db` (`./.conclave-mcp/data.db`) | Path to the SQLite file. |
+| `--db` | required | The SQLite file the server runs on (the value of `serve --db`). No default: `CONCLAVE_DATA_DIR` is not read, so a reset cannot hit another database. |
 
 **Stop the server first.**
 

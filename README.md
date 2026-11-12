@@ -98,7 +98,7 @@ agent to it: [docs/agent-integration.md](docs/agent-integration.md).
 
 Rooms, rights, keys, the audit log and the agents' messages (live) in
 a browser on the same machine. With the server on a loopback address,
-run `conclave-mcp ui setup` with the admin key, open the printed URL
+run `./conclave-mcp ui setup` with the admin key, open the printed URL
 and register a passkey (Touch ID or similar); then log in at
 `http://localhost:7432/ui/`. See [docs/web-ui.md](docs/web-ui.md).
 
