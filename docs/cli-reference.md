@@ -146,9 +146,10 @@ in the SQLite file, revokes the operator key the UI created and
 renames it `operator-revoked-<id>`, and records `ui.reset` in the
 audit log. Then start the server and run `ui setup`: it creates a
 fresh operator key. An active `operator` key that the UI did not
-create is left alone; rename it, or registering the passkey fails with 409
-(the setup link is then used up), and run `ui setup` again. See
-[web-ui.md](web-ui.md).
+create is left alone, and registering a passkey fails with 409 while it
+exists (the setup link is then used up): revoke it first with
+`keys revoke <id>`, then run `admin ui-reset`, which renames revoked
+`operator` keys, and `ui setup` again. See [web-ui.md](web-ui.md).
 
 | Flag | Default | Notes |
 |---|---|---|

@@ -223,6 +223,62 @@ func TestUIReset(t *testing.T) {
 	}
 }
 
+// The documented way out for a key labelled operator that the UI did not
+// create: ui-reset leaves it alone while active; once revoked (keys
+// revoke), ui-reset renames it and the label is free for setup.
+func TestUIReset_ForeignOperatorKeyAfterRevoke(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "data.db")
+	db, closeDB, err := storage.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Migrate(ctx, db, migrations.FS(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys (label, hash, prefix, created_at, is_admin) VALUES ('operator', 'x', 'hand', '2026-11-12T10:00:00Z', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	_ = closeDB()
+	label := func() (string, bool) {
+		t.Helper()
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var l string
+		var revoked sql.NullString
+		if err := db.QueryRow(`SELECT label, revoked_at FROM api_keys WHERE prefix = 'hand'`).Scan(&l, &revoked); err != nil {
+			t.Fatal(err)
+		}
+		return l, revoked.Valid
+	}
+
+	if err := runUIReset(ctx, &bytes.Buffer{}, dbPath); err != nil {
+		t.Fatalf("runUIReset: %v", err)
+	}
+	if l, revoked := label(); l != "operator" || revoked {
+		t.Fatalf("active foreign key after reset: label %q, revoked %v; want it left alone", l, revoked)
+	}
+
+	db, err = sql.Open("sqlite", dbPath) // what keys revoke does on the server
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE api_keys SET revoked_at = '2026-11-12T11:00:00Z' WHERE prefix = 'hand'`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if err := runUIReset(ctx, &bytes.Buffer{}, dbPath); err != nil {
+		t.Fatalf("runUIReset after revoke: %v", err)
+	}
+	if l, _ := label(); !strings.HasPrefix(l, "operator-revoked-") {
+		t.Errorf("revoked foreign key after reset: label %q, want operator-revoked-...", l)
+	}
+}
+
 func TestUIReset_MissingDBIsExit1(t *testing.T) {
 	err := runUIReset(context.Background(), &bytes.Buffer{}, filepath.Join(t.TempDir(), "missing.db"))
 	if ExitCode(err) != 1 {

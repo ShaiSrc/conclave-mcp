@@ -49,7 +49,8 @@ type ceremony struct {
 }
 
 // errOperatorUnusable: the label is taken by a key the UI cannot act as.
-var errOperatorUnusable = errors.New(`a key labelled "operator" exists that the UI did not create or that is revoked: run admin ui-reset with the service stopped`)
+// No API renames keys; admin ui-reset renames revoked operator keys.
+var errOperatorUnusable = errors.New(`a key labelled "operator" exists that the UI did not create: revoke it if it is active (conclave-mcp keys revoke <id>), stop the service, run conclave-mcp admin ui-reset, start the service and run conclave-mcp ui setup again`)
 
 // metaOperatorKey is the meta key that records the id of the operator
 // key the UI created. The label alone proves nothing: an admin key made

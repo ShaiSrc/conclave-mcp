@@ -378,8 +378,10 @@ the audit log. Then start the server and run conclave-mcp ui setup to
 register a passkey again; setup creates a fresh operator key.
 
 The revoked operator key is renamed operator-revoked-<id>, because key
-labels are unique. An active key labelled operator that the UI did not
-create is left alone: rename it, or setup refuses with a conflict.
+labels are unique; so is any other revoked key labelled operator. An
+active key labelled operator that the UI did not create is left alone,
+and setup refuses with a conflict while it exists: revoke it first
+(conclave-mcp keys revoke <id>), then run this again.
 
 Like admin vacuum, this subcommand does NOT talk to a running server.
 Stop the server first.`,

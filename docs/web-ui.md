@@ -42,7 +42,10 @@ below).
 
 If an active admin key labelled `operator` exists that setup did not
 create, registering the passkey fails with 409 and the setup link is then
-used up. Rename that key and run `ui setup` again.
+used up. No command renames keys, so: revoke that key (`conclave-mcp keys
+revoke <id>` with the admin key), stop the service, run `conclave-mcp
+admin ui-reset` (it renames revoked `operator` keys), start the service
+and run `ui setup` again.
 
 Do the setup right after upgrading: until the first passkey exists, any
 holder of the admin key can ask for a setup token.
@@ -64,7 +67,9 @@ operator key the UI created and renames it `operator-revoked-<id>`,
 clears the record of it, and writes `ui.reset` to the audit log. Start
 the service and run `conclave-mcp ui setup` again; setup then creates a
 fresh operator key. An active `operator` key that setup did not create
-is left alone (registering the passkey fails with 409 until it is renamed; run `ui setup` again after renaming). Whoever can stop
+is left alone, and registering a passkey fails with 409 while it exists:
+revoke it first (`conclave-mcp keys revoke <id>`), then run `admin
+ui-reset`, which renames it as well. Whoever can stop
 the service and write the database file is the operator already, as with
 `admin keys create-bootstrap`.
 
