@@ -46,6 +46,8 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(hook.NewCmd())
 	root.AddCommand(setup.NewInitCmd())
 	root.AddCommand(setup.NewAgentCmd())
+	root.AddCommand(messages.NewStatusCmd())
+	root.AddCommand(messages.NewWatchCmd())
 	root.AddCommand(newVersionCmd())
 
 	// Global flags shared by every CLI subcommand that talks to a server.

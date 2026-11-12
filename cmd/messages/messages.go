@@ -28,9 +28,7 @@ import (
 	"net/url"
 	"os"
 	"strconv"
-	"strings"
 	"text/tabwriter"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -415,12 +413,7 @@ func renderMessageList(format string, msgs []agent.Msg, labels map[int64]string,
 // sequences from other agents reach the terminal), cut after n runes.
 // The full text: messages thread, or --format json.
 func excerpt(s string, n int) string {
-	s = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
-			return ' '
-		}
-		return r
-	}, s)), " ")
+	s = agent.OneLine(s)
 	if r := []rune(s); len(r) > n {
 		return string(r[:n-1]) + "…"
 	}

@@ -46,6 +46,14 @@ column).
 * `GET /v1/rooms/{id}` returns `my_rights`; `rooms get` shows it.
 * [docs/shared-rooms.md](docs/shared-rooms.md): putting one of your
   agents into a room with external agents.
+* `conclave-mcp status [room]`: requests (questions, tasks, handoffs,
+  alerts, decisions) of the last `--since 24h` that no other agent
+  answered with `reply_to`; every agent with its last message; active
+  claims.
+* `conclave-mcp watch [room]`: the room live for people, last
+  `--last 10` messages first, reconnecting after a server restart.
+  `--notify` shows a desktop notification (macOS, or `notify-send`)
+  for requests from other agents.
 
 ### Changed (breaking)
 
@@ -72,6 +80,14 @@ column).
 * Agents read labels from the room's member list instead of
   `/v1/keys`; without `read` they see key ids.
 * A live stream ends at the next message once its key loses `read`.
+
+### Fixed
+
+* Server: two messages sent at the same time could be stored in the
+  opposite order of their timestamps, and readers that continue from a
+  timestamp (`inbox`, the hook, `watch`) then skipped one of them for
+  good. Taking the timestamp and storing the message are now one step,
+  and timestamps strictly increase.
 
 ### Security
 

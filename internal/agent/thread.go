@@ -49,3 +49,33 @@ func FormatThread(room string, msgs []Msg, labels map[int64]string, self int64) 
 	}
 	return b.String()
 }
+
+// Unanswered returns the requests in msgs (questions, tasks, handoffs,
+// alerts, decisions) that no other key has replied to with reply_to.
+func Unanswered(msgs []Msg) []Msg {
+	answered := map[int64]bool{}
+	author := make(map[int64]int64, len(msgs))
+	for _, m := range msgs {
+		author[m.ID] = m.Author
+	}
+	for _, m := range msgs {
+		if to := ReplyTo(m); to > 0 && author[to] != m.Author {
+			answered[to] = true
+		}
+	}
+	var out []Msg
+	for _, m := range msgs {
+		if Actionable(m) && !answered[m.ID] {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// Line renders one message like the inbox does, with full content and
+// the reader's own messages marked "(you)".
+func Line(m Msg, labels map[int64]string, self int64) string {
+	var b strings.Builder
+	writeMsg(&b, m, labels, self, 0)
+	return b.String()
+}

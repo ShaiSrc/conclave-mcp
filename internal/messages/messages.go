@@ -15,6 +15,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -25,6 +26,9 @@ import (
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
+// clock is the time source for message timestamps, a seam for tests.
+var clock = time.Now
+
 type Service struct {
 	DB              *sql.DB
 	MaxMessageBytes int // 256 KiB default per SPEC-0001 Q4
@@ -33,6 +37,17 @@ type Service struct {
 	// sees no events. cmd/serve wires this in via
 	// NewService(db, maxBytes, broker).
 	Broker Broker
+
+	// stampMu makes taking a timestamp and inserting one step, and
+	// lastTS keeps timestamps strictly increasing, so ts order is
+	// insert order and a reader's `since` cursor never passes a
+	// message that is not stored yet. lastTS starts from the newest
+	// stored ts, so a restart with a clock that went back keeps the
+	// order too.
+	// ponytail: one lock for all rooms; per-room locks if send
+	// throughput ever matters.
+	stampMu sync.Mutex
+	lastTS  time.Time
 }
 
 // Broker is the subset of *events.Broker the messages
@@ -233,13 +248,32 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		req.Metadata = b
 	}
 
-	now := storage.FormatTS(time.Now())
+	s.stampMu.Lock()
+	if s.lastTS.IsZero() { // first send since start: continue after what is stored
+		var newest sql.NullString
+		err := s.DB.QueryRowContext(r.Context(), `SELECT MAX(ts) FROM messages`).Scan(&newest)
+		if err == nil && newest.Valid { // NULL: no messages yet
+			s.lastTS, err = time.Parse(time.RFC3339Nano, newest.String)
+		}
+		if err != nil { // lastTS stays zero, so the next send tries again
+			s.stampMu.Unlock()
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "read newest timestamp")
+			return
+		}
+	}
+	t := clock().UTC()
+	if !t.After(s.lastTS) {
+		t = s.lastTS.Add(time.Nanosecond) // ts has nanosecond precision
+	}
+	s.lastTS = t
+	now := storage.FormatTS(t)
 	res, err := s.DB.ExecContext(r.Context(),
 		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		roomID, caller, now, req.Content, req.ContentType,
 		messageType, metadata, callerTrustOrigin,
 	)
+	s.stampMu.Unlock()
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert message")
 		return
