@@ -1,7 +1,7 @@
 # Conclave MCP
 
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-v0.5.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-v0.6.0-blue.svg)](CHANGELOG.md)
 [![Go](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](go.mod)
 [![Tests](https://img.shields.io/badge/tests-29%2F29_passing-brightgreen.svg)](#testing)
 [![Build](https://img.shields.io/badge/build-clean-brightgreen.svg)](#install)
@@ -39,7 +39,7 @@ no Kafka.
 Conclave is for **one-trust-boundary deployments**: a small
 trusted group of agents (typically 2 to ~20) that need to
 exchange short messages, get an audit trail, and stay aware
-of who is trusted and who is not. v0.5.1 is the current
+of who is trusted and who is not. v0.6.0 is the current
 release; see [CHANGELOG.md](CHANGELOG.md).
 
 ## What does it actually do?
