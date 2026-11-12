@@ -5,8 +5,11 @@ package ui
 
 import (
 	"database/sql"
+	"embed"
 	"fmt"
+	"io/fs"
 	"net"
+	"net/http"
 	"sync"
 	"time"
 
@@ -35,7 +38,7 @@ type Service struct {
 	store
 	wa     *webauthn.WebAuthn
 	origin string    // http://localhost:<port>, the only origin the UI runs on
-	hosts  [2]string // the Host headers cookie sessions accept: localhost:<port>, 127.0.0.1:<port>
+	hosts  [2]string // the Host headers /ui and cookie sessions accept: localhost:<port>, 127.0.0.1:<port>
 
 	mu         sync.Mutex
 	ceremonies map[string]ceremony // by hashToken(ceremony cookie)
@@ -86,14 +89,61 @@ func Loopback(host string) bool {
 // uiHost reports whether host (a request's Host header) is the UI's.
 func (s *Service) uiHost(host string) bool { return host == s.hosts[0] || host == s.hosts[1] }
 
-// Routes mounts the /ui endpoints on r.
+//go:embed assets
+var assets embed.FS
+
+// csp allows the page's own files only: no inline script or style, no
+// framing.
+const csp = "default-src 'self'; base-uri 'none'; frame-ancestors 'none'"
+
+// Routes mounts /ui on r: the pages under /ui/ and the passkey and
+// session endpoints under /ui/auth/, all behind guard.
 func (s *Service) Routes(r chi.Router) {
-	r.Post("/ui/auth/register/begin", s.registerBegin)
-	r.Post("/ui/auth/register/finish", s.registerFinish)
-	r.Post("/ui/auth/login/begin", s.loginBegin)
-	r.Post("/ui/auth/login/finish", s.loginFinish)
-	r.Post("/ui/auth/logout", s.logout)
-	r.Get("/ui/auth/state", s.state)
-	r.Get("/ui/auth/credentials", s.listCredentials)
-	r.Delete("/ui/auth/credentials/{id}", s.removeCredential)
+	files, err := fs.Sub(assets, "assets")
+	if err != nil {
+		panic(err) // the embedded directory always exists
+	}
+	pages := http.StripPrefix("/ui/", http.FileServer(http.FS(files)))
+	r.Group(func(r chi.Router) {
+		r.Use(s.guard)
+		r.Get("/ui", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/ui/", http.StatusFound) })
+		r.Get("/ui/*", pages.ServeHTTP)
+		r.Post("/ui/auth/register/begin", s.registerBegin)
+		r.Post("/ui/auth/register/finish", s.registerFinish)
+		r.Post("/ui/auth/login/begin", s.loginBegin)
+		r.Post("/ui/auth/login/finish", s.loginFinish)
+		r.Post("/ui/auth/logout", s.logout)
+		r.Get("/ui/auth/state", s.state)
+		r.Get("/ui/auth/credentials", s.listCredentials)
+		r.Delete("/ui/auth/credentials/{id}", s.removeCredential)
+	})
+}
+
+// guard runs before every /ui request: the security headers, the Host
+// check (DNS rebinding), the redirect from 127.0.0.1 to localhost (the
+// passkeys' relying party), the Origin check for writes (CSRF) and a
+// body limit.
+func (s *Service) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Content-Security-Policy", csp)
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Cache-Control", "no-store")
+		if !s.uiHost(r.Host) {
+			writeErr(w, r, http.StatusForbidden, "forbidden", "host not allowed")
+			return
+		}
+		read := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if read && r.Host == s.hosts[1] {
+			http.Redirect(w, r, s.origin+r.URL.RequestURI(), http.StatusFound)
+			return
+		}
+		if !read && r.Header.Get("Origin") != s.origin {
+			writeErr(w, r, http.StatusForbidden, "forbidden", "origin not allowed")
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+		next.ServeHTTP(w, r)
+	})
 }
