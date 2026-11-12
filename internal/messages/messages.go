@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -66,7 +67,9 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 }
 
 func (s *Service) Routes(r chi.Router) {
-	r.Post("/rooms/{id}/messages", s.send)
+	r.Post("/rooms/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
+		s.post(w, r, chi.URLParam(r, "id"), false)
+	})
 	r.Get("/rooms/{id}/messages", s.list)
 	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
 	// 403 forbidden to every other caller.
@@ -101,6 +104,9 @@ type messageView struct {
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
 	DeletedAt   string          `json:"deleted_at,omitempty"`
 	TrustOrigin string          `json:"trust_origin"`
+	// Operator is set by the server for messages the operator sent from
+	// the web UI with a passkey; no request field can set it.
+	Operator bool `json:"operator,omitempty"`
 }
 
 // allowedMessageTypes is the set of intent tags from
@@ -117,15 +123,25 @@ var allowedMessageTypes = map[string]struct{}{
 	"system":          {},
 }
 
-// send handles POST /rooms/{id}/messages: validates the body and
-// reply_to, stores the message and publishes it to subscribers.
-func (s *Service) send(w http.ResponseWriter, r *http.Request) {
+// SendAsOperator stores the request body as an operator message. It is
+// for the UI's passkey-confirmed path only: nothing else may call it.
+func (s *Service) SendAsOperator(w http.ResponseWriter, r *http.Request, roomID string) {
+	s.post(w, r, roomID, true)
+}
+
+// post handles a send: validates the body and reply_to, stores the
+// message and publishes it to subscribers. operator marks the message
+// as the operator's; UI sessions may not post unmarked.
+func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool) {
 	caller := callerKeyID(r)
 	if caller == 0 {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "no auth claims")
 		return
 	}
-	roomID := chi.URLParam(r, "id")
+	if c, _ := auth.FromContext(r.Context()); !operator && slices.Contains(c.Scopes, auth.ScopeUI) {
+		writeErr(w, r, http.StatusForbidden, "forbidden", "operator messages need a passkey confirmation: send them from the web UI")
+		return
+	}
 
 	// Size guard at HTTP layer (defence in depth: also enforced by
 	// CHECK constraint in migration 0001, but the constraint allows
@@ -268,10 +284,10 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 	s.lastTS = t
 	now := storage.FormatTS(t)
 	res, err := s.DB.ExecContext(r.Context(),
-		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		roomID, caller, now, req.Content, req.ContentType,
-		messageType, metadata, callerTrustOrigin,
+		messageType, metadata, callerTrustOrigin, operator,
 	)
 	s.stampMu.Unlock()
 	if err != nil {
@@ -279,8 +295,11 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id, _ := res.LastInsertId()
-	_ = audit.Write(r.Context(), s.DB, caller, "message.send", "message", strconv.FormatInt(id, 10), roomID, "ok",
-		`{"room_id":`+strconvQuote(roomID)+`}`)
+	detail := `{"room_id":` + strconvQuote(roomID)
+	if operator {
+		detail += `,"operator":true`
+	}
+	_ = audit.Write(r.Context(), s.DB, caller, "message.send", "message", strconv.FormatInt(id, 10), roomID, "ok", detail+`}`)
 	// Build the response view once; we use the same shape
 	// for the HTTP response and the SSE event payload
 	// (ADR-0009). Failure to publish is non-fatal: the
@@ -297,6 +316,7 @@ func (s *Service) send(w http.ResponseWriter, r *http.Request) {
 		// §3.5.1: derived from len(content), not stored).
 		Size:        len(req.Content),
 		TrustOrigin: callerTrustOrigin,
+		Operator:    operator,
 	}
 	if req.MessageType != "" {
 		mv.MessageType = req.MessageType
@@ -379,7 +399,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	)
 	if trustOrigin != "" {
 		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin
+			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator
 			 FROM messages
 			 WHERE room_id = ? AND ts > ? AND deleted_at IS NULL AND trust_origin = ?
 			 ORDER BY ts ASC, id ASC
@@ -388,7 +408,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		)
 	} else {
 		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin
+			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator
 			 FROM messages
 			 WHERE room_id = ? AND ts > ? AND deleted_at IS NULL
 			 ORDER BY ts ASC, id ASC
@@ -413,7 +433,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			deletedAt sql.NullString
 			trustOrig string
 		)
-		if err := rows.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &ctype, &content, &mtype, &meta, &deletedAt, &trustOrig); err != nil {
+		if err := rows.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &ctype, &content, &mtype, &meta, &deletedAt, &trustOrig, &mv.Operator); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}

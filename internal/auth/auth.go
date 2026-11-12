@@ -237,6 +237,9 @@ func FromContext(ctx context.Context) (Claims, bool) {
 // being members.
 const ScopeAdmin = "admin"
 
+// ScopeUI marks a request authenticated by a web UI session.
+const ScopeUI = "ui"
+
 // IsAdmin reports whether ctx carries an admin key's claims.
 func IsAdmin(ctx context.Context) bool {
 	c, ok := FromContext(ctx)

@@ -59,7 +59,7 @@ func (s *Service) Auth(bearer func(http.Handler) http.Handler) func(http.Handler
 				writeErr(w, r, http.StatusInternalServerError, "internal_error", "operator key lookup")
 				return
 			}
-			ctx := context.WithValue(r.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: id, Scopes: []string{auth.ScopeAdmin}})
+			ctx := context.WithValue(r.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: id, Scopes: []string{auth.ScopeAdmin, auth.ScopeUI}})
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
