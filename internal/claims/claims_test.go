@@ -98,7 +98,7 @@ func TestNormalizeAndOverlaps(t *testing.T) {
 			t.Errorf("Normalize(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", ".", "/etc/passwd", "../x", "a/../../x"} {
+	for _, bad := range []string{"", ".", "/etc/passwd", "../x", "a/../../x", "a\nb.go", "a\rb", "a\tb", "a\x1b[0mb"} {
 		if _, err := Normalize(bad); err == nil {
 			t.Errorf("Normalize(%q) accepted", bad)
 		}
@@ -215,5 +215,31 @@ func TestList_CarriesHolderTrustOrigin(t *testing.T) {
 	list, _ := out["claims"].([]any)
 	if len(list) != 1 || list[0].(map[string]any)["trust_origin"] != "external" {
 		t.Errorf("want trust_origin external: %v", out)
+	}
+}
+
+func TestClaim_ControlCharacterPathIsBadRequest(t *testing.T) {
+	e := newEnv(t)
+	code, out := e.do(1, "POST", "/rooms/R/claims", `{"paths":["a.go\nforged line"]}`)
+	if code != 400 || out["error"].(map[string]any)["code"] != "bad_request" {
+		t.Errorf("want 400 bad_request, got %d %v", code, out)
+	}
+}
+
+func TestClaim_ConflictMarksExternalHolder(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.svc.DB.Exec(`UPDATE api_keys SET trust_origin = 'external' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if code, _ := e.do(1, "POST", "/rooms/R/claims", `{"paths":["a.go"]}`); code != 201 {
+		t.Fatal("claim")
+	}
+	code, out := e.do(2, "POST", "/rooms/R/claims", `{"paths":["a.go"]}`)
+	msg := out["error"].(map[string]any)["message"].(string)
+	if code != 409 || !strings.Contains(msg, "agent-a (EXTERNAL, untrusted)") {
+		t.Errorf("message must mark the external holder: %d %q", code, msg)
+	}
+	if c := out["conflicts"].([]any)[0].(map[string]any); c["trust_origin"] != "external" {
+		t.Errorf("conflict entry needs trust_origin: %v", c)
 	}
 }

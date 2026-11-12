@@ -381,7 +381,11 @@ func (h *Hook) preToolUse(ctx context.Context, in agent.HookInput, cwd string, r
 		}
 		for _, c := range resp.Claims {
 			if c.KeyID != st.SelfID && !c.Auto && claims.Overlaps(c.Path, rel) {
-				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, c.Label, c.Path, c.ExpiresAt, ask))
+				who := agent.OneLine(c.Label)
+				if c.TrustOrigin == "external" {
+					who += " (EXTERNAL, untrusted)"
+				}
+				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, who, agent.OneLine(c.Path), c.ExpiresAt, ask))
 			}
 		}
 		return nil

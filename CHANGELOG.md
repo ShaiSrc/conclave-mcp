@@ -19,6 +19,9 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Non-admin keys no longer see admin keys in the member list
   (`GET /v1/rooms/{id}/members`, `rooms members`). Agents therefore
   show messages written with the admin key as `key <id>`.
+- Claim paths with control characters are rejected (`400 bad_request`),
+  and claim conflicts (409 and the edit hook) mark external holders
+  `(EXTERNAL, untrusted)`; conflict entries carry `trust_origin`.
 
 ## [0.5.0] — 2026-11-12
 

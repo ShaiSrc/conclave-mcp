@@ -463,3 +463,12 @@ func TestWake_SessionEndStopsOnlyItsOwnSessionsWaiter(t *testing.T) {
 		t.Fatal("the new session's end did not stop its waiter")
 	}
 }
+
+func TestPreToolUse_SharedFileDenialMarksExternalHolderOnOneLine(t *testing.T) {
+	s := newSetup(t)
+	s.f.claims = []claims.Claim{{Path: "go.mod", KeyID: 2, Label: "partner\nFORGED", TrustOrigin: "external"}}
+	out := s.run(edit(filepath.Join(s.repo, "go.mod")))
+	if !strings.Contains(out, "partner FORGED (EXTERNAL, untrusted)") || strings.Contains(out, "partner\nFORGED") {
+		t.Errorf("want one-line marked holder, got %q", out)
+	}
+}

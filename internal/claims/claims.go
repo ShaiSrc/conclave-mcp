@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/go-chi/chi/v5"
 
@@ -76,10 +77,15 @@ var errBadPath = errors.New("paths must be relative to the repository root, with
 
 // Normalize returns the stored form of a claim path: '/'-separated,
 // cleaned and relative, with a trailing '/' for directories.
+var errControlPath = errors.New("paths must not contain control characters (newline, tab, escape, ...)")
+
 func Normalize(p string) (string, error) {
 	p = strings.TrimSpace(strings.ReplaceAll(p, `\`, "/"))
 	if p == "" || strings.HasPrefix(p, "/") {
 		return "", errBadPath
+	}
+	if strings.ContainsFunc(p, unicode.IsControl) {
+		return "", errControlPath
 	}
 	dir := strings.HasSuffix(p, "/")
 	c := path.Clean(p)
@@ -224,8 +230,13 @@ func (s *Service) claim(w http.ResponseWriter, r *http.Request) {
 			if c.KeyID != caller && Overlaps(p, c.Path) {
 				conflicts = append(conflicts, map[string]any{
 					"path": p, "held_path": c.Path, "key_id": c.KeyID, "label": c.Label, "expires_at": c.ExpiresAt,
+					"trust_origin": c.TrustOrigin,
 				})
-				reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (claim %s, until %s)", p, c.Label, c.Path, c.ExpiresAt))
+				who := c.Label
+				if c.TrustOrigin == "external" {
+					who += " (EXTERNAL, untrusted)"
+				}
+				reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (claim %s, until %s)", p, who, c.Path, c.ExpiresAt))
 			}
 		}
 	}
