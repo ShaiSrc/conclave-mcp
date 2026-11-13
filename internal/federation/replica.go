@@ -775,9 +775,13 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 
 // ForwardClaims sends r, a claims request (list, claim, heartbeat or
 // release) of our key author in replica roomID, to the room's host for
-// the author's address, and returns the host's status and body as they
-// are. Claims carry paths, so nothing is translated. A refusal (no
-// handle, host unreachable) is a *fedrooms.Error.
+// the author's address, and returns the host's status and body. Claims
+// carry paths, so only key ids are translated: each claim's and
+// conflict's key_id becomes our key for its address (our bot, or the
+// stand-in, created if needed; 0 for an address no key of ours can
+// stand for), so a bot finds its own claims by its own key id. The
+// rest of the body is the host's. A refusal (no handle, host
+// unreachable) is a *fedrooms.Error.
 func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (int, []byte, error) {
 	ctx := r.Context()
 	host, addr, err := s.ourAuthor(ctx, roomID, author)
@@ -801,7 +805,25 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 	if err := s.unreachable(host, status, err); err != nil {
 		return 0, nil, err
 	}
-	return status, out, nil
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	out, err = eachClaim(out, func(c map[string]json.RawMessage) error {
+		var addr string
+		_ = json.Unmarshal(c["address"], &addr)
+		id, _, err := s.memberKey(ctx, tx, addr, true)
+		if errors.Is(err, errRefused) {
+			id, err = 0, nil
+		}
+		c["key_id"] = rawJSON(id)
+		return err
+	})
+	if err != nil {
+		return 0, nil, err
+	}
+	return status, out, tx.Commit()
 }
 
 // LeaveRemote tells the host of replica roomID that our bot keyID leaves

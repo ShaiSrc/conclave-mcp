@@ -324,7 +324,9 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 
 // handleRoomClaims answers the claims endpoints under
 // /fed/v1/rooms/{id}/claims for the origin's bot named by ?author=, as
-// its stand-in, with the rights and conflicts of local keys.
+// its stand-in, with the rights and conflicts of local keys. Each claim
+// and conflict also carries its holder's address, by which the member
+// server finds its own key for the holder.
 func (s *Service) handleRoomClaims(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.roomPeer(w, r); !ok {
 		return
@@ -334,7 +336,54 @@ func (s *Service) handleRoomClaims(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body, _ := io.ReadAll(r.Body) // read and capped by Verify
-	s.Rooms.Claims.ServeHTTP(w, asStandIn(r, keyID, strings.TrimPrefix(r.URL.Path, "/fed/v1"), body))
+	rec := httptest.NewRecorder()
+	s.Rooms.Claims.ServeHTTP(rec, asStandIn(r, keyID, strings.TrimPrefix(r.URL.Path, "/fed/v1"), body))
+	ctx := r.Context()
+	out, err := eachClaim(rec.Body.Bytes(), func(c map[string]json.RawMessage) error {
+		var id int64
+		if json.Unmarshal(c["key_id"], &id) != nil {
+			return nil
+		}
+		addr, err := fedrooms.Address(ctx, s.db, id, s.id.Domain)
+		c["address"] = rawJSON(addr)
+		return err
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	for k, v := range rec.Header() {
+		w.Header()[k] = v
+	}
+	w.WriteHeader(rec.Code)
+	_, _ = w.Write(out)
+}
+
+// eachClaim calls f with each claim and conflict of body, a claims
+// answer, and returns body with f's changes; other fields are kept. A
+// body without claims or conflicts is returned as it is.
+func eachClaim(body []byte, f func(c map[string]json.RawMessage) error) ([]byte, error) {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return body, nil
+	}
+	changed := false
+	for _, k := range []string{"claims", "conflicts"} {
+		var list []map[string]json.RawMessage
+		if json.Unmarshal(top[k], &list) != nil || list == nil {
+			continue
+		}
+		for _, c := range list {
+			if err := f(c); err != nil {
+				return nil, err
+			}
+		}
+		top[k], changed = rawJSON(list), true
+	}
+	if !changed {
+		return body, nil
+	}
+	return rawJSON(top), nil
 }
 
 // handleRoomLeave answers POST /fed/v1/rooms/{id}/leave: the origin's

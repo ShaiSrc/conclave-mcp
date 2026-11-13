@@ -18,6 +18,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/claims"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 )
@@ -1118,6 +1119,69 @@ func TestReplicaClaims(t *testing.T) {
 	}
 	if n := count(t, b.db, `SELECT COUNT(*) FROM claims`); n != 0 {
 		t.Errorf("b stores %d claims", n)
+	}
+}
+
+// Claim answers on a replica carry its own key ids: b1 sees its claim
+// as its own, by its key id as the hook compares it with whoami's, and
+// c1's as another key's, the stand-in b creates for c1 when it first
+// meets it. The same holds on c.
+func TestReplicaClaims_LocalKeyIDs(t *testing.T) {
+	a, b, room, b1 := pair(t, "read,claim")
+	c := newLiveRig(t)
+	allow(t, a.svc, c.svc.id)
+	allow(t, c.svc, a.svc.id)
+	c1 := auth.Claims{KeyID: c.bot(t, "c1")}
+	a.invite(t, room, "c1@"+c.svc.Domain(), "read,claim")
+	base := "/rooms/" + room + "/claims"
+	for _, w := range []struct {
+		g    *roomRig
+		who  auth.Claims
+		path string
+	}{{c, c1, "theirs.go"}, {b, b1, "mine.go"}} {
+		if rec := w.g.do(w.who, http.MethodPost, base, `{"paths":["`+w.path+`"]}`); rec.Code != http.StatusCreated ||
+			!strings.Contains(rec.Body.String(), fmt.Sprintf(`"key_id":%d,`, w.who.KeyID)) {
+			t.Fatalf("claim %s: %d %s", w.path, rec.Code, rec.Body)
+		}
+	}
+	c1Addr := "c1@" + c.svc.Domain()
+	if n := count(t, b.db, `SELECT COUNT(*) FROM api_keys WHERE label = ?`, c1Addr); n != 0 {
+		t.Fatalf("b already has a key for c1")
+	}
+	held := func(g *roomRig, who auth.Claims) map[string]int64 {
+		t.Helper()
+		rec := g.do(who, http.MethodGet, base, "")
+		var out struct{ Claims []claims.Claim }
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("list: %d %s", rec.Code, rec.Body)
+		}
+		m := map[string]int64{}
+		for _, cl := range out.Claims {
+			m[cl.Path] = cl.KeyID
+		}
+		return m
+	}
+	onB := held(b, b1)
+	c1OnB := int64(count(t, b.db, `SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, c1Addr, c.svc.Domain()))
+	if onB["mine.go"] != b1.KeyID || onB["theirs.go"] != c1OnB || c1OnB == b1.KeyID {
+		t.Errorf("on b: %v; b1 is %d, c1's stand-in %d", onB, b1.KeyID, c1OnB)
+	}
+	onC := held(c, c1)
+	b1OnC := int64(count(t, c.db, `SELECT id FROM api_keys WHERE label = ?`, "b1@"+b.svc.Domain()))
+	if onC["theirs.go"] != c1.KeyID || onC["mine.go"] != b1OnC {
+		t.Errorf("on c: %v; c1 is %d, b1's stand-in %d", onC, c1.KeyID, b1OnC)
+	}
+	// A conflict names the holder by its key here too.
+	rec := b.do(b1, http.MethodPost, base, `{"paths":["theirs.go"]}`)
+	var conflict struct {
+		Conflicts []struct {
+			KeyID int64  `json:"key_id"`
+			Label string `json:"label"`
+		}
+	}
+	if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &conflict) != nil || len(conflict.Conflicts) != 1 ||
+		conflict.Conflicts[0].KeyID != c1OnB || conflict.Conflicts[0].Label != c1Addr {
+		t.Errorf("conflict on b: %d %s", rec.Code, rec.Body)
 	}
 }
 
