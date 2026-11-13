@@ -42,6 +42,9 @@ type Service struct {
 	botStore     *bots.Store
 	refresh      chan string // peers whose directory the refresh loop fetches next
 
+	// Rooms connects federated rooms to the local services.
+	Rooms RoomHooks
+
 	mu          sync.Mutex
 	limiters    map[string]*rate.Limiter // per verified peer
 	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
@@ -88,6 +91,13 @@ func (s *Service) PublicRoutes(r chi.Router) {
 		r.Post("/ping", s.handlePing)
 		r.Get("/bots/{name}", s.handleFedBot)
 		r.Get("/directory", s.handleFedDirectory)
+		r.Post("/rooms/{id}/messages", s.handleRoomMessage)
+		r.Get("/rooms/{id}/events", s.handleRoomEvents)
+		r.Post("/rooms/{id}/leave", s.handleRoomLeave)
+		r.Get("/rooms/{id}/claims", s.handleRoomClaims)
+		r.Post("/rooms/{id}/claims", s.handleRoomClaims)
+		r.Post("/rooms/{id}/claims/heartbeat", s.handleRoomClaims)
+		r.Post("/rooms/{id}/claims/release", s.handleRoomClaims)
 	})
 }
 

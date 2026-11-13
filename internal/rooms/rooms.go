@@ -8,19 +8,24 @@
 //	GET    /v1/rooms/{id}                  -- details + my_rights (members, admin; 404 otherwise)
 //	GET    /v1/rooms/{id}/members          -- members (read right, admin)
 //	POST   /v1/rooms/{id}/archive          -- soft-delete (admin)
-//	POST   /v1/rooms/{id}/members          -- invite with rights (admin; /invite is an alias)
+//	POST   /v1/rooms/{id}/members          -- invite with rights (admin; /invite is an alias);
+//	                                          a bot of a peer server by its address
 //	PATCH  /v1/rooms/{id}/members/{keyid}  -- replace a member's rights (admin)
 //	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (admin)
 //
-// Mutations are audit-logged.
+// Mutations are audit-logged. With federation on, every change of a
+// room with remote members is written to its event log in the change's
+// transaction (internal/fedrooms).
 package rooms
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -28,12 +33,20 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
 )
 
 // Service is the rooms HTTP handler.
 type Service struct {
 	DB *sql.DB
+	// FedDomain is the federation domain, "" with federation off: then
+	// nothing is logged and invites by address answer 404.
+	FedDomain string
+	// InviteRemote asks the server of address (name@domain, lowercase)
+	// to add its bot to room roomID, named name, with rights. A refusal
+	// is a *fedrooms.Error. Set by the server with federation on.
+	InviteRemote func(ctx context.Context, roomID, name, address string, rights []string) error
 }
 
 func NewService(db *sql.DB) *Service { return &Service{DB: db} }
@@ -285,7 +298,13 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.DB.ExecContext(r.Context(),
+	tx, err := s.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin tx")
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(r.Context(),
 		`UPDATE rooms SET archived_at = ? WHERE id = ? AND archived_at IS NULL`,
 		now, id,
 	)
@@ -298,12 +317,22 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusNotFound, "not_found", "room not found or already archived")
 		return
 	}
+	if err := fedrooms.LogRoom(r.Context(), tx, id, s.FedDomain); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
+		return
+	}
 	_ = audit.Write(r.Context(), s.DB, caller, "room.archive", "room", id, id, "ok", "")
 	w.WriteHeader(http.StatusNoContent)
 }
 
 type inviteRequest struct {
 	KeyID int64 `json:"key_id"`
+	// Address invites a bot of a peer server, name@domain, instead.
+	Address string `json:"address"`
 	// Rights wins over Role. Role is what clients from before rights
 	// send: owner/writer become all, reader becomes read.
 	Rights         []string `json:"rights"`
@@ -325,8 +354,8 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
 		return
 	}
-	if req.KeyID == 0 {
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "key_id required")
+	if (req.KeyID == 0) == (req.Address == "") {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "key_id or address required, not both")
 		return
 	}
 	set, err := rights.Parse(req.Rights)
@@ -335,6 +364,10 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", err.Error())
+		return
+	}
+	if req.Address != "" {
+		s.inviteRemote(w, r, id, strings.ToLower(strings.TrimSpace(req.Address)), set)
 		return
 	}
 	var exists int
@@ -348,14 +381,14 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 	}
 	// One room per key: a key that is not an admin key and is already
 	// in another room that is not archived needs allow_multi_room.
-	var isAdmin, elsewhere bool
+	var isAdmin, elsewhere, remote bool
 	err = s.DB.QueryRowContext(r.Context(),
 		`SELECT k.is_admin, EXISTS (
 		   SELECT 1 FROM room_members m JOIN rooms o ON o.id = m.room_id
-		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL)
+		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL), k.remote_domain IS NOT NULL
 		 FROM api_keys k WHERE k.id = ? AND k.revoked_at IS NULL`,
 		id, req.KeyID,
-	).Scan(&isAdmin, &elsewhere)
+	).Scan(&isAdmin, &elsewhere, &remote)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, r, http.StatusNotFound, "not_found", "key not found")
 		return
@@ -364,26 +397,109 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "key lookup")
 		return
 	}
+	if remote {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "a bot of another server is invited by its address")
+		return
+	}
 	if elsewhere && !isAdmin && !req.AllowMultiRoom {
 		writeErr(w, r, http.StatusConflict, "key_in_other_room",
 			"key is already a member of another room; pass allow_multi_room to add it anyway")
 		return
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.DB.ExecContext(r.Context(),
-		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)`,
-		id, req.KeyID, now, set.Storage(),
-	); err != nil {
-		if isUniqueViolation(err) {
-			writeErr(w, r, http.StatusConflict, "conflict", "already a member")
-			return
-		}
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert member")
+	if _, ok := s.addMember(w, r, id, req.KeyID, "", set); !ok {
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{"room_id": id, "rights": set})
 	_ = audit.Write(r.Context(), s.DB, caller, "room.invite", "member", strconv.FormatInt(req.KeyID, 10), id, "ok", string(detail))
 	w.WriteHeader(http.StatusCreated)
+}
+
+// inviteRemote invites the bot at address: its server is asked first,
+// and only once it accepted is the bot's stand-in added.
+func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, address string, set rights.Set) {
+	if s.InviteRemote == nil {
+		writeErr(w, r, http.StatusNotFound, "federation_disabled", "federation is not enabled on this server")
+		return
+	}
+	var (
+		name     string
+		archived sql.NullString
+		member   bool
+	)
+	err := s.DB.QueryRowContext(r.Context(),
+		`SELECT r.name, r.archived_at, EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
+		   WHERE m.room_id = r.id AND k.label = ? AND k.remote_domain IS NOT NULL)
+		 FROM rooms r WHERE r.id = ?`, address, roomID).Scan(&name, &archived, &member)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
+		return
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
+		return
+	case archived.Valid:
+		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
+		return
+	case member:
+		writeErr(w, r, http.StatusConflict, "conflict", "already a member")
+		return
+	}
+	if err := s.InviteRemote(r.Context(), roomID, name, address, set); err != nil {
+		var fe *fedrooms.Error
+		if errors.As(err, &fe) {
+			writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		} else {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "invite")
+		}
+		return
+	}
+	keyID, ok := s.addMember(w, r, roomID, 0, address, set)
+	if !ok {
+		return
+	}
+	detail, _ := json.Marshal(map[string]any{"room_id": roomID, "address": address, "rights": set})
+	_ = audit.Write(r.Context(), s.DB, callerKeyID(r), "room.invite", "member", strconv.FormatInt(keyID, 10), roomID, "ok", string(detail))
+	writeJSON(w, http.StatusCreated, map[string]any{"key_id": keyID, "address": address, "rights": set})
+}
+
+// addMember adds keyID to roomID with set, or with an address the
+// stand-in of that remote bot, created if needed, and logs it, in one
+// transaction. It returns the key added, or answers the request itself
+// on failure.
+func (s *Service) addMember(w http.ResponseWriter, r *http.Request, roomID string, keyID int64, address string, set rights.Set) (int64, bool) {
+	ctx := r.Context()
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin tx")
+		return 0, false
+	}
+	defer tx.Rollback()
+	if address != "" {
+		if keyID, err = fedrooms.StandIn(ctx, tx, address); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "stand-in key")
+			return 0, false
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)`,
+		roomID, keyID, time.Now().UTC().Format(time.RFC3339Nano), set.Storage(),
+	); err != nil {
+		if isUniqueViolation(err) {
+			writeErr(w, r, http.StatusConflict, "conflict", "already a member")
+			return 0, false
+		}
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert member")
+		return 0, false
+	}
+	if err := fedrooms.LogJoin(ctx, tx, roomID, keyID, s.FedDomain); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+		return 0, false
+	}
+	if err := tx.Commit(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
+		return 0, false
+	}
+	return keyID, true
 }
 
 // setRights replaces a member's rights (PATCH /rooms/{id}/members/{keyid}).
@@ -427,7 +543,13 @@ func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "member lookup")
 		return
 	}
-	res, err := s.DB.ExecContext(r.Context(),
+	tx, err := s.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin tx")
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(r.Context(),
 		`UPDATE room_members SET rights = ? WHERE room_id = ? AND key_id = ?`, set.Storage(), id, keyid,
 	)
 	if err != nil {
@@ -436,6 +558,14 @@ func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
 	}
 	if n, _ := res.RowsAffected(); n == 0 { // removed between lookup and update
 		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
+		return
+	}
+	if err := fedrooms.LogMember(r.Context(), tx, id, keyid, s.FedDomain); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{"room_id": id, "old": rights.FromStorage(old), "new": set})
@@ -455,17 +585,25 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// This server's own bot may leave a replica room; nothing else changes it.
+	// A stand-in's label is its address, kept in the audit entry.
 	var local bool
+	var address string
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT remote_domain IS NULL FROM api_keys WHERE id = ?`, keyid,
-	).Scan(&local); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		`SELECT remote_domain IS NULL, CASE WHEN remote_domain IS NULL THEN '' ELSE label END FROM api_keys WHERE id = ?`, keyid,
+	).Scan(&local, &address); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "key lookup")
 		return
 	}
 	if !local && s.refuseReplica(w, r, id) {
 		return
 	}
-	res, err := s.DB.ExecContext(r.Context(),
+	tx, err := s.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin tx")
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(r.Context(),
 		`DELETE FROM room_members WHERE room_id = ? AND key_id = ?`,
 		id, keyid,
 	)
@@ -482,8 +620,20 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
 		return
 	}
-	_ = audit.Write(r.Context(), s.DB, caller, "room.remove", "member", strconv.FormatInt(keyid, 10), id, "ok",
-		`{"room_id":`+strconvQuote(id)+`}`)
+	if err := fedrooms.LogRemove(r.Context(), tx, id, keyid, s.FedDomain); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
+		return
+	}
+	detail := map[string]string{"room_id": id}
+	if address != "" {
+		detail["address"] = address
+	}
+	b, _ := json.Marshal(detail)
+	_ = audit.Write(r.Context(), s.DB, caller, "room.remove", "member", strconv.FormatInt(keyid, 10), id, "ok", string(b))
 	w.WriteHeader(http.StatusNoContent)
 }
 

@@ -630,3 +630,34 @@ func TestRooms_ReplicaRefusesWrites(t *testing.T) {
 		t.Errorf("local invite: %d %s", rec.Code, rec.Body.String())
 	}
 }
+
+// Remote bots come in by address only, and only with federation on.
+func TestRooms_RemoteMembersByAddressOnly(t *testing.T) {
+	h, db, _ := setupAs(t)
+	room := createRoom(t, h, "fed")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := fedrooms.StandIn(context.Background(), tx, "a1@a.example")
+	if err != nil || tx.Commit() != nil {
+		t.Fatal(err)
+	}
+	base := "/rooms/" + room.ID + "/members"
+	for _, c := range []struct {
+		body, code string
+		status     int
+	}{
+		{`{"key_id":` + itoa(remote) + `,"rights":["read"]}`, `"bad_request"`, http.StatusBadRequest},
+		{`{"address":"a1@a.example","rights":["read"]}`, `"federation_disabled"`, http.StatusNotFound},
+		{`{"address":"a1@a.example","key_id":` + itoa(remote) + `}`, `"bad_request"`, http.StatusBadRequest},
+	} {
+		if rec := do(h, http.MethodPost, base, c.body); rec.Code != c.status || !strings.Contains(rec.Body.String(), c.code) {
+			t.Errorf("%s: %d %s, want %d %s", c.body, rec.Code, rec.Body.String(), c.status, c.code)
+		}
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM room_members WHERE key_id = ?`, remote).Scan(&n); err != nil || n != 0 {
+		t.Errorf("stand-in memberships: %d %v", n, err)
+	}
+}

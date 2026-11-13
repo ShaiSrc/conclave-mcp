@@ -82,11 +82,16 @@ func viewOf(p Peer) peerView {
 // audit writes an entry about the peer domain. The actor is the
 // caller's key, or 0 on the federation listener.
 func (s *Service) audit(ctx context.Context, action, domain, result, detail string) {
+	s.auditRoom(ctx, action, domain, "", result, detail)
+}
+
+// auditRoom is audit for an entry about the peer domain in room roomID.
+func (s *Service) auditRoom(ctx context.Context, action, domain, roomID, result, detail string) {
 	var actor int64
 	if c, ok := auth.FromContext(ctx); ok {
 		actor = c.KeyID
 	}
-	if err := audit.Write(ctx, s.db, actor, action, "federation_peer", domain, "", result, detail); err != nil {
+	if err := audit.Write(ctx, s.db, actor, action, "federation_peer", domain, roomID, result, detail); err != nil {
 		s.logger.Error("federation audit write failed", "action", action, "err", err)
 	}
 }

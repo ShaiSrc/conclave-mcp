@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,7 +38,8 @@ var errUnknownKey = errors.New("the origin's document does not list the key")
 // Verify admits only requests signed by a peer the policy lets in. It
 // runs the spec's checks in order; nonces and seen peers are stored
 // only once the signature has verified. The handler gets the origin
-// (OriginFrom) and the body.
+// (OriginFrom) and the body, of at most 64 KiB; a message proposal's
+// may be the message cap over that.
 func (s *Service) Verify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -101,10 +103,14 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			return
 		}
 		// 7. Body and signature.
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+		limit, tooLargeMsg := int64(maxBody), "body over 64 KiB"
+		if r.Method == http.MethodPost && proposalPath(r.URL.Path) {
+			limit, tooLargeMsg = limit+int64(s.Rooms.MaxMessageBytes), "body over 64 KiB and the message cap"
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 		if err != nil {
 			if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
-				s.refuse(w, r, origin, http.StatusRequestEntityTooLarge, "too_large", "body over 64 KiB")
+				s.refuse(w, r, origin, http.StatusRequestEntityTooLarge, "too_large", tooLargeMsg)
 			} else {
 				s.refuse(w, r, origin, http.StatusBadRequest, "bad_request", "cannot read body")
 			}
@@ -184,6 +190,13 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, originKey{}, origin)))
 	})
+}
+
+// proposalPath reports whether p is /fed/v1/rooms/{id}/messages.
+func proposalPath(p string) bool {
+	rest, ok := strings.CutPrefix(p, "/fed/v1/rooms/")
+	id, ok2 := strings.CutSuffix(rest, "/messages")
+	return ok && ok2 && id != "" && !strings.Contains(id, "/")
 }
 
 func inWindow(ts int64) bool {

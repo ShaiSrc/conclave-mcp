@@ -1,7 +1,8 @@
 // Package fedrooms holds the storage side of federated rooms that the
 // rooms, messages and federation packages share: stand-in keys for bots
-// of other servers, and the address of any key on the wire. It imports
-// none of those packages, so each of them can import it.
+// of other servers, the address of any key on the wire, and the event
+// log of hosted rooms. It imports none of those packages, so each of
+// them can import it.
 package fedrooms
 
 import (

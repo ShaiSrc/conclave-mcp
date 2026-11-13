@@ -224,6 +224,20 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	auditSvc := audit.NewService(deps.DB)
 	claimsSvc := claims.NewService(deps.DB)
 	botsStore := bots.NewStore(deps.DB)
+	// Federated rooms: rooms and messages log changes of rooms with
+	// remote members and invite by address through the federation
+	// service; the federation listener runs member servers' messages and
+	// claims through the same send and claims paths, as the bots'
+	// stand-in keys. Functions and a handler are passed in here, so
+	// rooms, messages and claims never import federation.
+	if fedSvc != nil {
+		roomsSvc.FedDomain, messagesSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain()
+		roomsSvc.InviteRemote = fedSvc.InviteRemote
+		claimsLocal := chi.NewRouter()
+		claimsSvc.Routes(claimsLocal)
+		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,
+			MaxMessageBytes: messagesSvc.MaxMessageBytes}
+	}
 
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.

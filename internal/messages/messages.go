@@ -10,6 +10,7 @@
 package messages
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
@@ -38,6 +40,10 @@ type Service struct {
 	// sees no events. cmd/serve wires this in via
 	// NewService(db, maxBytes, broker).
 	Broker Broker
+	// FedDomain is the federation domain, "" with federation off. With
+	// it, a message in a room with remote members is written to the
+	// room's event log in the transaction that stores it.
+	FedDomain string
 
 	// stampMu makes taking a timestamp and inserting one step, and
 	// lastTS keeps timestamps strictly increasing, so ts order is
@@ -68,7 +74,7 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.post(w, r, chi.URLParam(r, "id"), false)
+		s.post(w, r, chi.URLParam(r, "id"), false, "")
 	})
 	r.Get("/rooms/{id}/messages", s.list)
 	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
@@ -126,13 +132,22 @@ var allowedMessageTypes = map[string]struct{}{
 // SendAsOperator stores the request body as an operator message. It is
 // for the UI's passkey-confirmed path only: nothing else may call it.
 func (s *Service) SendAsOperator(w http.ResponseWriter, r *http.Request, roomID string) {
-	s.post(w, r, roomID, true)
+	s.post(w, r, roomID, true, "")
+}
+
+// SendFromPeer stores the request body as a message of the stand-in key
+// in r's claims, with originSig, the author server's signature. It is
+// for the federation listener's message proposals only, after the
+// signature was checked.
+func (s *Service) SendFromPeer(w http.ResponseWriter, r *http.Request, roomID, originSig string) {
+	s.post(w, r, roomID, false, originSig)
 }
 
 // post handles a send: validates the body and reply_to, stores the
 // message and publishes it to subscribers. operator marks the message
-// as the operator's; UI sessions may not post unmarked.
-func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool) {
+// as the operator's; UI sessions may not post unmarked. originSig is
+// stored with a remote author's message.
+func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool, originSig string) {
 	caller := callerKeyID(r)
 	if caller == 0 {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "no auth claims")
@@ -283,18 +298,13 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 	}
 	s.lastTS = t
 	now := storage.FormatTS(t)
-	res, err := s.DB.ExecContext(r.Context(),
-		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, caller, now, req.Content, req.ContentType,
-		messageType, metadata, callerTrustOrigin, operator,
-	)
+	id, err := s.insert(r.Context(), roomID, caller, now, req.Content, req.ContentType,
+		messageType, metadata, callerTrustOrigin, operator, nullableString(originSig))
 	s.stampMu.Unlock()
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert message")
 		return
 	}
-	id, _ := res.LastInsertId()
 	detail := `{"room_id":` + strconvQuote(roomID)
 	if operator {
 		detail += `,"operator":true`
@@ -330,6 +340,30 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		}
 	}
 	writeJSON(w, http.StatusCreated, mv)
+}
+
+// insert stores one message, the columns after room_id in args, and
+// logs it in the same transaction. It returns the message's id.
+func (s *Service) insert(ctx context.Context, roomID string, args ...any) (int64, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator, origin_sig)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append([]any{roomID}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := fedrooms.LogMessage(ctx, tx, roomID, id, s.FedDomain); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
