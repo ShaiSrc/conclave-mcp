@@ -187,7 +187,16 @@ func TestReplica_RoomCap(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Refused inside the invite's transaction: its audit row waits for
+	// no lock and is written.
+	start := time.Now()
 	wantErr(t, h.invite(t, g, ulid.Make().String(), "new", "b1", "read"), http.StatusConflict, "limit")
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("the refusal took %v", d)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.invite' AND result = 'error:limit'`); n != 1 {
+		t.Errorf("federation.room.invite error:limit audit rows: %d, want 1", n)
+	}
 	if rec := h.invite(t, g, first, "again", "b1", "read"); rec.Code != http.StatusCreated {
 		t.Errorf("invite into an existing replica: %d %s", rec.Code, rec.Body)
 	}

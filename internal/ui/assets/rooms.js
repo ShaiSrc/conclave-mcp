@@ -288,7 +288,8 @@ function membersSection(base, members, keys, home) {
         rerender();
       })));
   });
-  const candidates = keys.filter(k => !k.revoked_at && !members.some(m => m.key_id === k.id));
+  // Stand-ins (remote set) come in by address only: the server refuses them by key.
+  const candidates = keys.filter(k => !k.revoked_at && !k.remote && !members.some(m => m.key_id === k.id));
   const key = h('select', {}, candidates.map(k => h('option', { value: k.id }, `${k.label} (${k.trust_origin})`)));
   const picker = rightsPicker();
   const multi = h('input', { type: 'checkbox' });

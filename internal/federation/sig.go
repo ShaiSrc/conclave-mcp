@@ -21,9 +21,19 @@ const (
 
 var errBadSigHeader = errors.New("malformed signature header")
 
-// b64 is unpadded base64url; Strict refuses non-zero trailing bits, so
-// each value has one spelling.
+// b64 is unpadded base64url; Strict refuses non-zero trailing bits.
 var b64 = base64.RawURLEncoding.Strict()
+
+// decodeB64 decodes s, which must be b64 in its one spelling: the
+// decoder also skips CR and LF, and a signature or nonce is stored as
+// it is spelled, to find it again.
+func decodeB64(s string) ([]byte, error) {
+	b, err := b64.DecodeString(s)
+	if err == nil && b64.EncodeToString(b) != s {
+		err = errors.New("base64 not in its canonical form")
+	}
+	return b, err
+}
 
 // SigParams are the parameters of a Conclave-Sig-v1 Authorization header.
 type SigParams struct {
@@ -36,7 +46,8 @@ type SigParams struct {
 // Each of the five parameters must appear exactly once, in any order,
 // separated by bare commas, each value quoted, without escapes and at
 // most 512 bytes. ts is a canonical decimal, nonce 16 bytes and sig 64
-// bytes, both unpadded base64url. The origin's syntax is not checked here.
+// bytes, both unpadded base64url in its one spelling. The origin's
+// syntax is not checked here.
 func ParseSigHeader(h string) (SigParams, error) {
 	rest, ok := strings.CutPrefix(h, sigScheme+" ")
 	if !ok {
@@ -77,10 +88,10 @@ func ParseSigHeader(h string) (SigParams, error) {
 	if p.TS, err = strconv.ParseInt(vals["ts"], 10, 64); err != nil || strconv.FormatInt(p.TS, 10) != vals["ts"] {
 		return SigParams{}, errBadSigHeader
 	}
-	if n, err := b64.DecodeString(p.Nonce); err != nil || len(n) != 16 {
+	if n, err := decodeB64(p.Nonce); err != nil || len(n) != 16 {
 		return SigParams{}, errBadSigHeader
 	}
-	if p.Sig, err = b64.DecodeString(vals["sig"]); err != nil || len(p.Sig) != ed25519.SignatureSize {
+	if p.Sig, err = decodeB64(vals["sig"]); err != nil || len(p.Sig) != ed25519.SignatureSize {
 		return SigParams{}, errBadSigHeader
 	}
 	return p, nil

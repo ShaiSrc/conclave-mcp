@@ -91,10 +91,11 @@ func (id *Identity) SignMessage(m MessageSig) string {
 }
 
 // VerifyMessage reports whether sig is pub's signature of m, whose
-// nonce must be 16 bytes of unpadded base64url.
+// nonce must be 16 bytes of unpadded base64url. Both must be in their
+// one spelling: a signature is stored once per room as it is spelled.
 func VerifyMessage(pub ed25519.PublicKey, m MessageSig, sig string) bool {
-	n, nerr := b64.DecodeString(m.Nonce)
-	b, err := b64.DecodeString(sig)
+	n, nerr := decodeB64(m.Nonce)
+	b, err := decodeB64(sig)
 	return nerr == nil && len(n) == 16 && err == nil && len(b) == ed25519.SignatureSize && len(pub) == ed25519.PublicKeySize &&
 		ed25519.Verify(pub, m.SigningString(), b)
 }

@@ -661,3 +661,38 @@ func TestRooms_RemoteMembersByAddressOnly(t *testing.T) {
 		t.Errorf("stand-in memberships: %d %v", n, err)
 	}
 }
+
+// Once the bot's server accepted the invite it has an active replica:
+// the host stores the stand-in's membership even when the request is
+// cancelled right then.
+func TestRooms_RemoteInviteOutlivesCancel(t *testing.T) {
+	db := setupDB(t)
+	admin := seedKey(t, db, "admin")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := NewService(db)
+	svc.FedDomain = "b.example"
+	svc.InviteRemote = func(context.Context, string, string, string, []string) (int, error) {
+		cancel()
+		return 0, nil
+	}
+	h := chi.NewRouter()
+	h.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: admin, Scopes: []string{auth.ScopeAdmin}})))
+		})
+	})
+	svc.Routes(h)
+	room := createRoom(t, h, "fed")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+room.ID+"/members",
+		strings.NewReader(`{"address":"a1@a.example","rights":["read"]}`)).WithContext(ctx))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body.String())
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM room_members m JOIN api_keys k ON k.id = m.key_id
+		WHERE m.room_id = ? AND k.label = 'a1@a.example'`, room.ID).Scan(&n); err != nil || n != 1 {
+		t.Errorf("stand-in memberships: %d %v", n, err)
+	}
+}

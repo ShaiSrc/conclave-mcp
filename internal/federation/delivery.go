@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
@@ -152,9 +153,11 @@ func (s *Service) plan(ctx context.Context, now time.Time) (map[string][]cursor,
 // neither the others nor, past its budget, its own next pass. A peer
 // that does not answer is not asked again in the run: its other cursors
 // count the same failure. Cursors left when the budget is spent wait
-// for the next pass; their order is shuffled for each run, so the ones
-// left differ from pass to pass and no room waits behind the others for
-// ever.
+// for the next pass, which starts after the rooms this one attempted:
+// cs is in room id order, and each run starts at the peer's offset and
+// wraps around, then advances it by the rooms it attempted, at least
+// one. With the same rooms due, each is attempted within as many passes
+// as there are rooms.
 func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 	defer func() {
 		s.runMu.Lock()
@@ -169,10 +172,19 @@ func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 	case <-ctx.Done():
 		return
 	}
-	for i := len(cs) - 1; i > 0; i-- {
-		j := min(int(s.jitter()*float64(i+1)), i)
-		cs[i], cs[j] = cs[j], cs[i]
-	}
+	// ponytail: the offset indexes the rooms due now; when they change
+	// between passes the start moves with them. Keep the last room id
+	// attempted instead if that ever starves one.
+	s.runMu.Lock()
+	start := s.rotation[peer] % len(cs)
+	s.runMu.Unlock()
+	cs = slices.Concat(cs[start:], cs[:start])
+	tried := 0
+	defer func() {
+		s.runMu.Lock()
+		s.rotation[peer] += max(tried, 1)
+		s.runMu.Unlock()
+	}()
 	pctx, cancel := context.WithTimeout(ctx, s.budget)
 	defer cancel()
 	now := s.now()
@@ -181,6 +193,7 @@ func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 		if pctx.Err() != nil {
 			return
 		}
+		tried++
 		err := down
 		if err == nil {
 			var unreachable bool

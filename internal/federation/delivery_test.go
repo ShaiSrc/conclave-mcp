@@ -4,11 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -247,9 +245,10 @@ func TestDelivery_DeadPeerOncePerPass(t *testing.T) {
 	}
 }
 
-// A peer's rooms are pushed in an order shuffled for each pass: when its
-// budget allows one push a pass, every due room is attempted within a
-// few passes, none held back by the rooms before it.
+// A peer's rooms go in room id order, each pass starting after the
+// rooms the last one attempted. With every room due on every pass and
+// a budget that allows one push a pass, each pass attempts a new room:
+// all N rooms within N passes.
 func TestDelivery_FairOrder(t *testing.T) {
 	g, m, first, _ := fedRoom(t, "read")
 	rooms := []string{first}
@@ -258,37 +257,22 @@ func TestDelivery_FairOrder(t *testing.T) {
 		g.invite(t, r, m.addr("c1"), "read")
 		rooms = append(rooms, r)
 	}
+	// Every push outlasts the budget and fails: a pass attempts one
+	// room, and every room stays due.
 	g.svc.budget = 300 * time.Millisecond
-	var served atomic.Int32
-	m.setReply(func(path string, body []byte) (int, string) {
-		if served.Add(1) > 1 { // the second push of a pass outlasts the budget
-			time.Sleep(time.Second)
-		}
-		return applyAll(path, body)
+	m.setReply(func(string, []byte) (int, string) {
+		time.Sleep(time.Second)
+		return http.StatusInternalServerError, ""
 	})
 	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	fixClock(g, &now, 0)
-	g.svc.jitter = rand.New(rand.NewPCG(1, 2)).Float64
 	ctx := context.Background()
-	for pass := 1; ; pass++ {
-		for _, r := range rooms {
-			post(t, g, g.admin, r, `{"content":"more"}`)
-		}
-		served.Store(0)
+	for pass := 1; pass <= len(rooms); pass++ {
 		g.svc.startDue(ctx)
 		g.svc.runs.Wait()
 		now = now.Add(2 * time.Hour) // past any backoff
-		missing := 0
-		for _, r := range rooms {
-			if len(m.pushes(t, r)) == 0 {
-				missing++
-			}
-		}
-		if missing == 0 {
-			break
-		}
-		if pass == 12 {
-			t.Fatalf("%d of %d rooms not attempted in %d passes", missing, len(rooms), pass)
+		if n := count(t, g.db, `SELECT COUNT(*) FROM fed_delivery WHERE peer = ? AND attempts > 0`, m.id.Domain); n != pass {
+			t.Fatalf("after pass %d: %d of %d rooms attempted, want %d", pass, n, len(rooms), pass)
 		}
 	}
 }

@@ -142,6 +142,11 @@ func TestParseSigHeader(t *testing.T) {
 		"trailing comma":    hdr(origin, key, ts, n, s) + ",",
 		"space after comma": strings.Join([]string{"Conclave-Sig-v1 " + origin, key, ts, n, s}, ", "),
 		"unclosed quote":    hdr(origin, key, ts, n, `sig="`+sig),
+		// The decoder skips CR and LF; the nonce is stored per origin,
+		// so each value must have its one spelling.
+		"nonce with CR": hdr(origin, key, ts, `nonce="`+nonce+"\r"+`"`, s),
+		"nonce with LF": hdr(origin, key, ts, `nonce="`+nonce[:10]+"\n"+nonce[10:]+`"`, s),
+		"sig with CR":   hdr(origin, key, ts, n, `sig="`+sig+"\r"+`"`),
 	} {
 		if _, err := ParseSigHeader(h); err == nil {
 			t.Errorf("%s: accepted %q", name, h)

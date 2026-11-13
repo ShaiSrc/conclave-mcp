@@ -486,6 +486,9 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		writeFedErr(w, r, err, "invite")
 		return
 	}
+	// The bot's server has an active replica now: its stand-in is stored
+	// even if the request ends meanwhile.
+	r = r.WithContext(context.WithoutCancel(r.Context()))
 	keyID, ok := s.addMember(w, r, roomID, 0, address, set, readLimit)
 	if !ok {
 		return

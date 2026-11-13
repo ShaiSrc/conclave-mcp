@@ -113,7 +113,13 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
 	}
+	// The audit row is written outside the transaction, which holds the
+	// write lock: it is rolled back first.
+	var tx *sql.Tx
 	refuse := func(status int, code, msg string) {
+		if tx != nil {
+			_ = tx.Rollback()
+		}
 		detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
 		s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:"+code, string(detail))
 		writeErr(w, r, status, code, msg)
@@ -151,8 +157,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+	if tx, err = s.db.BeginTx(ctx, nil); err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -319,7 +324,12 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 	case fedrooms.EventSkip:
 		return nil
 	case fedrooms.EventMessage:
-		return s.applyMessage(ctx, roomID, host, ev.Payload)
+		// The blanked event of a message the host deleted is applied
+		// as its message.delete.
+		var p struct{ Deleted bool }
+		if json.Unmarshal(ev.Payload, &p) != nil || !p.Deleted {
+			return s.applyMessage(ctx, roomID, host, ev.Payload)
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -333,7 +343,7 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 		err = s.applyMember(ctx, tx, roomID, host, ev.Payload)
 	case fedrooms.EventMemberRemove:
 		err = s.applyRemove(ctx, tx, roomID, ev.Payload)
-	case fedrooms.EventMessageDelete:
+	case fedrooms.EventMessageDelete, fedrooms.EventMessage:
 		err = applyDelete(ctx, tx, roomID, ev.Payload)
 	default:
 		err = refused("unknown event type %q", ev.Type)
@@ -432,15 +442,23 @@ func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID string, pa
 	return err
 }
 
-// applyDelete deletes our copy of the message the host deleted, if we
-// have it.
+// applyDelete deletes our copy of the message the host deleted. When we
+// do not have it, it stores a tombstone: a deleted row with its host id
+// and no content, so the message's event or the host's answer to its
+// proposal, arriving later, finds it stored and stores nothing.
 func applyDelete(ctx context.Context, tx *sql.Tx, roomID string, payload json.RawMessage) error {
 	var p fedrooms.DeletePayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
 		return refused("message.delete event: bad payload")
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE messages SET deleted_at = ? WHERE room_id = ? AND remote_id = ? AND deleted_at IS NULL`,
-		time.Now().UTC().Format(time.RFC3339Nano), roomID, p.ID)
+	now := storage.FormatTS(time.Now())
+	if _, err := tx.ExecContext(ctx, `UPDATE messages SET deleted_at = ? WHERE room_id = ? AND remote_id = ? AND deleted_at IS NULL`,
+		now, roomID, p.ID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type,
+		trust_origin, remote_id, deleted_at) SELECT id, owner_key_id, ?, '', 'text/plain', 'system', 'external', ?, ? FROM rooms
+		WHERE id = ? ON CONFLICT DO NOTHING`, now, p.ID, now, roomID)
 	return err
 }
 
@@ -483,8 +501,8 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, cre
 // applyMessage stores a message of the replica. Its author signature is
 // checked first; then its author key is found or created, and reply_to
 // translated to our id. A reply_to we do not have is dropped. A
-// signature stored here with another host id is a replay: refused. The
-// event of a message the host deleted is skipped: nothing is stored.
+// signature stored here with another host id is a replay: refused. A
+// blanked event (applyEvent applies it as a delete) stores nothing.
 func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MessagePayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
@@ -1074,7 +1092,8 @@ func (s *Service) claimHolder(ctx context.Context, roomID, address string) (int6
 }
 
 // LeaveRemote tells the host of replica roomID that our bot keyID leaves
-// the room. A host that no longer has the bot in the room (404) agrees.
+// the room. The host agrees with 204, or with 404 when it no longer has
+// the bot in the room; any other answer is a refusal.
 // A host that is blocked or no allowed peer is not told: the bot leaves
 // here only, which the audit row notes. A refusal is a
 // *fedrooms.Error.
@@ -1093,8 +1112,15 @@ func (s *Service) LeaveRemote(ctx context.Context, roomID string, keyID int64) e
 	}
 	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/leave",
 		rawJSON(map[string]string{"author": addr}), maxBody)
-	if err = s.unreachable(host, status, err); err == nil && status >= 400 && status != http.StatusNotFound {
+	// 204 is the host's agreement, and 404 (no such member there); a
+	// redirect, which the client does not follow, or another success is
+	// no answer.
+	switch err = s.unreachable(host, status, err); {
+	case err != nil, status == http.StatusNoContent, status == http.StatusNotFound:
+	case status >= 400:
 		err = hostError(host, status, out)
+	default:
+		err = &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: fmt.Sprintf("%s answered with status %d", host, status)}
 	}
 	detail, _ := json.Marshal(map[string]string{"address": addr})
 	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {

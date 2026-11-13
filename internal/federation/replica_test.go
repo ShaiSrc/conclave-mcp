@@ -1107,6 +1107,54 @@ func TestReplicaPost_AnswerAfterGap(t *testing.T) {
 	}
 }
 
+// The host stores a forwarded post, deletes it, and its push of the
+// blanked event and the message.delete comes before its answer: the
+// replica keeps what it applied, a tombstone, and the answer brings
+// the content back neither into storage nor into listings.
+func TestReplicaPost_DeletedBeforeAnswer(t *testing.T) {
+	g, h, room, b1 := replica(t, "read", "answer")
+	h.setAnswer(func(body []byte) (int, string) {
+		ev := echo(1, 500, body)
+		var p fedrooms.MessagePayload
+		_ = json.Unmarshal(ev.Payload, &p)
+		blanked := event(1, fedrooms.EventMessage, fedrooms.MessagePayload{ID: 500, Author: p.Author, TS: p.TS,
+			ContentType: p.ContentType, MessageType: p.MessageType, Deleted: true})
+		if got := h.push(t, g, room, blanked, event(2, fedrooms.EventMessageDelete, fedrooms.DeletePayload{ID: 500})); got != 2 {
+			t.Errorf("push applied %d, want 2", got)
+		}
+		return http.StatusCreated, string(rawJSON(ev))
+	})
+	bot := auth.Claims{KeyID: b1}
+	if rec := g.do(bot, http.MethodPost, "/rooms/"+room+"/messages", `{"content":"secret","message_type":"answer"}`); rec.Code != http.StatusCreated ||
+		strings.Contains(rec.Body.String(), "secret") {
+		t.Errorf("post: %d %s", rec.Code, rec.Body)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND (deleted_at IS NULL OR content != '')`, room); n != 0 {
+		t.Errorf("%d messages with content or not deleted", n)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND remote_id = 500`, room); n != 1 {
+		t.Errorf("tombstones of host id 500: %d, want 1", n)
+	}
+	if rec := g.do(bot, http.MethodGet, "/rooms/"+room+"/messages", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"messages":null`) {
+		t.Errorf("list: %d %s", rec.Code, rec.Body)
+	}
+	// A message.delete for a message the replica never had leaves a
+	// tombstone too: the message's event, arriving later, stores
+	// nothing.
+	if got := h.push(t, g, room, event(3, fedrooms.EventMessageDelete, fedrooms.DeletePayload{ID: 600})); got != 3 {
+		t.Fatalf("push applied %d, want 3", got)
+	}
+	g.svc.applyMu.Lock()
+	err := g.svc.applyMessage(context.Background(), room, h.id.Domain, msg(4, 600, room, h.id.Domain, h.addr("h1"), "late", nil, "", nil).Payload)
+	g.svc.applyMu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'late'`, room); n != 0 {
+		t.Error("a deleted message's late event stored its content")
+	}
+}
+
 // Only a bot, a key with a handle, writes to a room hosted elsewhere.
 func TestReplicaWrites_NoHandle(t *testing.T) {
 	g, h, room, _ := replica(t, "read", "answer", "claim")
@@ -1300,14 +1348,20 @@ func TestReplicaLeave_HostAnswers(t *testing.T) {
 	wantErr(t, leave(), http.StatusBadGateway, "host_unreachable")
 	h.setAnswer(answerWith(403, `{"error":{"code":"peer_not_allowed","message":"peer not allowed"}}`))
 	wantErr(t, leave(), http.StatusForbidden, "peer_not_allowed")
+	// Only 204 and 404 are the host's agreement: a redirect, which the
+	// client does not follow, or another success is not.
+	for _, status := range []int{http.StatusFound, http.StatusOK} {
+		h.setAnswer(answerWith(status, ""))
+		wantErr(t, leave(), http.StatusBadGateway, "host_unreachable")
+	}
 	if g.state(t) != before || count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, room) != 1 {
 		t.Error("a refused leave changed the replica")
 	}
 	// A key that is no member is not sent.
 	other := g.bot(t, "b2")
 	wantErr(t, g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, other), ""), http.StatusNotFound, "not_found")
-	if n := len(h.received()); n != 2 {
-		t.Errorf("host got %d requests, want 2", n)
+	if n := len(h.received()); n != 4 {
+		t.Errorf("host got %d requests, want 4", n)
 	}
 	h.setAnswer(answerWith(404, `{"error":{"code":"not_found","message":"not a member"}}`))
 	if rec := leave(); rec.Code != http.StatusNoContent {
@@ -1526,8 +1580,17 @@ func TestReplicaEvents_SignatureReplay(t *testing.T) {
 	again := fedrooms.Event{Seq: 2, Type: ours.Type, Payload: json.RawMessage(strings.Replace(string(ours.Payload), `"id":500`, `"id":501`, 1))}
 	third := msg(3, 600, room, host, "c1@c.example", "hi", nil, "", c)
 	thirdAgain := fedrooms.Event{Seq: 4, Type: third.Type, Payload: json.RawMessage(strings.Replace(string(third.Payload), `"id":600`, `"id":601`, 1))}
-	if got := h.push(t, g, room, ours, again, third, thirdAgain); got != 4 {
-		t.Fatalf("applied %d, want 4 (refused events count)", got)
+	// The same signatures with a line break, which base64 decoders skip.
+	respelled := func(seq, id int64, ev fedrooms.Event, suffix string) fedrooms.Event {
+		var p fedrooms.MessagePayload
+		if err := json.Unmarshal(ev.Payload, &p); err != nil {
+			t.Fatal(err)
+		}
+		p.ID, p.OriginSig = id, p.OriginSig+suffix
+		return event(seq, ev.Type, p)
+	}
+	if got := h.push(t, g, room, ours, again, third, thirdAgain, respelled(5, 502, ours, "\n"), respelled(6, 602, third, "\r")); got != 6 {
+		t.Fatalf("applied %d, want 6 (refused events count)", got)
 	}
 	var ids []int64
 	for _, s := range storedMessages(t, g, room) {
@@ -1536,8 +1599,8 @@ func TestReplicaEvents_SignatureReplay(t *testing.T) {
 	if fmt.Sprint(ids) != "[500 600]" {
 		t.Errorf("stored host ids %v, want [500 600]", ids)
 	}
-	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.event_refused' AND detail LIKE '%"count":2%'`); n != 1 {
-		t.Errorf("event_refused audit rows counting 2: %d, want 1", n)
+	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.event_refused' AND detail LIKE '%"count":4%'`); n != 1 {
+		t.Errorf("event_refused audit rows counting 4: %d, want 1", n)
 	}
 }
 

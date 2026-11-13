@@ -60,7 +60,9 @@ func TestMessageSig_EachFieldIsSigned(t *testing.T) {
 	if VerifyMessage(other.Public, base, sig) {
 		t.Error("verifies with another key")
 	}
-	for _, bad := range []string{"", "x", sig[:len(sig)-2], sig + "AA"} {
+	// The decoder skips CR and LF: a signature has one spelling, or a
+	// copy with a line break would pass the once-per-room check.
+	for _, bad := range []string{"", "x", sig[:len(sig)-2], sig + "AA", sig + "\n", sig + "\r", sig[:5] + "\r\n" + sig[5:]} {
 		if VerifyMessage(id.Public, base, bad) {
 			t.Errorf("malformed signature %q verifies", bad)
 		}
@@ -84,7 +86,7 @@ func TestMessageSig_EachFieldIsSigned(t *testing.T) {
 		}
 	}
 	// A nonce that is not 16 bytes of base64url is refused, signed or not.
-	for _, bad := range []string{"", "AAAA", "AAAAAAAAAAAAAAAAAAAAAA=="} {
+	for _, bad := range []string{"", "AAAA", "AAAAAAAAAAAAAAAAAAAAAA==", base.Nonce + "\n", base.Nonce + "\r"} {
 		m := base
 		m.Nonce = bad
 		if VerifyMessage(id.Public, m, id.SignMessage(m)) {
