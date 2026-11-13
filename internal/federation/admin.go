@@ -218,6 +218,10 @@ func (s *Service) handleBlockPeer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	if err := s.dropPeer(r.Context(), domain); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	s.audit(r.Context(), "federation.peer.block", domain, "ok", "")
 	p, err := s.peers.Get(r.Context(), domain)
 	if err != nil {
@@ -232,7 +236,11 @@ func (s *Service) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	switch err := s.peers.Remove(r.Context(), domain); {
+	err := s.peers.Remove(r.Context(), domain)
+	if err == nil {
+		err = s.dropPeer(r.Context(), domain)
+	}
+	switch {
 	case errors.Is(err, ErrPeerNotFound):
 		writeErr(w, r, http.StatusNotFound, "peer_not_found", "no such peer")
 	case err != nil:

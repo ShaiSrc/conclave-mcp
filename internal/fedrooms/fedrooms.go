@@ -27,13 +27,17 @@ const OperatorMetaKey = "ui_operator_key_id"
 // domain in federation domain syntax with an optional port.
 var addressRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,31}@[a-z0-9.-]{1,253}(:[0-9]{1,5})?$`)
 
+// ErrAddress is StandIn's error for an address that cannot have a
+// stand-in.
+var ErrAddress = errors.New("fedrooms: no stand-in for this address")
+
 // StandIn returns the id of the stand-in key for address, creating it
 // if needed: label = address, remote_domain = its domain, trust origin
-// external, empty hash and prefix. A local key that holds the label is
-// an error, never returned as the stand-in.
+// external, empty hash and prefix. An invalid address, or one that a
+// local key holds as its label, is ErrAddress, never a stand-in.
 func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
 	if !addressRE.MatchString(address) {
-		return 0, fmt.Errorf("fedrooms: invalid address %q", address)
+		return 0, fmt.Errorf("%w: invalid address %q", ErrAddress, address)
 	}
 	domain := address[strings.IndexByte(address, '@')+1:]
 	if _, err := tx.ExecContext(ctx,
@@ -46,7 +50,7 @@ func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
 	err := tx.QueryRowContext(ctx,
 		`SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, address, domain).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, fmt.Errorf("fedrooms: label %q belongs to a local key", address)
+		return 0, fmt.Errorf("%w: label %q belongs to a local key", ErrAddress, address)
 	}
 	return id, err
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/rights"
@@ -65,6 +66,20 @@ type MessagePayload struct {
 	OriginSig   string          `json:"origin_sig,omitempty"`
 }
 
+// ReplicaMessage is a message of a replica room as the replica stores
+// it: Author is a local key (a stand-in for a remote author), Metadata
+// is as stored here (with reply_to as a local id), RemoteID is the
+// host's id, and Unverified marks an author signature the replica
+// could not check.
+type ReplicaMessage struct {
+	Author                            int64
+	ContentType, MessageType, Content string
+	Metadata                          []byte
+	RemoteID                          int64
+	OriginSig                         string
+	Unverified                        bool
+}
+
 // Error is a refusal that the API answers with its status and code.
 type Error struct {
 	Status        int
@@ -73,12 +88,12 @@ type Error struct {
 
 func (e *Error) Error() string { return e.Message }
 
-// Logged reports whether roomID's changes go to its event log: it has
-// a stand-in member.
+// Logged reports whether roomID's changes go to its event log: it is
+// hosted here (not a replica) and has a stand-in member.
 func Logged(ctx context.Context, q DB, roomID string) (bool, error) {
 	var ok bool
-	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
-		WHERE m.room_id = ? AND k.remote_domain IS NOT NULL)`, roomID).Scan(&ok)
+	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms r JOIN room_members m ON m.room_id = r.id
+		JOIN api_keys k ON k.id = m.key_id WHERE r.id = ? AND r.home_domain IS NULL AND k.remote_domain IS NOT NULL)`, roomID).Scan(&ok)
 	return ok, err
 }
 
@@ -265,15 +280,19 @@ func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, dom
 }
 
 // appendEvent writes payload as roomID's next event, numbered
-// MAX(seq)+1 in the same statement.
+// MAX(seq)+1 in the same statement. The payload keeps <, > and & as
+// they are: escaped they take 6 bytes each, and events travel in
+// requests capped at 64 KiB plus the message cap.
 func appendEvent(ctx context.Context, tx *sql.Tx, roomID, typ string, payload any) error {
-	b, err := json.Marshal(payload)
-	if err != nil {
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO fed_events(room_id, seq, type, payload, created_at)
+	_, err := tx.ExecContext(ctx, `INSERT INTO fed_events(room_id, seq, type, payload, created_at)
 		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM fed_events WHERE room_id = ?`,
-		roomID, typ, string(b), storage.FormatTS(time.Now()), roomID)
+		roomID, typ, strings.TrimSuffix(b.String(), "\n"), storage.FormatTS(time.Now()), roomID)
 	return err
 }
 

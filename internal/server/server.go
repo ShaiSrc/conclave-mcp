@@ -225,18 +225,21 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	claimsSvc := claims.NewService(deps.DB)
 	botsStore := bots.NewStore(deps.DB)
 	// Federated rooms: rooms and messages log changes of rooms with
-	// remote members and invite by address through the federation
-	// service; the federation listener runs member servers' messages and
-	// claims through the same send and claims paths, as the bots'
-	// stand-in keys. Functions and a handler are passed in here, so
-	// rooms, messages and claims never import federation.
+	// remote members, invite by address through the federation service
+	// and wake its delivery worker after each change; the federation
+	// listener runs member servers' messages and claims through the same
+	// send and claims paths, as the bots' stand-in keys, and stores the
+	// messages of replica rooms through the messages service, which
+	// publishes them like sent ones. Functions and a handler are passed
+	// in here, so rooms, messages and claims never import federation.
 	if fedSvc != nil {
 		roomsSvc.FedDomain, messagesSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain()
 		roomsSvc.InviteRemote = fedSvc.InviteRemote
+		roomsSvc.FedNotify, messagesSvc.FedNotify = fedSvc.DeliverSoon, fedSvc.DeliverSoon
 		claimsLocal := chi.NewRouter()
 		claimsSvc.Routes(claimsLocal)
 		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,
-			MaxMessageBytes: messagesSvc.MaxMessageBytes}
+			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica}
 	}
 
 	r.Route("/v1", func(r chi.Router) {
@@ -354,7 +357,8 @@ func (s *Server) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// The federation nonce pruning stops when Start returns.
+	// The federation loops (nonce pruning, directory refresh, room
+	// delivery and catch-up) stop when Start returns.
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
 	if s.fedSvc != nil {

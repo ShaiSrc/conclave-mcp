@@ -310,3 +310,36 @@ func TestSplitMetadata(t *testing.T) {
 		t.Errorf("wire forms differ: %s %s", a, b)
 	}
 }
+
+// A replica's changes are never logged: only its host keeps the log.
+func TestLog_NotForReplicas(t *testing.T) {
+	h := newHostRoom(t, "R", 1)
+	join(t, h.db, "R", "c1@c.example", "read", "a.example")
+	n := len(events(t, h.db, "R"))
+	if _, err := h.db.Exec(`UPDATE rooms SET home_domain = 'c.example' WHERE id = 'R'`); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	inTx(t, h.db, func(tx *sql.Tx) error {
+		if err := LogMessage(ctx, tx, "R", h.firstMsg, "a.example"); err != nil {
+			return err
+		}
+		return LogRoom(ctx, tx, "R", "a.example")
+	})
+	if got := len(events(t, h.db, "R")); got != n {
+		t.Errorf("replica logged %d events", got-n)
+	}
+}
+
+// Payloads keep <, > and & unescaped, so events stay near the size of
+// the message they carry.
+func TestLog_PayloadNotHTMLEscaped(t *testing.T) {
+	h := newHostRoom(t, "R", 0)
+	if _, err := h.db.Exec(`UPDATE rooms SET name = 'a<b>&c' WHERE id = 'R'`); err != nil {
+		t.Fatal(err)
+	}
+	join(t, h.db, "R", "c1@c.example", "read", "a.example")
+	if got := events(t, h.db, "R"); string(got[0].Payload) != `{"name":"a<b>&c","archived":false}` {
+		t.Errorf("room payload: %s", got[0].Payload)
+	}
+}

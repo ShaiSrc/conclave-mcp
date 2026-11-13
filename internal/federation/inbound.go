@@ -104,8 +104,12 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 		}
 		// 7. Body and signature.
 		limit, tooLargeMsg := int64(maxBody), "body over 64 KiB"
-		if r.Method == http.MethodPost && proposalPath(r.URL.Path) {
+		switch {
+		case r.Method != http.MethodPost:
+		case roomPath(r.URL.Path, "/messages"):
 			limit, tooLargeMsg = limit+int64(s.Rooms.MaxMessageBytes), "body over 64 KiB and the message cap"
+		case roomPath(r.URL.Path, "/events"):
+			limit, tooLargeMsg = int64(s.eventsLimit()), "body over 64 KiB and twice the message cap"
 		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 		if err != nil {
@@ -186,16 +190,21 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.fail(w, r, err)
 			return
 		}
+		// Contact resumes delivery to the peer if it was paused.
+		if err := s.resumeDelivery(ctx, origin); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, originKey{}, origin)))
 	})
 }
 
-// proposalPath reports whether p is /fed/v1/rooms/{id}/messages.
-func proposalPath(p string) bool {
+// roomPath reports whether p is /fed/v1/rooms/{id} followed by suffix.
+func roomPath(p, suffix string) bool {
 	rest, ok := strings.CutPrefix(p, "/fed/v1/rooms/")
-	id, ok2 := strings.CutSuffix(rest, "/messages")
+	id, ok2 := strings.CutSuffix(rest, suffix)
 	return ok && ok2 && id != "" && !strings.Contains(id, "/")
 }
 
@@ -357,12 +366,16 @@ func (s *Service) pruneNonces(ctx context.Context, now time.Time) error {
 }
 
 // Run deletes expired nonces every minute and runs the directory
-// refresh loop beside it, until ctx is done; it returns once both have
-// stopped.
+// refresh loop, the delivery worker and the replicas' catch-up beside
+// it, each in its own goroutine, until ctx is done; it returns once all
+// have stopped.
 func (s *Service) Run(ctx context.Context) {
-	done := make(chan struct{})
-	go func() { s.refreshLoop(ctx); close(done) }()
-	defer func() { <-done }()
+	var wg sync.WaitGroup
+	for _, loop := range []func(context.Context){s.refreshLoop, s.deliveryLoop, s.catchupLoop} {
+		wg.Add(1)
+		go func() { defer wg.Done(); loop(ctx) }()
+	}
+	defer wg.Wait()
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {

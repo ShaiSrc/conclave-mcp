@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -44,6 +45,9 @@ type RoomHooks struct {
 	// MaxMessageBytes is the message cap. A message proposal's body may
 	// be this much over the 64 KiB of other federation requests.
 	MaxMessageBytes int
+	// Replicate is the messages service's store for a message of a
+	// replica room, published to subscribers like a sent one.
+	Replicate func(ctx context.Context, roomID string, m fedrooms.ReplicaMessage) (int64, error)
 }
 
 // Domain returns this server's federation domain.
@@ -151,16 +155,25 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 // postSigned sends a signed POST of body to path on domain and returns
 // the status.
 func (s *Service) postSigned(ctx context.Context, domain, path string, body []byte) (int, error) {
-	req, err := s.fetch.newRequest(ctx, http.MethodPost, domain, path, body)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if err := s.id.SignRequest(req, domain, body); err != nil {
-		return 0, err
-	}
-	status, _, err := s.fetch.send(req, s.fetch.isAllowed(domain), maxBody)
+	status, _, err := s.sendSigned(ctx, http.MethodPost, domain, path, body, maxBody)
 	return status, err
+}
+
+// sendSigned sends a signed request to path on domain, with body unless
+// it is nil, and returns the status and the answer, read up to limit
+// bytes.
+func (s *Service) sendSigned(ctx context.Context, method, domain, path string, body []byte, limit int) (int, []byte, error) {
+	req, err := s.fetch.newRequest(ctx, method, domain, path, body)
+	if err != nil {
+		return 0, nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if err := s.id.SignRequest(req, domain, body); err != nil {
+		return 0, nil, err
+	}
+	return s.fetch.send(req, s.fetch.isAllowed(domain), limit)
 }
 
 // roomPeer checks a room request of the verified origin and returns the
@@ -169,13 +182,7 @@ func (s *Service) postSigned(ctx context.Context, domain, path string, body []by
 // answers the request itself otherwise.
 func (s *Service) roomPeer(w http.ResponseWriter, r *http.Request) (string, bool) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
-	p, err := s.peers.Get(ctx, origin)
-	if err != nil && !errors.Is(err, ErrPeerNotFound) {
-		s.fail(w, r, err)
-		return "", false
-	}
-	if p.Status != statusAllowed {
-		writeErr(w, r, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
+	if !s.allowedOrigin(w, r) {
 		return "", false
 	}
 	var member bool
@@ -349,36 +356,23 @@ func (s *Service) handleRoomLeave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
+	switch removed, err := s.leaveHosted(ctx, roomID, keyID); {
+	case err != nil:
 		s.fail(w, r, err)
 		return
-	}
-	defer func() { _ = tx.Rollback() }()
-	res, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND key_id = ?`, roomID, keyID)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	case !removed:
 		writeErr(w, r, http.StatusNotFound, "not_found", "not a member")
 		return
 	}
-	if err := fedrooms.LogRemove(ctx, tx, roomID, keyID, s.id.Domain); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		s.fail(w, r, err)
-		return
-	}
+	s.DeliverSoon()
 	detail, _ := json.Marshal(map[string]string{"address": in.Author})
 	s.auditRoom(ctx, "federation.room.leave", OriginFrom(ctx), roomID, "ok", string(detail))
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleRoomEvents answers GET /fed/v1/rooms/{id}/events?since=N: up to
-// 100 events of the room's log after seq N, in order.
+// handleRoomEvents answers GET /fed/v1/rooms/{id}/events?since=N: the
+// events of the room's log after seq N, in order, at most 100 and
+// within the events budget, and with <, > and & as stored.
 func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	roomID, ok := s.roomPeer(w, r)
 	if !ok {
@@ -393,27 +387,10 @@ func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		since = n
 	}
-	rows, err := s.db.QueryContext(r.Context(), `SELECT seq, type, payload FROM fed_events
-		WHERE room_id = ? AND seq > ? ORDER BY seq LIMIT ?`, roomID, since, maxRoomEvents)
+	out, err := s.loadEvents(r.Context(), roomID, since, math.MaxInt64)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	defer rows.Close()
-	out := []fedrooms.Event{}
-	for rows.Next() {
-		var e fedrooms.Event
-		var payload string
-		if err := rows.Scan(&e.Seq, &e.Type, &payload); err != nil {
-			s.fail(w, r, err)
-			return
-		}
-		e.Payload = json.RawMessage(payload)
-		out = append(out, e)
-	}
-	if err := rows.Err(); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": out})
+	writeBotJSON(w, map[string]any{"events": out})
 }

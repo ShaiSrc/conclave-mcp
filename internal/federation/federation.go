@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -40,7 +41,11 @@ type Service struct {
 	fetch        *Fetcher
 	lookups      *rate.Limiter // operator lookups and adds
 	botStore     *bots.Store
-	refresh      chan string // peers whose directory the refresh loop fetches next
+	refresh      chan string   // peers whose directory the refresh loop fetches next
+	deliver      chan struct{} // wakes the delivery worker
+	applyMu      sync.Mutex    // one batch of replica events at a time
+	now          func() time.Time
+	jitter       func() float64 // in [0, 1)
 
 	// Rooms connects federated rooms to the local services.
 	Rooms RoomHooks
@@ -69,7 +74,8 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	}
 	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
 		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{}, keyLimiters: map[int64]*rate.Limiter{},
-		botStore: bots.NewStore(db), refresh: make(chan string, 16),
+		botStore: bots.NewStore(db), refresh: make(chan string, 16), deliver: make(chan struct{}, 1),
+		now: time.Now, jitter: rand.Float64,
 		lookups: rate.NewLimiter(rate.Every(time.Minute/lookupsPerMinute), lookupBurst)}
 	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {
 		p, err := s.peers.Get(context.Background(), domain)
@@ -93,6 +99,8 @@ func (s *Service) PublicRoutes(r chi.Router) {
 		r.Get("/directory", s.handleFedDirectory)
 		r.Post("/rooms/{id}/messages", s.handleRoomMessage)
 		r.Get("/rooms/{id}/events", s.handleRoomEvents)
+		r.Post("/rooms/{id}/invite", s.handleRoomInvite)
+		r.Post("/rooms/{id}/events", s.handleRoomPush)
 		r.Post("/rooms/{id}/leave", s.handleRoomLeave)
 		r.Get("/rooms/{id}/claims", s.handleRoomClaims)
 		r.Post("/rooms/{id}/claims", s.handleRoomClaims)

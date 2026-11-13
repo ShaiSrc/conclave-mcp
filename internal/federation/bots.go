@@ -258,14 +258,7 @@ func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int
 // getSigned sends a signed GET of path to domain and returns the
 // status and the body, read up to 2 MiB.
 func (s *Service) getSigned(ctx context.Context, domain, path string) (int, []byte, error) {
-	req, err := s.fetch.newRequest(ctx, http.MethodGet, domain, path, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	if err := s.id.SignRequest(req, domain, nil); err != nil {
-		return 0, nil, err
-	}
-	return s.fetch.send(req, s.fetch.isAllowed(domain), maxBotsBody)
+	return s.sendSigned(ctx, http.MethodGet, domain, path, nil, maxBotsBody)
 }
 
 // lookupLimiter returns the remote-lookup limiter of key keyID.

@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/claims"
+	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/messages"
 	"github.com/hermes/conclave-mcp/internal/rooms"
@@ -81,7 +83,7 @@ func TestMessageSig_EachFieldIsSigned(t *testing.T) {
 	}
 }
 
-// roomRig is a host, b.example, with the rooms, messages and claims
+// roomRig is a server, b.example, with the rooms, messages and claims
 // services wired to its federation service as server.go wires them.
 type roomRig struct {
 	svc    *Service
@@ -89,20 +91,48 @@ type roomRig struct {
 	admin  auth.Claims
 	routes func(chi.Router)
 	fed    chi.Router
+	broker *events.Broker
 }
 
 func newRoomRig(t *testing.T) *roomRig {
 	t.Helper()
-	svc := newLocal(t, "allowlist")
+	return wireRig(t, newLocal(t, "allowlist"))
+}
+
+// newLiveRig is a rig whose federation routes are served on 127.0.0.1;
+// its domain is the listener's address.
+func newLiveRig(t *testing.T) *roomRig {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc, err := New(testDB(t), Options{Domain: ln.Addr().String(), Mode: "allowlist", InsecureHTTP: true,
+		Logger: slog.New(slog.DiscardHandler)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := wireRig(t, svc)
+	srv := httptest.NewUnstartedServer(g.fed)
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	return g
+}
+
+func wireRig(t *testing.T, svc *Service) *roomRig {
+	t.Helper()
 	db := svc.db
+	broker := events.NewBroker()
 	rs := rooms.NewService(db)
-	rs.FedDomain, rs.InviteRemote = local, svc.InviteRemote
-	ms := messages.NewService(db, 0, nil)
-	ms.FedDomain = local
+	rs.FedDomain, rs.InviteRemote, rs.FedNotify = svc.Domain(), svc.InviteRemote, svc.DeliverSoon
+	ms := messages.NewService(db, 0, broker)
+	ms.FedDomain, ms.FedNotify = svc.Domain(), svc.DeliverSoon
 	cs := claims.NewService(db)
 	cl := chi.NewRouter()
 	cs.Routes(cl)
-	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes}
+	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica}
 	fed := chi.NewRouter()
 	svc.PublicRoutes(fed)
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', 'x', 'p-root', '2026-01-01T00:00:00Z', 1)`)
@@ -110,8 +140,20 @@ func newRoomRig(t *testing.T) *roomRig {
 		t.Fatal(err)
 	}
 	adminID, _ := res.LastInsertId()
-	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed,
+	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed, broker: broker,
 		routes: func(r chi.Router) { rs.Routes(r); ms.Routes(r); cs.Routes(r) }}
+}
+
+// bot adds a local bot with handle and returns its key.
+func (g *roomRig) bot(t *testing.T, handle string) int64 {
+	t.Helper()
+	res, err := g.db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, handle) VALUES (?, 'x', ?, '2026-01-01T00:00:00Z', ?)`,
+		handle, "p-"+handle, handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	return id
 }
 
 // do serves a request of the /v1 API (path without /v1) as c.
@@ -212,12 +254,31 @@ func (g *roomRig) events(t *testing.T, room string) []fedrooms.Event {
 
 // memberServer is a member server of the rig: an allowed peer on
 // 127.0.0.1 that checks the host's signature on what it receives and
-// answers invites with answer (201 when 0).
+// answers with reply, when set, else with answer (201 when 0) and no
+// body. A reply of status 0 drops the connection.
 type memberServer struct {
 	id      *Identity
 	answer  atomic.Int32
 	mu      sync.Mutex
-	invites []string // "path body" of each signed invite
+	invites []string // "method path body" of each signed request
+	reply   func(path string, body []byte) (int, string)
+}
+
+// setReply sets m's reply.
+func (m *memberServer) setReply(f func(path string, body []byte) (int, string)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reply = f
+}
+
+// applyAll is a reply that applies every pushed event and accepts
+// everything else.
+func applyAll(path string, body []byte) (int, string) {
+	var in struct{ Events []fedrooms.Event }
+	if !strings.HasSuffix(path, "/events") || json.Unmarshal(body, &in) != nil || len(in.Events) == 0 {
+		return http.StatusCreated, ""
+	}
+	return http.StatusOK, fmt.Sprintf(`{"applied":%d}`, in.Events[len(in.Events)-1].Seq)
 }
 
 func newMemberServer(t *testing.T, g *roomRig) *memberServer {
@@ -237,7 +298,19 @@ func newMemberServer(t *testing.T, g *roomRig) *memberServer {
 		}
 		m.mu.Lock()
 		m.invites = append(m.invites, r.Method+" "+r.URL.Path+" "+string(body))
+		reply := m.reply
 		m.mu.Unlock()
+		if reply != nil {
+			status, out := reply(r.URL.Path, body)
+			if status == 0 {
+				conn, _, _ := w.(http.Hijacker).Hijack()
+				_ = conn.Close()
+				return
+			}
+			w.WriteHeader(status)
+			_, _ = io.WriteString(w, out)
+			return
+		}
 		status := int(m.answer.Load())
 		if status == 0 {
 			status = http.StatusCreated
@@ -264,6 +337,13 @@ func (m *memberServer) received() []string {
 // it is nil.
 func (m *memberServer) req(t *testing.T, method, path string, body any) *http.Request {
 	t.Helper()
+	return signedReq(t, m.id, local, method, path, body)
+}
+
+// signedReq is a request to dest signed by id; body is marshalled
+// unless it is nil.
+func signedReq(t *testing.T, id *Identity, dest, method, path string, body any) *http.Request {
+	t.Helper()
 	var b []byte
 	if body != nil {
 		var err error
@@ -272,8 +352,8 @@ func (m *memberServer) req(t *testing.T, method, path string, body any) *http.Re
 		}
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(b))
-	req.Host = local
-	if err := m.id.SignRequest(req, local, b); err != nil {
+	req.Host = dest
+	if err := id.SignRequest(req, dest, b); err != nil {
 		t.Fatal(err)
 	}
 	return req

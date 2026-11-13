@@ -47,6 +47,16 @@ type Service struct {
 	// to add its bot to room roomID, named name, with rights. A refusal
 	// is a *fedrooms.Error. Set by the server with federation on.
 	InviteRemote func(ctx context.Context, roomID, name, address string, rights []string) error
+	// FedNotify, when set, is called after each change of a room's
+	// members or state: it wakes the federation delivery worker.
+	FedNotify func()
+}
+
+// changed runs FedNotify after a committed change.
+func (s *Service) changed() {
+	if s.FedNotify != nil {
+		s.FedNotify()
+	}
 }
 
 func NewService(db *sql.DB) *Service { return &Service{DB: db} }
@@ -325,6 +335,7 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
 		return
 	}
+	s.changed()
 	_ = audit.Write(r.Context(), s.DB, caller, "room.archive", "room", id, id, "ok", "")
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -499,6 +510,7 @@ func (s *Service) addMember(w http.ResponseWriter, r *http.Request, roomID strin
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
 		return 0, false
 	}
+	s.changed()
 	return keyID, true
 }
 
@@ -568,6 +580,7 @@ func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
 		return
 	}
+	s.changed()
 	detail, _ := json.Marshal(map[string]any{"room_id": id, "old": rights.FromStorage(old), "new": set})
 	_ = audit.Write(r.Context(), s.DB, callerKeyID(r), "room.rights", "member", strconv.FormatInt(keyid, 10), id, "ok", string(detail))
 	writeJSON(w, http.StatusOK, map[string]any{"key_id": keyid, "rights": set})
@@ -628,6 +641,7 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
 		return
 	}
+	s.changed()
 	detail := map[string]string{"room_id": id}
 	if address != "" {
 		detail["address"] = address

@@ -44,6 +44,9 @@ type Service struct {
 	// it, a message in a room with remote members is written to the
 	// room's event log in the transaction that stores it.
 	FedDomain string
+	// FedNotify, when set, is called after each send: it wakes the
+	// federation delivery worker.
+	FedNotify func()
 
 	// stampMu makes taking a timestamp and inserting one step, and
 	// lastTS keeps timestamps strictly increasing, so ts order is
@@ -182,9 +185,7 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 	if req.ContentType == "" {
 		req.ContentType = "text/plain"
 	}
-	switch req.ContentType {
-	case "text/plain", "text/markdown", "application/json":
-	default:
+	if !contentTypes[req.ContentType] {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "unsupported content_type")
 		return
 	}
@@ -280,30 +281,21 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 	}
 
 	s.stampMu.Lock()
-	if s.lastTS.IsZero() { // first send since start: continue after what is stored
-		var newest sql.NullString
-		err := s.DB.QueryRowContext(r.Context(), `SELECT MAX(ts) FROM messages`).Scan(&newest)
-		if err == nil && newest.Valid { // NULL: no messages yet
-			s.lastTS, err = time.Parse(time.RFC3339Nano, newest.String)
-		}
-		if err != nil { // lastTS stays zero, so the next send tries again
-			s.stampMu.Unlock()
-			writeErr(w, r, http.StatusInternalServerError, "internal_error", "read newest timestamp")
-			return
-		}
+	now, err := s.stamp(r.Context())
+	if err != nil {
+		s.stampMu.Unlock()
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "read newest timestamp")
+		return
 	}
-	t := clock().UTC()
-	if !t.After(s.lastTS) {
-		t = s.lastTS.Add(time.Nanosecond) // ts has nanosecond precision
-	}
-	s.lastTS = t
-	now := storage.FormatTS(t)
 	id, err := s.insert(r.Context(), roomID, caller, now, req.Content, req.ContentType,
 		messageType, metadata, callerTrustOrigin, operator, nullableString(originSig))
 	s.stampMu.Unlock()
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert message")
 		return
+	}
+	if s.FedNotify != nil {
+		s.FedNotify()
 	}
 	detail := `{"room_id":` + strconvQuote(roomID)
 	if operator {
@@ -340,6 +332,79 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		}
 	}
 	writeJSON(w, http.StatusCreated, mv)
+}
+
+// stamp returns the timestamp of the next message: now, or just after
+// the last one when the clock has not moved past it. The caller holds
+// stampMu until the message is stored.
+func (s *Service) stamp(ctx context.Context) (string, error) {
+	if s.lastTS.IsZero() { // first message since start: continue after what is stored
+		var newest sql.NullString
+		err := s.DB.QueryRowContext(ctx, `SELECT MAX(ts) FROM messages`).Scan(&newest)
+		if err == nil && newest.Valid { // NULL: no messages yet
+			s.lastTS, err = time.Parse(time.RFC3339Nano, newest.String)
+		}
+		if err != nil { // lastTS stays zero, so the next message tries again
+			return "", err
+		}
+	}
+	t := clock().UTC()
+	if !t.After(s.lastTS) {
+		t = s.lastTS.Add(time.Nanosecond) // ts has nanosecond precision
+	}
+	s.lastTS = t
+	return storage.FormatTS(t), nil
+}
+
+// contentTypes are the content types a message may have.
+var contentTypes = map[string]bool{"text/plain": true, "text/markdown": true, "application/json": true}
+
+// StoreReplica stores m, a message of replica room roomID that its host
+// sent, and publishes it to subscribers as a send does. It is stamped
+// with a local timestamp, so readers' since cursors see it; its trust
+// origin is its author key's. A message whose host id is stored already
+// is left as it is, and its id returned. A message a send would refuse
+// (type, content type, over the cap) is a *fedrooms.Error.
+func (s *Service) StoreReplica(ctx context.Context, roomID string, m fedrooms.ReplicaMessage) (int64, error) {
+	if _, ok := allowedMessageTypes[m.MessageType]; !ok || !contentTypes[m.ContentType] || len(m.Content) > s.MaxMessageBytes {
+		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "bad_request", Message: "message type, content type or size not accepted"}
+	}
+	var id int64
+	err := s.DB.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, m.RemoteID).Scan(&id)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		return id, err
+	}
+	var trust string
+	if err := s.DB.QueryRowContext(ctx, `SELECT trust_origin FROM api_keys WHERE id = ?`, m.Author).Scan(&trust); err != nil {
+		return 0, err
+	}
+	var metadata sql.NullString
+	if len(m.Metadata) > 0 {
+		metadata = sql.NullString{String: string(m.Metadata), Valid: true}
+	}
+	s.stampMu.Lock()
+	now, err := s.stamp(ctx)
+	if err == nil {
+		var res sql.Result
+		res, err = s.DB.ExecContext(ctx, `INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type,
+			metadata, trust_origin, operator, origin_sig, remote_id, unverified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+			roomID, m.Author, now, m.Content, m.ContentType, m.MessageType, metadata, trust, nullableString(m.OriginSig), m.RemoteID, m.Unverified)
+		if err == nil {
+			id, err = res.LastInsertId()
+		}
+	}
+	s.stampMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	if s.Broker != nil {
+		mv := messageView{ID: id, RoomID: roomID, AuthorKeyID: m.Author, TS: now, ContentType: m.ContentType,
+			Size: len(m.Content), Content: m.Content, MessageType: m.MessageType, Metadata: m.Metadata, TrustOrigin: trust}
+		if payload, err := json.Marshal(mv); err == nil {
+			s.Broker.Publish(roomID, payload)
+		}
+	}
+	return id, nil
 }
 
 // insert stores one message, the columns after room_id in args, and
