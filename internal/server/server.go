@@ -90,7 +90,20 @@ func New(cfg Config, deps Deps) (*Server, error) {
 			return nil, fmt.Errorf("web ui: %w", err)
 		}
 	}
-	s.router = s.buildRouter(deps, uiSvc)
+	var fedSvc *federation.Service
+	if cfg.FederationDomain != "" {
+		var err error
+		if fedSvc, err = federation.New(deps.DB, federation.Options{
+			Domain:       cfg.FederationDomain,
+			Mode:         cfg.FederationMode,
+			InsecureHTTP: cfg.FederationInsecureHTTP,
+			Logger:       cfg.Logger,
+		}); err != nil {
+			return nil, fmt.Errorf("federation: %w", err)
+		}
+		s.fedSvc = fedSvc
+	}
+	s.router = s.buildRouter(deps, uiSvc, fedSvc)
 	s.http = &http.Server{
 		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 		Handler:           s.router,
@@ -102,21 +115,11 @@ func New(cfg Config, deps Deps) (*Server, error) {
 
 	// The federation listener serves only the federation routes, so
 	// the agent API and the web UI are never reachable through it.
-	if cfg.FederationDomain != "" {
-		fedSvc, err := federation.New(deps.DB, federation.Options{
-			Domain:       cfg.FederationDomain,
-			Mode:         cfg.FederationMode,
-			InsecureHTTP: cfg.FederationInsecureHTTP,
-			Logger:       cfg.Logger,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("federation: %w", err)
-		}
+	if fedSvc != nil {
 		fr := chi.NewRouter()
 		fr.Use(RequestIDMiddleware())
 		fr.Use(RecoveryMiddleware(s.logger))
 		fedSvc.PublicRoutes(fr)
-		s.fedSvc = fedSvc
 		fr.NotFound(s.notFound)
 		fr.MethodNotAllowed(s.methodNotAllowed)
 		s.fed = &http.Server{
@@ -168,7 +171,7 @@ type DBHealthChecker interface {
 	PingContext(ctx context.Context) error
 }
 
-func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
+func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Service) chi.Router {
 	r := chi.NewRouter()
 	r.Use(RequestIDMiddleware())
 	r.Use(RecoveryMiddleware(s.logger))
@@ -231,6 +234,11 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
 		messagesSvc.Routes(r)
 		auditSvc.Routes(r)
 		claimsSvc.Routes(r)
+		if fedSvc != nil {
+			fedSvc.AdminRoutes(r)
+		} else {
+			federation.DisabledRoutes(r)
+		}
 		if uiSvc != nil {
 			uiSvc.V1Routes(r)
 		}
