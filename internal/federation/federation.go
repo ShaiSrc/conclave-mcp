@@ -5,13 +5,16 @@ package federation
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/time/rate"
 )
 
 // Options configure a Service.
@@ -23,14 +26,22 @@ type Options struct {
 }
 
 // Service is the federation side of a server. It holds the database,
-// the server's identity (and with it the domain) and the federation
-// settings.
+// the server's identity (and with it the domain), the federation
+// settings, the peer store and the outgoing client.
 type Service struct {
 	db           *sql.DB
 	id           *Identity
 	mode         string
 	insecureHTTP bool
 	logger       *slog.Logger
+	peers        *Peers
+	fetch        *Fetcher
+
+	mu       sync.Mutex
+	keys     map[string]ed25519.PublicKey // peer keys by fingerprint
+	limiters map[string]*rate.Limiter     // per verified peer
+
+	warnLog, keyAudits, keyFetches minuteGate
 }
 
 // New returns the federation service for opts.Domain, loading the
@@ -48,12 +59,23 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger}, nil
+	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
+		peers: &Peers{db: db}, keys: map[string]ed25519.PublicKey{}, limiters: map[string]*rate.Limiter{}}
+	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {
+		p, err := s.peers.Get(context.Background(), domain)
+		return err == nil && p.Status == statusAllowed
+	})
+	return s, nil
 }
 
-// PublicRoutes mounts the routes of the federation listener.
+// PublicRoutes mounts the routes of the federation listener. Every
+// /fed/v1 route is behind Verify.
 func (s *Service) PublicRoutes(r chi.Router) {
 	r.Get("/.well-known/conclave", s.handleDocument)
+	r.Route("/fed/v1", func(r chi.Router) {
+		r.Use(s.Verify)
+		r.Post("/ping", s.handlePing)
+	})
 }
 
 func (s *Service) handleDocument(w http.ResponseWriter, _ *http.Request) {

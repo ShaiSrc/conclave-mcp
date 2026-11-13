@@ -1,0 +1,193 @@
+package federation
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"syscall"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+const (
+	maxBody          = 64 << 10 // request and response bodies
+	fetchTimeout     = 5 * time.Second
+	fetchesPerMinute = 10 // documents of domains that are not allowed, server-wide
+)
+
+// ErrFetchLimited is returned when the fetch budget for domains that
+// are not allowed is used up.
+var ErrFetchLimited = errors.New("too many federation document fetches, try again later")
+
+var errNonPublicAddr = errors.New("refusing a non-public address")
+
+var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+
+// Fetcher makes the server's outgoing federation requests. For a
+// domain that is not allowed, it connects only to public addresses.
+type Fetcher struct {
+	insecureHTTP bool
+	isAllowed    func(domain string) bool
+	limit        *rate.Limiter
+	client       *http.Client
+}
+
+type allowPrivateKey struct{}
+
+// NewFetcher returns a Fetcher that uses http:// with insecureHTTP and
+// lets isAllowed domains have private addresses.
+func NewFetcher(insecureHTTP bool, isAllowed func(domain string) bool) *Fetcher {
+	return &Fetcher{
+		insecureHTTP: insecureHTTP,
+		isAllowed:    isAllowed,
+		limit:        rate.NewLimiter(rate.Every(time.Minute/fetchesPerMinute), fetchesPerMinute),
+		client: &http.Client{
+			Timeout:       fetchTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+			Transport: &http.Transport{
+				// No Proxy: the dialer must see the peer's own address.
+				DialContext: dial,
+				// Every request dials, so no connection is reused
+				// across domains with different address rules.
+				DisableKeepAlives:      true,
+				TLSHandshakeTimeout:    fetchTimeout,
+				MaxResponseHeaderBytes: maxBody,
+			},
+		},
+	}
+}
+
+func dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := net.Dialer{Timeout: fetchTimeout}
+	if ok, _ := ctx.Value(allowPrivateKey{}).(bool); !ok {
+		d.Control = refuseNonPublic
+	}
+	return d.DialContext(ctx, network, addr)
+}
+
+// refuseNonPublic is a net.Dialer Control hook. It sees the address
+// actually connected, after DNS resolution, so a name that resolves or
+// rebinds to an internal address is refused too.
+func refuseNonPublic(_, address string, _ syscall.RawConn) error {
+	ap, err := netip.ParseAddrPort(address)
+	if err != nil {
+		return err
+	}
+	a := ap.Addr().Unmap()
+	if a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() || cgnat.Contains(a) {
+		return fmt.Errorf("%w: %s", errNonPublicAddr, a)
+	}
+	return nil
+}
+
+// Document fetches and checks domain's server document. Domains that
+// are not allowed share a budget of 10 fetches a minute.
+func (f *Fetcher) Document(ctx context.Context, domain string) (Document, error) {
+	allowed := f.isAllowed(domain)
+	if !allowed && !f.limit.Allow() {
+		return Document{}, ErrFetchLimited
+	}
+	return f.document(ctx, domain, allowed)
+}
+
+func (f *Fetcher) document(ctx context.Context, domain string, allowPrivate bool) (Document, error) {
+	req, err := f.newRequest(ctx, http.MethodGet, domain, "/.well-known/conclave", nil)
+	if err != nil {
+		return Document{}, err
+	}
+	status, body, err := f.send(req, allowPrivate)
+	if err != nil {
+		return Document{}, err
+	}
+	if status != http.StatusOK {
+		return Document{}, fmt.Errorf("document of %s: status %d", domain, status)
+	}
+	var doc Document
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return Document{}, fmt.Errorf("document of %s: %w", domain, err)
+	}
+	if doc.Protocol != Protocol || doc.Domain != domain || len(doc.Keys) == 0 {
+		return Document{}, fmt.Errorf("document of %s: wrong protocol, domain or no keys", domain)
+	}
+	for _, k := range doc.Keys {
+		pub, err := b64.DecodeString(k.PublicKey)
+		if err != nil || len(pub) != ed25519.PublicKeySize || k.Alg != "ed25519" ||
+			k.Fingerprint != Fingerprint(pub) || k.KeyID != KeyIDFor(pub) {
+			return Document{}, fmt.Errorf("document of %s: key %q does not match its fingerprint", domain, k.KeyID)
+		}
+	}
+	return doc, nil
+}
+
+func (f *Fetcher) newRequest(ctx context.Context, method, domain, path string, body []byte) (*http.Request, error) {
+	// A canonical domain has no '/', '@' or '?' that could move the host.
+	if d, err := NormalizeDomain(domain); err != nil || d != domain {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidDomain, domain)
+	}
+	scheme := "https"
+	if f.insecureHTTP {
+		scheme = "http"
+	}
+	return http.NewRequestWithContext(ctx, method, scheme+"://"+domain+path, bytes.NewReader(body))
+}
+
+// send does req and returns the status and body, read up to maxBody.
+func (f *Fetcher) send(req *http.Request, allowPrivate bool) (int, []byte, error) {
+	req = req.WithContext(context.WithValue(req.Context(), allowPrivateKey{}, allowPrivate))
+	resp, err := f.client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		return 0, nil, err
+	}
+	if len(body) > maxBody {
+		return 0, nil, fmt.Errorf("response from %s is over %d bytes", req.URL.Host, maxBody)
+	}
+	return resp.StatusCode, body, nil
+}
+
+// Ping sends a signed ping to domain and returns the round-trip time.
+func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error) {
+	body := []byte("{}")
+	req, err := s.fetch.newRequest(ctx, http.MethodPost, domain, "/fed/v1/ping", body)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if err := s.id.SignRequest(req, domain, body); err != nil {
+		return 0, err
+	}
+	start := time.Now()
+	status, resp, err := s.fetch.send(req, s.fetch.isAllowed(domain))
+	rtt := time.Since(start)
+	if err != nil {
+		return 0, err
+	}
+	if status != http.StatusOK {
+		var env struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(resp, &env)
+		return 0, fmt.Errorf("ping %s: status %d %s", domain, status, env.Error.Code)
+	}
+	var out struct {
+		Domain string `json:"domain"`
+	}
+	if err := json.Unmarshal(resp, &out); err != nil || out.Domain != domain {
+		return 0, fmt.Errorf("ping %s: answer from another domain or not JSON", domain)
+	}
+	return rtt, nil
+}

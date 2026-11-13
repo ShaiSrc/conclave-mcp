@@ -290,6 +290,13 @@ func TestServer_FederationListener(t *testing.T) {
 	if rec := serve(s.Handler(), "/.well-known/conclave"); rec.Code != http.StatusNotFound {
 		t.Errorf("/.well-known/conclave on the main listener: %d, want 404", rec.Code)
 	}
+	// /fed/v1 is there, behind signature verification, and only there.
+	if rec := serve(s.fed.Handler, "/fed/v1/ping"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unsigned /fed/v1/ping on the federation listener: %d, want 401", rec.Code)
+	}
+	if rec := serve(s.Handler(), "/fed/v1/ping"); rec.Code != http.StatusNotFound {
+		t.Errorf("/fed/v1/ping on the main listener: %d, want 404", rec.Code)
+	}
 }
 
 // Without a domain there is no second listener and no key.

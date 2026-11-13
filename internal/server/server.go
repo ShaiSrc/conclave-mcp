@@ -43,6 +43,7 @@ type Server struct {
 	router chi.Router
 	http   *http.Server
 	fed    *http.Server // the federation listener; nil with federation off
+	fedSvc *federation.Service
 
 	mu      sync.Mutex
 	started bool
@@ -115,6 +116,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		fr.Use(RequestIDMiddleware())
 		fr.Use(RecoveryMiddleware(s.logger))
 		fedSvc.PublicRoutes(fr)
+		s.fedSvc = fedSvc
 		fr.NotFound(s.notFound)
 		fr.MethodNotAllowed(s.methodNotAllowed)
 		s.fed = &http.Server{
@@ -317,6 +319,13 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
+
+	// The federation nonce pruning stops when Start returns.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	if s.fedSvc != nil {
+		go s.fedSvc.Run(ctx)
+	}
 
 	s.logger.Info("http server listening", "addr", s.http.Addr)
 	if s.fed != nil {
