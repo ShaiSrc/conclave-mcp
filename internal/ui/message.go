@@ -55,7 +55,7 @@ func (s *Service) messageBegin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin confirmation")
 		return
 	}
-	if !s.startCeremony(w, r, ceremony{kind: kindMessage, data: *data, roomID: req.RoomID, message: msg,
+	if !s.startCeremony(w, r, ceremony{kind: kindMessage, data: *data, roomID: req.RoomID, body: msg,
 		session: hashToken(sessionToken(r))}) {
 		return
 	}
@@ -66,28 +66,8 @@ func (s *Service) messageBegin(w http.ResponseWriter, r *http.Request) {
 // the passkey confirmed it in the session that began it.
 func (s *Service) messageFinish(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	// Taken first: a refused finish uses the ceremony up too.
-	c, ok := s.takeCeremony(w, r, kindMessage)
+	c, ok := s.finishCeremony(w, r, kindMessage, "message.send", "message confirmation")
 	if !ok {
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "no message confirmation in progress, or it took longer than 5 minutes")
-		return
-	}
-	token := sessionToken(r)
-	live, err := s.session(ctx, token)
-	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "session lookup")
-		return
-	}
-	if !live {
-		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "session expired: log in again")
-		return
-	}
-	if hashToken(token) != c.session {
-		s.auditFail(ctx, "message.send", "error:other_session", "finish from another session than begin")
-		writeErr(w, r, http.StatusForbidden, "forbidden", "this confirmation was started in another session")
-		return
-	}
-	if _, ok := s.verifyAssertion(w, r, c, "message.send"); !ok {
 		return
 	}
 	keyID, err := operatorKeyID(ctx, s.db)
@@ -101,7 +81,7 @@ func (s *Service) messageFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	// Admin scope only: the send runs as the operator key, not as a session.
 	req := r.Clone(context.WithValue(ctx, auth.ClaimsKey{}, auth.Claims{KeyID: keyID, Scopes: []string{auth.ScopeAdmin}}))
-	req.Body = io.NopCloser(bytes.NewReader(c.message))
-	req.ContentLength = int64(len(c.message))
+	req.Body = io.NopCloser(bytes.NewReader(c.body))
+	req.ContentLength = int64(len(c.body))
 	s.SendAsOperator(w, req, c.roomID)
 }

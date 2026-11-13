@@ -47,6 +47,7 @@ const (
 	kindLogin ceremonyKind = iota + 1
 	kindRegister
 	kindMessage
+	kindConfirm
 )
 
 // ceremony is what a begin step keeps in memory for its finish step.
@@ -56,8 +57,10 @@ type ceremony struct {
 	setupToken string // registration with a setup token; "" when logged in
 	name       string // passkey name (registration)
 	roomID     string // message: the room it goes to
-	message    []byte // message: the send body, the only thing finish posts
-	session    string // message: hashToken of the session that began it
+	method     string // confirm: the request finish runs
+	path       string // confirm: its path and query
+	body       []byte // message, confirm: the body; finish sends this and nothing the finish request carries
+	session    string // message, confirm: hashToken of the session that began it
 	expires    time.Time
 }
 
@@ -309,6 +312,12 @@ func (s *Service) registerGate(w http.ResponseWriter, r *http.Request, setupToke
 		return "", false
 	}
 	if in {
+		// A virtual authenticator could otherwise register itself with
+		// the session alone.
+		if !confirmed(r) {
+			writeErr(w, r, http.StatusForbidden, "forbidden", needsConfirm)
+			return "", false
+		}
 		return "", true
 	}
 	if passkeys > 0 {
@@ -572,9 +581,14 @@ func (s *Service) listCredentials(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"credentials": out})
 }
 
-// removeCredential deletes a passkey, never the last one.
+// removeCredential deletes a passkey, never the last one. It needs a
+// confirmation.
 func (s *Service) removeCredential(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSession(w, r) {
+		return
+	}
+	if !confirmed(r) {
+		writeErr(w, r, http.StatusForbidden, "forbidden", needsConfirm)
 		return
 	}
 	ctx := r.Context()

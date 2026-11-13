@@ -44,6 +44,10 @@ type Service struct {
 	// set at wiring time). Only a passkey-confirmed finish calls it.
 	SendAsOperator func(w http.ResponseWriter, r *http.Request, roomID string)
 
+	// Router is the server's router (set at wiring time). A confirmed
+	// change runs through it, so every /v1 rule applies to it.
+	Router http.Handler
+
 	mu         sync.Mutex
 	ceremonies map[string]ceremony // by hashToken(ceremony cookie)
 }
@@ -132,6 +136,9 @@ func (s *Service) Routes(r chi.Router) {
 		r.Post("/auth/login/finish", s.loginFinish)
 		r.Post("/auth/message/begin", s.messageBegin)
 		r.Post("/auth/message/finish", s.messageFinish)
+		r.Post("/auth/confirm/begin", s.confirmBegin)
+		r.Post("/auth/confirm/finish", s.confirmFinish)
+		r.Post("/agents", s.createAgent)
 		r.Post("/auth/logout", s.logout)
 		r.Get("/auth/state", s.state)
 		r.Get("/auth/credentials", s.listCredentials)

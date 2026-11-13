@@ -221,6 +221,12 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
 		r.With(authMW).Get("/v1/rooms/{id}/events", evH.Handle)
 	}
 
+	// A change the operator confirmed with a passkey runs through the
+	// whole router, so every /v1 rule applies to it (internal/ui).
+	if uiSvc != nil {
+		uiSvc.Router = r
+	}
+
 	return r
 }
 
