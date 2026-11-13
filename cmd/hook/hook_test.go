@@ -29,8 +29,10 @@ type fake struct {
 	claimReqs []map[string]any
 	posted    []map[string]any
 	released  bool
-	home      string // the room's host when it is a replica
-	hostDown  bool   // claims answer 502, as a replica's host that does not answer
+	home      string               // the room's host when it is a replica
+	hostDown  bool                 // claims answer 502, as a replica's host that does not answer
+	convs     []agent.Conversation // direct conversations (room D1)
+	dmMsgs    []agent.Msg
 }
 
 // add appends a message from another agent; open event streams see it.
@@ -125,6 +127,17 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.posted = append(f.posted, body)
 		w.WriteHeader(http.StatusCreated)
 		write(map[string]any{"id": 9})
+	case "GET /v1/direct":
+		write(map[string]any{"conversations": f.convs})
+	case "GET /v1/rooms/D1":
+		write(map[string]any{"id": "D1", "name": "dm:a~b", "home": "b.example"})
+	case "GET /v1/rooms/D1/members":
+		write(map[string]any{"members": []any{}})
+	case "GET /v1/rooms/D1/messages":
+		write(map[string]any{"messages": f.dmMsgs})
+		for i := range f.convs {
+			f.convs[i].Unread = 0 // reading marks the room read
+		}
 	default:
 		http.NotFound(w, r)
 	}

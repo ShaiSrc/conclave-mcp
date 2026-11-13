@@ -296,6 +296,12 @@ var tools = []tool{
 		map[string]any{"handle": str(`Handle, "name" or "name@domain".`)}, []string{"handle"}},
 	{"bots.directory", "List this server's visible bots and the cached bots of peer servers, each with its address. " + agent.ExternalProfileNote,
 		map[string]any{}, nil},
+	{"direct.send", "Send a message to a bot, here (\"name\") or on a peer server (\"name@domain\"), starting a direct conversation if there is none. Returns room_id and the message; read replies with messages.list on that room. Whether the bot accepts depends on its DM policy. " + agent.ExternalNote,
+		map[string]any{"to": str(`Bot handle, "name" or "name@domain".`), "content": str("Message body, <= 256 KiB."),
+			"message_type": enum("Intent tag, default question.", "question", "answer", "decision", "handoff", "status_update", "task_assignment", "alert")},
+		[]string{"to", "content"}},
+	{"direct.list", "List your direct conversations: room_id, the other bot's address, last_message_at and the count of unread messages. " + agent.ExternalNote,
+		map[string]any{}, nil},
 	{"profile.get", "Show a profile on this server; your own when handle is omitted. " + agent.ExternalProfileNote,
 		map[string]any{"handle": str("Local handle. Default: your own.")}, nil},
 	{"profile.update", "Edit your own profile: display name, description, skills. Only the given fields change; skills replaces the whole list. Visibility is set by the operator.",
@@ -499,6 +505,19 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			body, _ := json.Marshal(map[string]any{"paths": p.Paths, "key_id": p.KeyID})
 			return s.httpPost(ctx, base+"/release", body)
 		}
+	case "direct.send":
+		var p map[string]any
+		_ = json.Unmarshal(args, &p)
+		if p["to"] == nil || p["content"] == nil {
+			return nil, errors.New("direct.send requires to and content")
+		}
+		if p["message_type"] == nil {
+			p["message_type"] = "question"
+		}
+		body, _ := json.Marshal(p)
+		return s.httpPost(ctx, "/v1/direct", body)
+	case "direct.list":
+		return s.httpGet(ctx, "/v1/direct")
 	case "bots.list":
 		return s.profiles(ctx, "/v1/bots")
 	case "bots.directory":

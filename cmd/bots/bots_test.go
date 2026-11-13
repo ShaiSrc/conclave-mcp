@@ -125,3 +125,10 @@ func TestProfile(t *testing.T) {
 		t.Errorf("api error: %v", err)
 	}
 }
+
+func TestProfile_DMPolicy(t *testing.T) {
+	_, req, err := runCmd(t, 200, bob, "profile", "bob", "--dm-policy", "peers")
+	if err != nil || !strings.HasPrefix(req, "PATCH /v1/bots/bob/profile ") || !strings.Contains(req, `{"dm_policy":"peers"}`) {
+		t.Errorf("err=%v req=%q", err, req)
+	}
+}
