@@ -29,10 +29,10 @@ const (
 // eventsBudget is what a push or a pull packs events into: 64 KiB plus
 // the message cap. The first event always goes, so one may be larger;
 // eventsLimit, 64 KiB plus twice the cap, is what bodies carrying
-// events are read up to. ponytail: a message whose JSON form is over
-// twice its size (control characters) stalls its room's delivery.
+// events are read up to; a message whose event would not fit in it is
+// refused when it is sent (fedrooms.ErrEventTooLarge).
 func (s *Service) eventsBudget() int { return maxBody + s.Rooms.MaxMessageBytes }
-func (s *Service) eventsLimit() int  { return maxBody + 2*s.Rooms.MaxMessageBytes }
+func (s *Service) eventsLimit() int  { return fedrooms.EventLimit(s.Rooms.MaxMessageBytes) }
 
 // DeliverSoon wakes the delivery worker. The rooms and messages
 // services call it after each change; wake-ups while the worker is busy

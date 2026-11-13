@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -189,7 +190,7 @@ func TestLog_OnlyRoomsWithStandIns(t *testing.T) {
 		inTx(t, h.db, func(tx *sql.Tx) error {
 			for _, err := range []error{
 				LogMember(ctx, tx, "R", h.bot, domain),
-				LogMessage(ctx, tx, "R", h.firstMsg, domain),
+				LogMessage(ctx, tx, "R", h.firstMsg, domain, 256<<10),
 				LogRoom(ctx, tx, "R", domain),
 				LogRemove(ctx, tx, "R", h.plain, domain),
 				LogJoin(ctx, tx, "R", h.plain, domain),
@@ -287,7 +288,7 @@ func TestSplitMetadata(t *testing.T) {
 		{` { } `, "", nil, false},
 		{`{"reply_to":5}`, "", &five, false},
 		{`{"b":1,"a":{"y":2, "x":[1, 2]}}`, `{"a":{"y":2,"x":[1,2]},"b":1}`, nil, false},
-		{`{"reply_to":5,"b":"<&>","a":1}`, "{\"a\":1,\"b\":\"\\u003c\\u0026\\u003e\"}", &five, false},
+		{`{"reply_to":5,"b":"<&>","a":1}`, `{"a":1,"b":"<&>"}`, &five, false},
 		{`{"reply_to":"x","a":1}`, `{"a":1}`, nil, false},
 		{`[1]`, "", nil, true},
 		{`"x"`, "", nil, true},
@@ -321,7 +322,7 @@ func TestLog_NotForReplicas(t *testing.T) {
 	}
 	ctx := context.Background()
 	inTx(t, h.db, func(tx *sql.Tx) error {
-		if err := LogMessage(ctx, tx, "R", h.firstMsg, "a.example"); err != nil {
+		if err := LogMessage(ctx, tx, "R", h.firstMsg, "a.example", 256<<10); err != nil {
 			return err
 		}
 		return LogRoom(ctx, tx, "R", "a.example")
@@ -341,5 +342,33 @@ func TestLog_PayloadNotHTMLEscaped(t *testing.T) {
 	join(t, h.db, "R", "c1@c.example", "read", "a.example")
 	if got := events(t, h.db, "R"); string(got[0].Payload) != `{"name":"a<b>&c","archived":false}` {
 		t.Errorf("room payload: %s", got[0].Payload)
+	}
+}
+
+// A message whose event would not fit in what member servers read, 64
+// KiB plus twice the message cap with the push around it, is refused
+// and not logged.
+func TestLogMessage_EventTooLarge(t *testing.T) {
+	h := newHostRoom(t, "R", 0)
+	join(t, h.db, "R", "c1@c.example", "read", "a.example")
+	n := len(events(t, h.db, "R"))
+	// Control characters take 6 bytes each in JSON.
+	id := addKey(t, h.db, `INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, trust_origin)
+		VALUES ('R', ?, '2026-01-04T00:00:00.000000000Z', ?, 'text/plain', 'answer', 'internal')`, h.bot, strings.Repeat("\x01", 12<<10))
+	ctx := context.Background()
+	tx, err := h.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := LogMessage(ctx, tx, "R", id, "a.example", 1<<10); !errors.Is(err, ErrEventTooLarge) {
+		t.Errorf("1 KiB cap: %v, want ErrEventTooLarge", err)
+	}
+	_ = tx.Rollback()
+	if got := len(events(t, h.db, "R")); got != n {
+		t.Errorf("logged %d events", got-n)
+	}
+	inTx(t, h.db, func(tx *sql.Tx) error { return LogMessage(ctx, tx, "R", id, "a.example", 256<<10) })
+	if got := len(events(t, h.db, "R")); got != n+1 {
+		t.Errorf("256 KiB cap: logged %d events, want 1", got-n)
 	}
 }

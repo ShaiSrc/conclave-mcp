@@ -13,7 +13,8 @@
 //	POST /v1/rooms/{id}/claims/release    -- release; an admin key may release others'
 //
 // In a replica room the claims are the host's: each request is
-// forwarded to it and its answer returned.
+// forwarded to it and the answer Forward rebuilt from the host's
+// returned.
 package claims
 
 import (
@@ -49,9 +50,10 @@ type Service struct {
 	Now func() time.Time // tests pin the clock
 	// Forward, when set, sends r, a claims request of key author in
 	// replica room roomID, to the room's host and returns the host's
-	// status and body; claims of a replica are the host's. A refusal
-	// (no handle, host unreachable) is a *fedrooms.Error. Set by the
-	// server with federation on.
+	// status and a body rebuilt from its answer (a 2xx or 409); claims
+	// of a replica are the host's. A refusal (no handle, host
+	// unreachable, any other answer of the host) is a *fedrooms.Error.
+	// Set by the server with federation on.
 	Forward func(r *http.Request, roomID string, author int64) (int, []byte, error)
 
 	// mu serialises claim writes so the overlap check and the insert
@@ -170,7 +172,9 @@ func (s *Service) access(w http.ResponseWriter, r *http.Request, roomID, need st
 	return mem, false
 }
 
-// forward answers r with the answer of the replica's host, as it is.
+// forward answers r with the answer of the replica's host, as Forward
+// rebuilt it: a 2xx or 409 with checked fields, any other answer a
+// refusal with the host's status and code and its message marked.
 func (s *Service) forward(w http.ResponseWriter, r *http.Request, roomID string, caller int64) {
 	if s.Forward == nil {
 		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted on another server, and federation is off")

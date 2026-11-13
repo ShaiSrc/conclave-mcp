@@ -145,3 +145,14 @@ func TestMessagesRemoteIDUniquePerRoom(t *testing.T) {
 		}
 	}
 }
+
+// A stand-in's domain is in the canonical form of federation domains:
+// no trailing dot, no empty label, no :443.
+func TestStandIn_CanonicalDomain(t *testing.T) {
+	db := testDB(t)
+	for _, bad := range []string{"b1@b.example.", "b1@b..example", "b1@.b.example", "b1@b.example:443", "b1@-b.example", "b1@b.example:0080"} {
+		if _, err := standIn(t, db, bad); err == nil {
+			t.Errorf("address %q accepted", bad)
+		}
+	}
+}

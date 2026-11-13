@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +20,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/oklog/ulid/v2"
 
+	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/bots"
+	"github.com/hermes/conclave-mcp/internal/claims"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
@@ -416,7 +419,8 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, cre
 
 // applyMessage stores a message of the replica. Its author signature is
 // checked first; then its author key is found or created, and reply_to
-// translated to our id. A reply_to we do not have is dropped.
+// translated to our id. A reply_to we do not have is dropped. A
+// signature stored here with another host id is a replay: refused.
 func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MessagePayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
@@ -437,6 +441,16 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 	}
 	if author == 0 {
 		return refused("message event: no key of ours is %s", p.Author)
+	}
+	if p.OriginSig != "" {
+		var replay bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM messages WHERE room_id = ? AND origin_sig = ?
+			AND remote_id IS NOT ?)`, roomID, p.OriginSig, p.ID).Scan(&replay); err != nil {
+			return err
+		}
+		if replay {
+			return refused("message event: the author signature of another message")
+		}
 	}
 	var reply *int64
 	if p.ReplyTo != nil {
@@ -488,7 +502,7 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 		pub = peer.PublicKey
 	}
 	m := MessageSig{Room: roomID + "@" + host, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
-		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo}
+		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo, Nonce: p.Nonce}
 	if !VerifyMessage(pub, m, p.OriginSig) {
 		return false, refused("the author signature of %s does not verify", p.Author)
 	}
@@ -514,7 +528,7 @@ func localMetadata(wire json.RawMessage, reply *int64) ([]byte, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
-	return json.Marshal(m)
+	return fedrooms.Marshal(m)
 }
 
 // pull fetches and applies the events of replica roomID after the last
@@ -689,17 +703,32 @@ func (s *Service) unreachable(host string, status int, err error) error {
 	return nil
 }
 
-// hostError is a host's 4xx answer as a refusal with its status, code
-// and message.
-func hostError(status int, body []byte) error {
+// codeRE is an error code as this server writes them.
+var codeRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// hostError is host's 4xx answer as a refusal: its status, its code
+// (host_refused when it is none), and its message marked as the host's,
+// on one line, at most 200 characters of it. Nothing else of the body
+// is kept.
+func hostError(host string, status int, body []byte) error {
 	var env struct {
 		Error struct{ Code, Message string } `json:"error"`
 	}
 	_ = json.Unmarshal(body, &env)
-	if env.Error.Code == "" {
-		env.Error.Code, env.Error.Message = "host_refused", fmt.Sprintf("the host answered with status %d", status)
+	code, msg := env.Error.Code, oneLine(env.Error.Message, 200)
+	if !codeRE.MatchString(code) {
+		code = "host_refused"
 	}
-	return &fedrooms.Error{Status: status, Code: env.Error.Code, Message: env.Error.Message}
+	if msg == "" {
+		msg = fmt.Sprintf("status %d", status)
+	}
+	return &fedrooms.Error{Status: status, Code: code, Message: "host " + host + " refused: " + msg}
+}
+
+// oneLine is s as agent.OneLine prints it, cut to max characters.
+func oneLine(s string, max int) string {
+	r := []rune(agent.OneLine(s))
+	return string(r[:min(len(r), max)])
 }
 
 // ForwardMessage sends m, a message of our key author in replica
@@ -714,8 +743,9 @@ func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int6
 	if err != nil {
 		return 0, err
 	}
+	nonce := newNonce()
 	sig := s.id.SignMessage(MessageSig{Room: roomID + "@" + host, Author: addr, ContentType: m.ContentType,
-		MessageType: m.MessageType, Content: m.Content, Metadata: m.Metadata, ReplyTo: m.ReplyTo})
+		MessageType: m.MessageType, Content: m.Content, Metadata: m.Metadata, ReplyTo: m.ReplyTo, Nonce: nonce})
 	body := rawJSON(struct {
 		Author      string          `json:"author"`
 		Content     string          `json:"content"`
@@ -724,18 +754,19 @@ func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int6
 		Metadata    json.RawMessage `json:"metadata,omitempty"`
 		ReplyTo     *int64          `json:"reply_to,omitempty"`
 		Sig         string          `json:"sig"`
-	}{addr, m.Content, m.ContentType, m.MessageType, m.Metadata, m.ReplyTo, sig})
+		Nonce       string          `json:"nonce"`
+	}{addr, m.Content, m.ContentType, m.MessageType, m.Metadata, m.ReplyTo, sig, nonce})
 	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/messages", body, s.eventsLimit())
 	if err := s.unreachable(host, status, err); err != nil {
 		return 0, err
 	}
 	if status >= 400 {
-		return 0, hostError(status, out)
+		return 0, hostError(host, status, out)
 	}
 	var ev fedrooms.Event
 	var p fedrooms.MessagePayload
 	if status != http.StatusCreated || json.Unmarshal(out, &ev) != nil || ev.Type != fedrooms.EventMessage ||
-		json.Unmarshal(ev.Payload, &p) != nil || p.ID <= 0 || p.Author != addr {
+		json.Unmarshal(ev.Payload, &p) != nil || p.ID <= 0 || p.Author != addr || p.OriginSig != sig {
 		return 0, &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: host + " did not answer with the message's event"}
 	}
 	return s.applyAnswered(ctx, roomID, host, ev, p.ID)
@@ -775,16 +806,17 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 
 // ForwardClaims sends r, a claims request (list, claim, heartbeat or
 // release) of our key author in replica roomID, to the room's host for
-// the author's address, and returns the host's status and body. Claims
-// carry paths, so only key ids are translated: each claim's and
-// conflict's key_id becomes our key for its address (our bot, or the
-// stand-in, created if needed; 0 for an address no key of ours can
-// stand for), so a bot finds its own claims by its own key id. The
-// rest of the body is the host's, except that labels become the
-// claim's address, trust_origin the local key's (external for a
-// stand-in), and a 409's message is rebuilt from those, so no text the
-// host chose reaches our agents. A refusal (no handle, host
-// unreachable) is a *fedrooms.Error.
+// the author's address, and returns the host's status with an answer
+// rebuilt from it: nothing of the host's body reaches our agents as it
+// is. Each claim and conflict keeps its known fields, checked (a path
+// or held_path that is no claim path, an expires_at that is no RFC 3339
+// time, an id or auto of the wrong type drops it), and its note on one
+// line, at most 200 characters. Its holder is our key for its address
+// (claimHolder; no key drops it), its label that address and its trust
+// external: forwarded claims are the host's word, and a bot finds its
+// own claims by key id. A 409's message is rebuilt from its conflicts.
+// A 4xx other than 409 is a hostError; a refusal (no handle, host
+// unreachable or answering something else) is a *fedrooms.Error.
 func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (int, []byte, error) {
 	ctx := r.Context()
 	host, addr, err := s.ourAuthor(ctx, roomID, author)
@@ -808,65 +840,149 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 	if err := s.unreachable(host, status, err); err != nil {
 		return 0, nil, err
 	}
+	badAnswer := &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: host + " did not answer with claims"}
+	switch {
+	case status == http.StatusConflict, status/100 == 2:
+	case status/100 == 4:
+		return 0, nil, hostError(host, status, out)
+	default:
+		return 0, nil, badAnswer
+	}
+	var in struct {
+		Claims    []json.RawMessage `json:"claims"`
+		Conflicts []json.RawMessage `json:"conflicts"`
+		Refreshed *int64            `json:"refreshed"`
+		Released  []json.RawMessage `json:"released"`
+	}
+	if json.Unmarshal(out, &in) != nil {
+		return 0, nil, badAnswer
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	out, err = eachClaim(out, func(c map[string]json.RawMessage) error {
-		var addr string
-		_ = json.Unmarshal(c["address"], &addr)
-		id, _, err := s.memberKey(ctx, tx, addr, true)
-		if errors.Is(err, errRefused) {
-			id, err = 0, nil
-		}
-		if err != nil {
-			return err
-		}
-		trust := "external"
-		if id != 0 {
-			if err := tx.QueryRowContext(ctx, `SELECT trust_origin FROM api_keys WHERE id = ?`, id).Scan(&trust); err != nil {
-				return err
+	var answer any
+	switch {
+	case status == http.StatusConflict:
+		conflicts, reasons := []conflictView{}, []string{}
+		err = s.eachHostClaim(ctx, tx, roomID, in.Conflicts, true, func(c hostClaim, key int64) {
+			conflicts = append(conflicts, conflictView{Path: c.Path, HeldPath: c.HeldPath, KeyID: key, Label: c.Address,
+				ExpiresAt: c.ExpiresAt, TrustOrigin: "external"})
+			reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (EXTERNAL, untrusted) (claim %s, until %s)",
+				c.Path, c.Address, c.HeldPath, c.ExpiresAt))
+		})
+		msg := cmp.Or(strings.Join(reasons, "; "), "the paths are claimed on "+host)
+		answer = map[string]any{"error": map[string]any{"code": "conflict", "message": msg, "request_id": r.Header.Get("X-Request-Id")},
+			"conflicts": conflicts}
+	case sub == "/claims":
+		list := []claims.Claim{}
+		err = s.eachHostClaim(ctx, tx, roomID, in.Claims, false, func(c hostClaim, key int64) {
+			list = append(list, claims.Claim{ID: c.ID, Path: c.Path, KeyID: key, Label: c.Address, Auto: c.Auto, Note: c.Note,
+				ExpiresAt: c.ExpiresAt, TrustOrigin: "external"})
+		})
+		answer = map[string]any{"claims": list}
+	case sub == "/claims/heartbeat" && in.Refreshed != nil:
+		answer = map[string]any{"refreshed": *in.Refreshed}
+	case sub == "/claims/release":
+		released := []string{}
+		for _, raw := range in.Released {
+			var p string
+			if json.Unmarshal(raw, &p) == nil {
+				if p, err := claims.Normalize(p); err == nil {
+					released = append(released, p)
+				}
 			}
 		}
-		c["key_id"], c["label"], c["trust_origin"] = rawJSON(id), rawJSON(addr), rawJSON(trust)
-		return nil
-	})
+		answer = map[string]any{"released": released}
+	default:
+		return 0, nil, badAnswer
+	}
 	if err != nil {
 		return 0, nil, err
 	}
-	if status == http.StatusConflict {
-		out = conflictMessage(out)
-	}
-	return status, out, tx.Commit()
+	return status, rawJSON(answer), tx.Commit()
 }
 
-// conflictMessage rebuilds the error message of a 409 claims answer from
-// its conflicts, whose labels are already our own, the way the claims
-// handler words it. The host's text is dropped.
-func conflictMessage(body []byte) []byte {
-	var top, errObj map[string]json.RawMessage
-	var conflicts []struct {
-		Path        string `json:"path"`
-		HeldPath    string `json:"held_path"`
-		Label       string `json:"label"`
-		ExpiresAt   string `json:"expires_at"`
-		TrustOrigin string `json:"trust_origin"`
-	}
-	if json.Unmarshal(body, &top) != nil || json.Unmarshal(top["error"], &errObj) != nil || json.Unmarshal(top["conflicts"], &conflicts) != nil {
-		return body
-	}
-	var reasons []string
-	for _, c := range conflicts {
-		who := c.Label
-		if c.TrustOrigin == "external" {
-			who += " (EXTERNAL, untrusted)"
+// hostClaim is a claim or conflict of a host's claims answer: the
+// fields kept, typed. Key ids, labels and trust are the host's and
+// never read; the holder is named by its address.
+type hostClaim struct {
+	ID        int64  `json:"id"`
+	Path      string `json:"path"`
+	HeldPath  string `json:"held_path"`
+	Address   string `json:"address"`
+	Auto      bool   `json:"auto"`
+	Note      string `json:"note"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// conflictView is a conflict of a 409 claims answer, as the claims
+// handler writes it.
+type conflictView struct {
+	Path        string `json:"path"`
+	HeldPath    string `json:"held_path"`
+	KeyID       int64  `json:"key_id"`
+	Label       string `json:"label"`
+	ExpiresAt   string `json:"expires_at"`
+	TrustOrigin string `json:"trust_origin"`
+}
+
+// eachHostClaim calls f with each claim of list that passes the checks
+// (held_path too for a conflict), cleaned, and its holder's key here.
+// The others are dropped.
+func (s *Service) eachHostClaim(ctx context.Context, tx *sql.Tx, roomID string, list []json.RawMessage, conflict bool,
+	f func(c hostClaim, key int64)) error {
+	for _, raw := range list {
+		var c hostClaim
+		if json.Unmarshal(raw, &c) != nil {
+			continue
 		}
-		reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (claim %s, until %s)", c.Path, who, c.HeldPath, c.ExpiresAt))
+		exp, err := time.Parse(time.RFC3339, c.ExpiresAt)
+		if err != nil {
+			continue
+		}
+		c.ExpiresAt = exp.UTC().Format(time.RFC3339)
+		if c.Path, err = claims.Normalize(c.Path); err != nil {
+			continue
+		}
+		if conflict {
+			if c.HeldPath, err = claims.Normalize(c.HeldPath); err != nil {
+				continue
+			}
+		}
+		c.Note = oneLine(c.Note, 200)
+		key, err := s.claimHolder(ctx, tx, roomID, c.Address)
+		if err != nil {
+			return err
+		}
+		if key != 0 {
+			f(c, key)
+		}
 	}
-	errObj["message"] = rawJSON(strings.Join(reasons, "; "))
-	top["error"] = rawJSON(errObj)
-	return rawJSON(top)
+	return nil
+}
+
+// claimHolder returns our key for the holder address of a claim in
+// replica roomID, or 0. An address of this server is one of our bots
+// that is a member of the room, never operator@ or key-<id>@; any
+// other is its stand-in, created if needed.
+func (s *Service) claimHolder(ctx context.Context, tx *sql.Tx, roomID, address string) (int64, error) {
+	name, domain, _ := strings.Cut(address, "@")
+	if domain != s.id.Domain {
+		id, err := fedrooms.StandIn(ctx, tx, address)
+		if errors.Is(err, fedrooms.ErrAddress) {
+			return 0, nil
+		}
+		return id, err
+	}
+	var id int64
+	err := tx.QueryRowContext(ctx, `SELECT k.id FROM api_keys k JOIN room_members m ON m.key_id = k.id AND m.room_id = ?
+		WHERE k.handle = ? AND k.remote_domain IS NULL AND k.is_admin = 0 AND k.revoked_at IS NULL`, roomID, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
 }
 
 // LeaveRemote tells the host of replica roomID that our bot keyID leaves
@@ -880,7 +996,7 @@ func (s *Service) LeaveRemote(ctx context.Context, roomID string, keyID int64) e
 	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/leave",
 		rawJSON(map[string]string{"author": addr}), maxBody)
 	if err = s.unreachable(host, status, err); err == nil && status >= 400 && status != http.StatusNotFound {
-		err = hostError(status, out)
+		err = hostError(host, status, out)
 	}
 	detail, _ := json.Marshal(map[string]string{"address": addr})
 	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {

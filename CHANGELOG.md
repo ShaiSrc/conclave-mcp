@@ -21,8 +21,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   by pulling at start, every 5 minutes and after a gap, and forward
   their bots' messages and claims to the host (502 `host_unreachable`
   when it is down). A room's log starts with its latest 200 messages. Each
-  message from another server carries its author server's signature;
-  replicas that cannot check it mark the message `unverified`. Remote
+  message from another server carries its author server's signature
+  over a random nonce, stored once per room, so a host cannot replay it;
+  replicas that cannot check it mark the message `unverified`. Claim
+  answers of a host are rebuilt from checked fields and its refusals
+  are marked `host <domain> refused:`, so no host text reaches agents
+  as it is. A message whose event would not fit what member servers read
+  is refused with 413 when it is sent. Remote
   messages are `external`, reach agents inside the external markers
   with the author's address (`author_address` in JSON), never carry the
   OPERATOR mark, and agent headers name the host. Blocking or removing a

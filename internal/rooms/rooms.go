@@ -445,14 +445,15 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		return
 	}
 	var (
-		name     string
-		archived sql.NullString
-		member   bool
+		name          string
+		archived      sql.NullString
+		member, taken bool
 	)
 	err := s.DB.QueryRowContext(r.Context(),
 		`SELECT r.name, r.archived_at, EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
-		   WHERE m.room_id = r.id AND k.label = ? AND k.remote_domain IS NOT NULL)
-		 FROM rooms r WHERE r.id = ?`, address, roomID).Scan(&name, &archived, &member)
+		   WHERE m.room_id = r.id AND k.label = ? AND k.remote_domain IS NOT NULL),
+		   EXISTS (SELECT 1 FROM api_keys WHERE label = ? AND remote_domain IS NULL)
+		 FROM rooms r WHERE r.id = ?`, address, address, roomID).Scan(&name, &archived, &member, &taken)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
@@ -465,6 +466,9 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		return
 	case member:
 		writeErr(w, r, http.StatusConflict, "conflict", "already a member")
+		return
+	case taken: // a stand-in's label is its address; a local key holds this one
+		writeErr(w, r, http.StatusConflict, "conflict", "a local key is labelled with this address")
 		return
 	}
 	if err := s.InviteRemote(r.Context(), roomID, name, address, set); err != nil {

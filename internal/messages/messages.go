@@ -84,7 +84,7 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.post(w, r, chi.URLParam(r, "id"), false, "")
+		s.post(w, r, chi.URLParam(r, "id"), false, "", "")
 	})
 	r.Get("/rooms/{id}/messages", s.list)
 	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
@@ -148,22 +148,22 @@ var allowedMessageTypes = map[string]struct{}{
 // SendAsOperator stores the request body as an operator message. It is
 // for the UI's passkey-confirmed path only: nothing else may call it.
 func (s *Service) SendAsOperator(w http.ResponseWriter, r *http.Request, roomID string) {
-	s.post(w, r, roomID, true, "")
+	s.post(w, r, roomID, true, "", "")
 }
 
 // SendFromPeer stores the request body as a message of the stand-in key
-// in r's claims, with originSig, the author server's signature. It is
-// for the federation listener's message proposals only, after the
-// signature was checked.
-func (s *Service) SendFromPeer(w http.ResponseWriter, r *http.Request, roomID, originSig string) {
-	s.post(w, r, roomID, false, originSig)
+// in r's claims, with originSig, the author server's signature, and
+// the nonce it covers. It is for the federation listener's message
+// proposals only, after the signature was checked.
+func (s *Service) SendFromPeer(w http.ResponseWriter, r *http.Request, roomID, originSig, nonce string) {
+	s.post(w, r, roomID, false, originSig, nonce)
 }
 
 // post handles a send: validates the body and reply_to, stores the
 // message and publishes it to subscribers. operator marks the message
-// as the operator's; UI sessions may not post unmarked. originSig is
-// stored with a remote author's message.
-func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool, originSig string) {
+// as the operator's; UI sessions may not post unmarked. originSig and
+// nonce are stored with a remote author's message.
+func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool, originSig, nonce string) {
 	caller := callerKeyID(r)
 	if caller == 0 {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "no auth claims")
@@ -296,7 +296,7 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 			meta = map[string]json.RawMessage{}
 		}
 		meta["reply_to"] = json.RawMessage(strconv.FormatInt(*req.ReplyTo, 10))
-		b, _ := json.Marshal(meta)
+		b, _ := fedrooms.Marshal(meta) // <, > and & as sent: the wire form of a forwarded reply is derived from it
 		metadata = sql.NullString{String: string(b), Valid: true}
 		req.Metadata = b
 	}
@@ -313,8 +313,12 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		return
 	}
 	id, err := s.insert(r.Context(), roomID, caller, now, req.Content, req.ContentType,
-		messageType, metadata, callerTrustOrigin, operator, nullableString(originSig))
+		messageType, metadata, callerTrustOrigin, operator, nullableString(originSig), nullableString(nonce))
 	s.stampMu.Unlock()
+	if errors.Is(err, fedrooms.ErrEventTooLarge) {
+		writeErr(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "message too large for the room's other servers")
+		return
+	}
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert message")
 		return
@@ -498,8 +502,8 @@ func (s *Service) insert(ctx context.Context, roomID string, args ...any) (int64
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator, origin_sig)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append([]any{roomID}, args...)...)
+		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator,
+		 origin_sig, origin_nonce) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append([]any{roomID}, args...)...)
 	if err != nil {
 		return 0, err
 	}
@@ -507,7 +511,7 @@ func (s *Service) insert(ctx context.Context, roomID string, args ...any) (int64
 	if err != nil {
 		return 0, err
 	}
-	if err := fedrooms.LogMessage(ctx, tx, roomID, id, s.FedDomain); err != nil {
+	if err := fedrooms.LogMessage(ctx, tx, roomID, id, s.FedDomain, s.MaxMessageBytes); err != nil {
 		return 0, err
 	}
 	return id, tx.Commit()

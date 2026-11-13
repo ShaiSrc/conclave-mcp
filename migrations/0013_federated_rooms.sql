@@ -9,9 +9,12 @@
 --
 -- A replica room has home_domain = its host and applied_seq = the last
 -- event of the host's log it applied. A replica's message keeps the
--- host's id in remote_id; origin_sig is the author server's signature,
--- and unverified is 1 when the replica could not check it (the
--- author's server is unknown). fed_events is the host's per-room event
+-- host's id in remote_id; origin_sig is the author server's signature
+-- and origin_nonce the random value it covers (kept by the host, which
+-- sends it in events), and unverified is 1 when the replica could not
+-- check it (the author's server is unknown). A signature is stored once
+-- per room: the host answers a retried proposal with the stored
+-- message, and a replica refuses an event that replays one. fed_events is the host's per-room event
 -- log; fed_delivery is the cursor of each member server, failing_since
 -- the start of its current run of failed pushes. Timestamps use the
 -- fixed-width storage.FormatTS form.
@@ -25,8 +28,10 @@ ALTER TABLE rooms ADD COLUMN applied_seq INTEGER NOT NULL DEFAULT 0;
 
 ALTER TABLE messages ADD COLUMN remote_id INTEGER;
 ALTER TABLE messages ADD COLUMN origin_sig TEXT;
+ALTER TABLE messages ADD COLUMN origin_nonce TEXT;
 ALTER TABLE messages ADD COLUMN unverified INTEGER NOT NULL DEFAULT 0;
 CREATE UNIQUE INDEX messages_room_remote_id ON messages(room_id, remote_id) WHERE remote_id IS NOT NULL;
+CREATE UNIQUE INDEX messages_room_origin_sig ON messages(room_id, origin_sig) WHERE origin_sig IS NOT NULL;
 
 CREATE TABLE fed_events (
     room_id    TEXT NOT NULL,

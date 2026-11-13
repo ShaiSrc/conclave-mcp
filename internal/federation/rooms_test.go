@@ -34,13 +34,14 @@ func TestMessageSig_SigningString(t *testing.T) {
 	hexOf := func(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:]) }
 	reply := int64(41)
 	m := MessageSig{Room: "01ROOM@a.example", Author: "b1@b.example", ContentType: "text/plain", MessageType: "answer",
-		Content: "hi", Metadata: []byte(`{"k":1}`), ReplyTo: &reply}
-	want := "conclave-msg-v1\n01ROOM@a.example\nb1@b.example\ntext/plain\nanswer\n" + hexOf("hi") + "\n" + hexOf(`{"k":1}`) + "\n41"
+		Content: "hi", Metadata: []byte(`{"k":1}`), ReplyTo: &reply, Nonce: "AAAAAAAAAAAAAAAAAAAAAA"}
+	want := "conclave-msg-v1\n01ROOM@a.example\nb1@b.example\ntext/plain\nanswer\n" + hexOf("hi") + "\n" + hexOf(`{"k":1}`) +
+		"\n41\nAAAAAAAAAAAAAAAAAAAAAA"
 	if got := string(m.SigningString()); got != want {
 		t.Errorf("signing string:\n got %q\nwant %q", got, want)
 	}
 	m.ReplyTo, m.Metadata = nil, nil
-	want = "conclave-msg-v1\n01ROOM@a.example\nb1@b.example\ntext/plain\nanswer\n" + hexOf("hi") + "\n" + hexOf("") + "\n"
+	want = "conclave-msg-v1\n01ROOM@a.example\nb1@b.example\ntext/plain\nanswer\n" + hexOf("hi") + "\n" + hexOf("") + "\n\nAAAAAAAAAAAAAAAAAAAAAA"
 	if got := string(m.SigningString()); got != want {
 		t.Errorf("without reply_to and metadata:\n got %q\nwant %q", got, want)
 	}
@@ -51,7 +52,7 @@ func TestMessageSig_EachFieldIsSigned(t *testing.T) {
 	other := testIdentity(t, "b.example")
 	reply, reply2 := int64(41), int64(42)
 	base := MessageSig{Room: "01ROOM@a.example", Author: "b1@b.example", ContentType: "text/plain", MessageType: "answer",
-		Content: "hi", Metadata: []byte(`{"k":1}`), ReplyTo: &reply}
+		Content: "hi", Metadata: []byte(`{"k":1}`), ReplyTo: &reply, Nonce: newNonce()}
 	sig := id.SignMessage(base)
 	if !VerifyMessage(id.Public, base, sig) {
 		t.Fatal("round trip does not verify")
@@ -74,11 +75,20 @@ func TestMessageSig_EachFieldIsSigned(t *testing.T) {
 		"no metadata":  func(m *MessageSig) { m.Metadata = nil },
 		"reply_to":     func(m *MessageSig) { m.ReplyTo = &reply2 },
 		"no reply_to":  func(m *MessageSig) { m.ReplyTo = nil },
+		"nonce":        func(m *MessageSig) { m.Nonce = newNonce() },
 	} {
 		m := base
 		change(&m)
 		if VerifyMessage(id.Public, m, sig) {
 			t.Errorf("%s changed, signature still verifies", name)
+		}
+	}
+	// A nonce that is not 16 bytes of base64url is refused, signed or not.
+	for _, bad := range []string{"", "AAAA", "AAAAAAAAAAAAAAAAAAAAAA=="} {
+		m := base
+		m.Nonce = bad
+		if VerifyMessage(id.Public, m, id.SignMessage(m)) {
+			t.Errorf("nonce %q verifies", bad)
 		}
 	}
 }
@@ -363,9 +373,11 @@ func signedReq(t *testing.T, id *Identity, dest, method, path string, body any) 
 // proposal is a message proposal by author, signed by m.
 func (m *memberServer) proposal(room, author, msgType, content string, metadata json.RawMessage, replyTo *int64) map[string]any {
 	wire, _, _ := fedrooms.SplitMetadata(metadata)
+	nonce := newNonce()
 	sig := m.id.SignMessage(MessageSig{Room: room + "@" + local, Author: author, ContentType: "text/plain",
-		MessageType: msgType, Content: content, Metadata: wire, ReplyTo: replyTo})
-	p := map[string]any{"author": author, "content": content, "content_type": "text/plain", "message_type": msgType, "sig": sig}
+		MessageType: msgType, Content: content, Metadata: wire, ReplyTo: replyTo, Nonce: nonce})
+	p := map[string]any{"author": author, "content": content, "content_type": "text/plain", "message_type": msgType, "sig": sig,
+		"nonce": nonce}
 	if metadata != nil {
 		p["metadata"] = metadata
 	}
@@ -558,7 +570,7 @@ func TestRoomMessage_FromMember(t *testing.T) {
 		t.Errorf("stored metadata %s, event metadata %s reply_to %v", meta, p.Metadata, p.ReplyTo)
 	}
 	ms := MessageSig{Room: room + "@" + local, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
-		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo}
+		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo, Nonce: p.Nonce}
 	if !VerifyMessage(m.id.Public, ms, p.OriginSig) {
 		t.Error("author signature does not verify from the event")
 	}
@@ -866,5 +878,41 @@ func TestRoomEvents_SameTransaction(t *testing.T) {
 	}
 	if got := g.state(t); got != before {
 		t.Errorf("changes made without their events: %s, want %s", got, before)
+	}
+}
+
+// A member server that sends a proposal again (a retry) gets the
+// stored message's event back; nothing is stored twice.
+func TestRoomMessage_RetryReturnsOriginal(t *testing.T) {
+	g, m, room, _ := fedRoom(t, "read,answer")
+	path := "/fed/v1/rooms/" + room + "/messages"
+	p := m.proposal(room, m.addr("c1"), "answer", "once", nil, nil)
+	first := g.fedDo(m.req(t, http.MethodPost, path, p))
+	if first.Code != http.StatusCreated {
+		t.Fatalf("proposal: %d %s", first.Code, first.Body)
+	}
+	before := g.state(t)
+	again := g.fedDo(m.req(t, http.MethodPost, path, p))
+	if again.Code != http.StatusCreated || again.Body.String() != first.Body.String() {
+		t.Errorf("retry: %d %s, want the first answer %s", again.Code, again.Body, first.Body)
+	}
+	if g.state(t) != before {
+		t.Errorf("retry stored something: %s, want %s", g.state(t), before)
+	}
+}
+
+// A local key whose label is the address leaves no room for a
+// stand-in: the invite is refused before the bot's server is asked.
+func TestInviteRemote_LabelOfLocalKey(t *testing.T) {
+	g := newRoomRig(t)
+	m := newMemberServer(t, g)
+	room := g.room(t, "proj")
+	if _, err := g.db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES (?, 'x', 'p-x', '2026-01-01T00:00:00Z')`, m.addr("c1")); err != nil {
+		t.Fatal(err)
+	}
+	before := g.state(t)
+	wantErr(t, g.do(g.admin, http.MethodPost, "/rooms/"+room+"/members", `{"address":"`+m.addr("c1")+`","rights":["read"]}`), 409, "conflict")
+	if len(m.received()) != 0 || g.state(t) != before {
+		t.Errorf("invite sent (%q) or stored something", m.received())
 	}
 }

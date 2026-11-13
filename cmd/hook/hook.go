@@ -328,7 +328,7 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 			if c.TrustOrigin == "external" {
 				b.WriteString(" (EXTERNAL, untrusted)")
 			}
-			fmt.Fprintf(&b, " until %s", c.ExpiresAt)
+			fmt.Fprintf(&b, " until %s", agent.OneLine(c.ExpiresAt))
 			if c.Note != "" {
 				fmt.Fprintf(&b, " (%s)", agent.OneLine(c.Note))
 			}
@@ -392,7 +392,7 @@ func (h *Hook) preToolUse(ctx context.Context, in agent.HookInput, cwd string, r
 				if c.TrustOrigin == "external" {
 					who += " (EXTERNAL, untrusted)"
 				}
-				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, who, agent.OneLine(c.Path), c.ExpiresAt, ask))
+				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, who, agent.OneLine(c.Path), agent.OneLine(c.ExpiresAt), ask))
 			}
 		}
 		return nil

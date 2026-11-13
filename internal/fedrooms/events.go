@@ -6,7 +6,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strings"
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/rights"
@@ -52,8 +51,8 @@ type RemovePayload struct {
 // MessagePayload is the payload of a message event. It never carries
 // the operator mark or the trust origin: those are local. Metadata is
 // in its wire form (SplitMetadata) and ReplyTo is the host's id;
-// OriginSig is the author server's signature, empty for authors on the
-// host.
+// OriginSig is the author server's signature and Nonce the random value
+// it covers, both empty for authors on the host.
 type MessagePayload struct {
 	ID          int64           `json:"id"`
 	Author      string          `json:"author"`
@@ -64,6 +63,7 @@ type MessagePayload struct {
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
 	ReplyTo     *int64          `json:"reply_to,omitempty"`
 	OriginSig   string          `json:"origin_sig,omitempty"`
+	Nonce       string          `json:"nonce,omitempty"`
 }
 
 // ReplicaMessage is a message of a replica room as the replica stores
@@ -87,6 +87,19 @@ type Error struct {
 }
 
 func (e *Error) Error() string { return e.Message }
+
+// EventLimit is what member servers read bodies carrying events up to:
+// 64 KiB plus twice the message cap.
+func EventLimit(maxMessageBytes int) int { return 64<<10 + 2*maxMessageBytes }
+
+// eventEnvelope is room for what surrounds a payload in a push or pull
+// body: {"events":[{"seq":…,"type":"message","payload":…}]}.
+const eventEnvelope = 128
+
+// ErrEventTooLarge is LogMessage's error for a message whose event
+// would not fit in EventLimit: member servers would refuse every push
+// carrying it, and the room would stall.
+var ErrEventTooLarge = errors.New("the message's event is too large for the room's member servers")
 
 // Logged reports whether roomID's changes go to its event log: it is
 // hosted here (not a replica) and has a stand-in member.
@@ -170,12 +183,13 @@ func LogRoom(ctx context.Context, tx *sql.Tx, roomID, domain string) error {
 	return logRoom(ctx, tx, roomID)
 }
 
-// LogMessage logs message msgID of roomID.
-func LogMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, domain string) error {
+// LogMessage logs message msgID of roomID. A message whose event would
+// not fit in EventLimit(maxMessageBytes) is ErrEventTooLarge.
+func LogMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, domain string, maxMessageBytes int) error {
 	if ok, err := logged(ctx, tx, roomID, domain); !ok {
 		return err
 	}
-	return logMessage(ctx, tx, roomID, msgID, domain)
+	return logMessage(ctx, tx, roomID, msgID, domain, EventLimit(maxMessageBytes)-eventEnvelope)
 }
 
 func logged(ctx context.Context, tx *sql.Tx, roomID, domain string) (bool, error) {
@@ -207,7 +221,7 @@ func snapshot(ctx context.Context, tx *sql.Tx, roomID, domain string) error {
 		return err
 	}
 	for _, id := range msgs {
-		if err := logMessage(ctx, tx, roomID, id, domain); err != nil {
+		if err := logMessage(ctx, tx, roomID, id, domain, 0); err != nil {
 			return err
 		}
 	}
@@ -257,15 +271,18 @@ func logMember(ctx context.Context, tx *sql.Tx, roomID string, keyID int64, doma
 	return appendEvent(ctx, tx, roomID, EventMember, MemberPayload{Address: addr, Rights: rights.FromStorage(stored)})
 }
 
-func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, domain string) error {
+// logMessage logs message msgID; with max above 0, a payload over max
+// bytes is ErrEventTooLarge. The snapshot passes 0: a message stored
+// before the room federated is not refused after the fact.
+func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, domain string, max int) error {
 	var (
-		p         MessagePayload
-		author    int64
-		meta, sig sql.NullString
+		p                MessagePayload
+		author           int64
+		meta, sig, nonce sql.NullString
 	)
 	if err := tx.QueryRowContext(ctx, `SELECT id, author_key_id, ts, content_type, COALESCE(message_type, 'system'),
-		content, metadata, origin_sig FROM messages WHERE id = ? AND room_id = ?`, msgID, roomID).
-		Scan(&p.ID, &author, &p.TS, &p.ContentType, &p.MessageType, &p.Content, &meta, &sig); err != nil {
+		content, metadata, origin_sig, origin_nonce FROM messages WHERE id = ? AND room_id = ?`, msgID, roomID).
+		Scan(&p.ID, &author, &p.TS, &p.ContentType, &p.MessageType, &p.Content, &meta, &sig, &nonce); err != nil {
 		return err
 	}
 	var err error
@@ -275,25 +292,47 @@ func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, dom
 	if p.Metadata, p.ReplyTo, err = SplitMetadata([]byte(meta.String)); err != nil {
 		return err
 	}
-	p.OriginSig = sig.String
-	return appendEvent(ctx, tx, roomID, EventMessage, p)
+	p.OriginSig, p.Nonce = sig.String, nonce.String
+	b, err := Marshal(p)
+	if err != nil {
+		return err
+	}
+	if max > 0 && len(b) > max {
+		return ErrEventTooLarge
+	}
+	return insertEvent(ctx, tx, roomID, EventMessage, b)
 }
 
-// appendEvent writes payload as roomID's next event, numbered
-// MAX(seq)+1 in the same statement. The payload keeps <, > and & as
-// they are: escaped they take 6 bytes each, and events travel in
-// requests capped at 64 KiB plus the message cap.
+// appendEvent writes payload as roomID's next event.
 func appendEvent(ctx context.Context, tx *sql.Tx, roomID, typ string, payload any) error {
+	b, err := Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return insertEvent(ctx, tx, roomID, typ, b)
+}
+
+// insertEvent writes payload as roomID's next event, numbered
+// MAX(seq)+1 in the same statement.
+func insertEvent(ctx context.Context, tx *sql.Tx, roomID, typ string, payload []byte) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO fed_events(room_id, seq, type, payload, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM fed_events WHERE room_id = ?`,
+		roomID, typ, string(payload), storage.FormatTS(time.Now()), roomID)
+	return err
+}
+
+// Marshal is compact JSON that keeps <, > and & as they are: escaped
+// they take 6 bytes each, and events travel in bodies capped at
+// EventLimit. A reply's metadata, reply_to merged in, is stored with it
+// too, so its event stays near the size it was sent with.
+func Marshal(v any) ([]byte, error) {
 	var b bytes.Buffer
 	enc := json.NewEncoder(&b)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(payload); err != nil {
-		return err
+	if err := enc.Encode(v); err != nil {
+		return nil, err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO fed_events(room_id, seq, type, payload, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM fed_events WHERE room_id = ?`,
-		roomID, typ, strings.TrimSuffix(b.String(), "\n"), storage.FormatTS(time.Now()), roomID)
-	return err
+	return bytes.TrimSuffix(b.Bytes(), []byte("\n")), nil
 }
 
 // errNotObject is SplitMetadata's error for metadata that is not a JSON
@@ -303,10 +342,10 @@ var errNotObject = errors.New("metadata must be a JSON object")
 // SplitMetadata returns a message's metadata in its wire form, and the
 // reply_to it holds, if that is an id. The wire form leaves reply_to
 // out, since it travels in its own field, and is re-encoded compactly
-// with sorted keys: the author's server, signing the metadata it sends,
-// and the host, logging the metadata it stored with reply_to merged
-// in, derive the same bytes. No metadata, null and {} have an empty
-// wire form.
+// with sorted keys and <, > and & unescaped: the author's server,
+// signing the metadata it sends, and the host, logging the metadata it
+// stored with reply_to merged in, derive the same bytes. No metadata,
+// null and {} have an empty wire form.
 func SplitMetadata(raw []byte) ([]byte, *int64, error) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return nil, nil, nil
@@ -326,6 +365,6 @@ func SplitMetadata(raw []byte) ([]byte, *int64, error) {
 	if len(m) == 0 {
 		return nil, reply, nil
 	}
-	wire, err := json.Marshal(m)
+	wire, err := Marshal(m)
 	return wire, reply, err
 }

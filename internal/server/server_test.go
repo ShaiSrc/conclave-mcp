@@ -602,9 +602,11 @@ func TestServer_FederatedRooms(t *testing.T) {
 		on.fed.Handler.ServeHTTP(rec, req)
 		return rec
 	}
+	nonce := "AAAAAAAAAAAAAAAAAAAAAA" // 16 bytes, unpadded base64url
 	sig := peer.SignMessage(federation.MessageSig{Room: room.ID + "@" + domain, Author: "c1@peer.example",
-		ContentType: "text/plain", MessageType: "answer", Content: "hello"})
-	body, _ := json.Marshal(map[string]string{"author": "c1@peer.example", "content": "hello", "message_type": "answer", "sig": sig})
+		ContentType: "text/plain", MessageType: "answer", Content: "hello", Nonce: nonce})
+	body, _ := json.Marshal(map[string]string{"author": "c1@peer.example", "content": "hello", "message_type": "answer", "sig": sig,
+		"nonce": nonce})
 	if rec := signed(http.MethodPost, "/fed/v1/rooms/"+room.ID+"/messages", body); rec.Code != http.StatusCreated ||
 		!strings.Contains(rec.Body.String(), `"type":"message"`) {
 		t.Errorf("message from the member server: %d %s", rec.Code, rec.Body)

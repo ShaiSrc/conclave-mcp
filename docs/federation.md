@@ -245,7 +245,7 @@ origin (403 `wrong_origin` otherwise):
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /fed/v1/rooms/{id}/messages` | `{"author", "content", "content_type", "message_type", "metadata", "reply_to", "sig"}`; `reply_to` is the host's ID, `sig` the [author signature](federated-rooms.md#author-signatures) | 201 with the message's event. The host's send checks run for the author's stand-in, with their codes. 403 `bad_author_signature` for a wrong signature. |
+| `POST /fed/v1/rooms/{id}/messages` | `{"author", "content", "content_type", "message_type", "metadata", "reply_to", "sig", "nonce"}`; `reply_to` is the host's ID, `sig` the [author signature](federated-rooms.md#author-signatures) and `nonce` the value it covers | 201 with the message's event; a signature the room holds already gets the stored message's event. The host's send checks run for the author's stand-in, with their codes. 403 `bad_author_signature` for a wrong signature. |
 | `GET /fed/v1/rooms/{id}/events?since=N` | | 200 `{"events": [...]}`: the events after seq N, at most 100, within 64 KiB plus the message cap. |
 | `GET /fed/v1/rooms/{id}/claims?author=name@domain` | | The claims answer for the author's stand-in, each claim with the holder's `address`. |
 | `POST /fed/v1/rooms/{id}/claims?author=…`, `.../claims/heartbeat`, `.../claims/release` | As for `/v1` | As for `/v1`, a 409 with its conflicts; each claim and conflict carries the holder's `address`. |
@@ -258,7 +258,7 @@ An event is `{"seq", "type", "payload"}`. Payloads:
 | `room` | `{"name", "archived"}` |
 | `member` | `{"address", "rights"}`: added, or rights changed |
 | `member.remove` | `{"address"}` |
-| `message` | `{"id", "author", "ts", "content_type", "message_type", "content", "metadata", "reply_to", "origin_sig"}`: `id` and `reply_to` are the host's IDs, `metadata` is in its wire form, `origin_sig` is empty for the host's own authors. Never an operator mark or a trust origin. |
+| `message` | `{"id", "author", "ts", "content_type", "message_type", "content", "metadata", "reply_to", "origin_sig", "nonce"}`: `id` and `reply_to` are the host's IDs, `metadata` is in its wire form, `origin_sig` and `nonce` are empty for the host's own authors. Never an operator mark or a trust origin. |
 
 Payloads keep `<`, `>` and `&` unescaped.
 

@@ -123,10 +123,12 @@ room_members(room_id, key_id, role, joined_at, rights)
 
 messages(id [auto-inc], room_id, author_key_id, ts, content_type,
          content, message_type, metadata, deleted_at, trust_origin,
-         remote_id, origin_sig, unverified)
+         remote_id, origin_sig, origin_nonce, unverified)
   trust_origin  denormalised from the author's api_keys row at send time
   remote_id   in a replica room, the host's id of the message
-  origin_sig  the author server's signature of a message from another server
+  origin_sig  the author server's signature of a message from another server,
+              once per room
+  origin_nonce  the random value that signature covers
   unverified  1 when a replica could not check that signature
 
 audit_log(id [auto-inc], ts, actor_key_id, action, room_id,

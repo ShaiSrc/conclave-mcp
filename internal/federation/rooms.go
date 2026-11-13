@@ -37,8 +37,8 @@ const maxRoomEvents = 100 // events per answer of /fed/v1/rooms/{id}/events
 // The server sets them with federation on, before the listener serves.
 type RoomHooks struct {
 	// Send is the messages service's send path for the stand-in key in
-	// r's claims; it stores originSig with the message.
-	Send func(w http.ResponseWriter, r *http.Request, roomID, originSig string)
+	// r's claims; it stores originSig and nonce with the message.
+	Send func(w http.ResponseWriter, r *http.Request, roomID, originSig, nonce string)
 	// Claims serves the claims routes (/rooms/{id}/claims...) without
 	// authentication: r's claims say who calls.
 	Claims http.Handler
@@ -64,12 +64,16 @@ type MessageSig struct {
 	Content     string
 	Metadata    []byte // the wire form, fedrooms.SplitMetadata
 	ReplyTo     *int64 // the host's message id
+	// Nonce is 16 random bytes, unpadded base64url, new for each
+	// message: two messages with the same fields have two signatures,
+	// so a signature names one message, and a replay of it is found.
+	Nonce string
 }
 
 // SigningString returns the lines conclave-msg-v1, the room address,
 // the author address, the content type, the message type, the lowercase
-// hex SHA-256 of the content and of the metadata, and the host's
-// reply_to (an empty line without one), joined by \n.
+// hex SHA-256 of the content and of the metadata, the host's reply_to
+// (an empty line without one) and the nonce, joined by \n.
 func (m MessageSig) SigningString() []byte {
 	content, meta := sha256.Sum256([]byte(m.Content)), sha256.Sum256(m.Metadata)
 	reply := ""
@@ -77,18 +81,21 @@ func (m MessageSig) SigningString() []byte {
 		reply = strconv.FormatInt(*m.ReplyTo, 10)
 	}
 	return []byte(strings.Join([]string{"conclave-msg-v1", m.Room, m.Author, m.ContentType, m.MessageType,
-		hex.EncodeToString(content[:]), hex.EncodeToString(meta[:]), reply}, "\n"))
+		hex.EncodeToString(content[:]), hex.EncodeToString(meta[:]), reply, m.Nonce}, "\n"))
 }
 
 // SignMessage returns the identity's signature of m, unpadded base64url.
+// m.Nonce must be a fresh newNonce().
 func (id *Identity) SignMessage(m MessageSig) string {
 	return b64.EncodeToString(id.Sign(m.SigningString()))
 }
 
-// VerifyMessage reports whether sig is pub's signature of m.
+// VerifyMessage reports whether sig is pub's signature of m, whose
+// nonce must be 16 bytes of unpadded base64url.
 func VerifyMessage(pub ed25519.PublicKey, m MessageSig, sig string) bool {
+	n, nerr := b64.DecodeString(m.Nonce)
 	b, err := b64.DecodeString(sig)
-	return err == nil && len(b) == ed25519.SignatureSize && len(pub) == ed25519.PublicKeySize &&
+	return nerr == nil && len(n) == 16 && err == nil && len(b) == ed25519.SignatureSize && len(pub) == ed25519.PublicKeySize &&
 		ed25519.Verify(pub, m.SigningString(), b)
 }
 
@@ -257,6 +264,7 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 		Metadata    json.RawMessage `json:"metadata"`
 		ReplyTo     *int64          `json:"reply_to"`
 		Sig         string          `json:"sig"`
+		Nonce       string          `json:"nonce"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
@@ -277,8 +285,9 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 	if p.MessageType == "" {
 		p.MessageType = rights.System
 	}
-	signed, err := s.authorSigned(r.Context(), MessageSig{Room: roomID + "@" + s.id.Domain, Author: p.Author,
-		ContentType: p.ContentType, MessageType: p.MessageType, Content: p.Content, Metadata: wire, ReplyTo: p.ReplyTo}, p.Sig)
+	ctx := r.Context()
+	signed, err := s.authorSigned(ctx, MessageSig{Room: roomID + "@" + s.id.Domain, Author: p.Author, ContentType: p.ContentType,
+		MessageType: p.MessageType, Content: p.Content, Metadata: wire, ReplyTo: p.ReplyTo, Nonce: p.Nonce}, p.Sig)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -287,9 +296,22 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusForbidden, "bad_author_signature", "the author signature does not verify")
 		return
 	}
+	// A signature is stored once per room: a retry gets the stored
+	// message. ponytail: two copies racing past this check make the
+	// second insert fail (500, a 502 for the member), and its retry
+	// lands here.
+	var id int64
+	switch err := s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND origin_sig = ?`, roomID, p.Sig).Scan(&id); {
+	case err == nil:
+		s.answerMessage(w, r, roomID, id)
+		return
+	case !errors.Is(err, sql.ErrNoRows):
+		s.fail(w, r, err)
+		return
+	}
 	// The send body carries the signed fields only; metadata in its
 	// wire form, so the logged message gives back the signed bytes.
-	body, _ := json.Marshal(struct {
+	body := rawJSON(struct {
 		Content     string          `json:"content"`
 		ContentType string          `json:"content_type"`
 		MessageType string          `json:"message_type"`
@@ -297,7 +319,7 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 		ReplyTo     *int64          `json:"reply_to,omitempty"`
 	}{p.Content, p.ContentType, p.MessageType, wire, p.ReplyTo})
 	rec := httptest.NewRecorder()
-	s.Rooms.Send(rec, asStandIn(r, keyID, r.URL.Path, body), roomID, p.Sig)
+	s.Rooms.Send(rec, asStandIn(r, keyID, r.URL.Path, body), roomID, p.Sig, p.Nonce)
 	if rec.Code != http.StatusCreated {
 		for k, v := range rec.Header() {
 			w.Header()[k] = v
@@ -310,16 +332,24 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 		ID int64 `json:"id"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &stored)
+	s.answerMessage(w, r, roomID, stored.ID)
+}
+
+// answerMessage answers a message proposal with the event of message
+// id, 201, with <, > and & as stored.
+func (s *Service) answerMessage(w http.ResponseWriter, r *http.Request, roomID string, id int64) {
 	ev := fedrooms.Event{}
 	var payload string
 	if err := s.db.QueryRowContext(r.Context(), `SELECT seq, type, payload FROM fed_events
 		WHERE room_id = ? AND type = 'message' AND json_extract(payload, '$.id') = ? ORDER BY seq DESC LIMIT 1`,
-		roomID, stored.ID).Scan(&ev.Seq, &ev.Type, &payload); err != nil {
+		roomID, id).Scan(&ev.Seq, &ev.Type, &payload); err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	ev.Payload = json.RawMessage(payload)
-	writeJSON(w, http.StatusCreated, ev)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_, _ = w.Write(rawJSON(ev))
 }
 
 // handleRoomClaims answers the claims endpoints under
