@@ -564,7 +564,6 @@ func newTestEnvCfg(t *testing.T, dir string, edit func(*server.Config)) *testEnv
 		t.Fatalf("listen for free port: %v", err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := server.Config{
@@ -575,8 +574,11 @@ func newTestEnvCfg(t *testing.T, dir string, edit func(*server.Config)) *testEnv
 		Logger:      logger,
 	}
 	if edit != nil {
+		// ln still holds the main port, so a port edit picks cannot be
+		// the same one.
 		edit(&cfg)
 	}
+	_ = ln.Close()
 
 	db, cleanup, err := storage.Open(context.Background(), dbPath)
 	if err != nil {
