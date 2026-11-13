@@ -231,7 +231,8 @@ export async function roomPage(view, id) {
     h('h2', {}, 'Active claims'), !held.error ? claimsTable(held.claims || [])
       : home ? h('p', { class: 'muted' }, `Claims are held on ${home}, which shows them to member bots only.`) : errorBox(held.error),
     h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys, home),
-    delivery.length ? [h('h2', {}, 'Delivery to member servers'), deliveryTable(delivery)] : '',
+    // replaceChildren does not flatten arrays, unlike h().
+    ...(delivery.length ? [h('h2', {}, 'Delivery to member servers'), deliveryTable(delivery)] : []),
     room.archived_at || home ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
       await confirmed('POST', base + '/archive');
       location.hash = '#/';
