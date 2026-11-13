@@ -134,11 +134,16 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	if peer.Status != statusAllowed {
 		return 0, &fedrooms.Error{Status: http.StatusForbidden, Code: "peer_not_allowed", Message: d + " is not an allowed peer"}
 	}
+	var kind string
+	if err := s.db.QueryRowContext(ctx, `SELECT kind FROM rooms WHERE id = ?`, roomID).Scan(&kind); err != nil {
+		return 0, err
+	}
 	body, _ := json.Marshal(struct {
 		Name   string   `json:"name"`
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
-	}{name, h, set})
+		Kind   string   `json:"kind"`
+	}{name, h, set, kind})
 	status, out, err := s.sendSigned(ctx, http.MethodPost, d, "/fed/v1/rooms/"+roomID+"/invite", body, maxBody)
 	var refusal *fedrooms.Error
 	switch {
@@ -148,6 +153,9 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	case status == http.StatusOK || status == http.StatusCreated:
 	case status == http.StatusNotFound:
 		refusal = &fedrooms.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no bot " + h + " on " + d}
+	case kind == kindDirect && (status == http.StatusForbidden || status == http.StatusTooManyRequests):
+		// The peer's status and code reach the sender; its text does not.
+		refusal = &fedrooms.Error{Status: status, Code: errCode(out, "dm_refused"), Message: d + " refused the conversation"}
 	case status == http.StatusForbidden:
 		refusal = &fedrooms.Error{Status: http.StatusForbidden, Code: "invite_refused", Message: d + " refused the invite"}
 	default:

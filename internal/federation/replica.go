@@ -20,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/oklog/ulid/v2"
+	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/bots"
@@ -85,33 +86,59 @@ func (s *Service) auditRefused(ctx context.Context, roomID, host string, rf *ref
 // the verified origin is an allowed peer: open mode lets seen peers
 // through Verify, rooms take allowed ones only.
 func (s *Service) allowedOrigin(w http.ResponseWriter, r *http.Request) bool {
-	p, err := s.peers.Get(r.Context(), OriginFrom(r.Context()))
-	if err != nil && !errors.Is(err, ErrPeerNotFound) {
+	ok, err := s.originAllowed(r.Context())
+	if err != nil {
 		s.fail(w, r, err)
 		return false
 	}
-	if p.Status != statusAllowed {
+	if !ok {
 		writeErr(w, r, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
-		return false
 	}
-	return true
+	return ok
+}
+
+// originAllowed reports whether the verified origin is an allowed peer.
+func (s *Service) originAllowed(ctx context.Context) (bool, error) {
+	p, err := s.peers.Get(ctx, OriginFrom(ctx))
+	if errors.Is(err, ErrPeerNotFound) {
+		err = nil
+	}
+	return p.Status == statusAllowed, err
 }
 
 // handleRoomInvite answers POST /fed/v1/rooms/{id}/invite from the
 // host of room {id}: our bot named by handle joins the replica with the
 // rights. It must be a local bot, not revoked and no admin key (404
-// otherwise). The replica is created under the host's room id, or
-// updated and made active again; a room of that id that is not the
-// origin's replica is a 409.
+// otherwise). The replica is created under the host's room id, of the
+// invite's kind, or updated and made active again; a room of that id
+// that is not the origin's replica of that kind is a 409.
+//
+// A direct invite (kind direct) starts a conversation with our bot: it
+// takes one only from an allowed peer (seen ones get 403 dm_refused,
+// before the handle is looked at, so they cannot probe for bots), for a
+// bot whose DM policy is peers (403 dm_refused), and at most
+// DMInvitesPerHour from each peer (429).
 func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
-	if !s.allowedOrigin(w, r) {
-		return
-	}
 	var in struct {
 		Name   string   `json:"name"`
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
+		Kind   string   `json:"kind"`
+	}
+	derr := json.NewDecoder(r.Body).Decode(&in)
+	in.Kind = cmp.Or(in.Kind, "room")
+	direct := in.Kind == kindDirect
+	switch allowed, err := s.originAllowed(ctx); {
+	case err != nil:
+		s.fail(w, r, err)
+		return
+	case !allowed && direct:
+		writeErr(w, r, http.StatusForbidden, "dm_refused", "direct conversations come from allowed peers only")
+		return
+	case !allowed:
+		writeErr(w, r, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
+		return
 	}
 	// The audit row is written outside the transaction, which holds the
 	// write lock: it is rolled back first.
@@ -124,7 +151,14 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:"+code, string(detail))
 		writeErr(w, r, status, code, msg)
 	}
-	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+	// dmRefuse refuses a direct invite for reason (not a bot, policy,
+	// limit).
+	dmRefuse := func(status int, code, reason, msg string) {
+		detail, _ := json.Marshal(map[string]string{"to": in.Handle, "reason": reason})
+		s.auditRoom(ctx, "direct.refused", origin, roomID, "error:"+code, string(detail))
+		refuse(status, code, msg)
+	}
+	if derr != nil {
 		refuse(http.StatusBadRequest, "bad_request", "malformed JSON")
 		return
 	}
@@ -140,21 +174,40 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case rerr != nil:
 		refuse(http.StatusBadRequest, "bad_request", rerr.Error())
 		return
+	case in.Kind != "room" && !direct:
+		refuse(http.StatusBadRequest, "bad_request", "kind must be room or direct")
+		return
 	}
 	var keyID int64
+	var policy string
 	h, err := bots.NormalizeHandle(in.Handle)
 	if err == nil {
-		err = s.db.QueryRowContext(ctx, `SELECT id FROM api_keys WHERE handle = ? AND revoked_at IS NULL
-			AND remote_domain IS NULL AND is_admin = 0`, h).Scan(&keyID)
+		err = s.db.QueryRowContext(ctx, `SELECT id, COALESCE((SELECT dm_policy FROM bot_profiles WHERE key_id = api_keys.id), 'local')
+			FROM api_keys WHERE handle = ? AND revoked_at IS NULL AND remote_domain IS NULL AND is_admin = 0`, h).Scan(&keyID, &policy)
 	}
 	switch {
 	case err == nil:
+	case (errors.Is(err, sql.ErrNoRows) || errors.Is(err, bots.ErrInvalid)) && direct:
+		dmRefuse(http.StatusNotFound, "not_found", "not a bot", "no such bot")
+		return
 	case errors.Is(err, sql.ErrNoRows), errors.Is(err, bots.ErrInvalid):
 		refuse(http.StatusNotFound, "not_found", "no such bot")
 		return
 	default:
 		s.fail(w, r, err)
 		return
+	}
+	if direct {
+		if policy != bots.DMPeers {
+			dmRefuse(http.StatusForbidden, "dm_refused", "policy", h+" does not take direct conversations from other servers")
+			return
+		}
+		now := s.now()
+		if lim := s.dmLimiter(origin); !lim.AllowN(now, 1) {
+			w.Header().Set("Retry-After", retryAfterAt(lim, now))
+			dmRefuse(http.StatusTooManyRequests, "rate_limited", "limit", "too many new direct conversations, try again later")
+			return
+		}
 	}
 
 	if tx, err = s.db.BeginTx(ctx, nil); err != nil {
@@ -163,7 +216,8 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	var home sql.NullString
-	switch err := tx.QueryRowContext(ctx, `SELECT home_domain FROM rooms WHERE id = ?`, roomID).Scan(&home); {
+	var kind string
+	switch err := tx.QueryRowContext(ctx, `SELECT home_domain, kind FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind); {
 	case errors.Is(err, sql.ErrNoRows):
 		var n int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM rooms WHERE home_domain = ?`, origin).Scan(&n); err != nil {
@@ -183,8 +237,8 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			now := storage.FormatTS(time.Now())
-			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at)
-				VALUES (?, ?, ?, ?, 'private', ?, ?)`, roomID, in.Name, owner, now, origin, now)
+			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind)
+				VALUES (?, ?, ?, ?, 'private', ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, in.Kind)
 		}
 		if err != nil {
 			s.fail(w, r, err)
@@ -193,7 +247,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.fail(w, r, err)
 		return
-	case home.String != origin:
+	case home.String != origin || kind != in.Kind:
 		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
 		return
 	}
@@ -217,9 +271,37 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	detail, _ := json.Marshal(map[string]any{"handle": h, "rights": set})
 	s.auditRoom(ctx, "federation.room.invite", origin, roomID, "ok", string(detail))
+	if direct {
+		detail, _ := json.Marshal(map[string]string{"host": origin, "to": h + "@" + s.id.Domain})
+		s.auditRoom(ctx, "direct.start", origin, roomID, "ok", string(detail))
+	}
 	// max_events_bytes is what this server reads a push up to: the host
 	// packs its pushes within it.
 	writeJSON(w, http.StatusCreated, map[string]any{"room_id": roomID, "max_events_bytes": s.eventsLimit()})
+}
+
+// DMInvitesPerHour is how many direct invites a server takes from one
+// peer an hour.
+const DMInvitesPerHour = 100
+
+// kindDirect is the kind of a direct conversation's room.
+const kindDirect = "direct"
+
+// dmLimiter returns origin's limiter of direct invites, which takes the
+// time from s.now. ponytail: one per peer, never evicted; peers are
+// bounded by the table.
+func (s *Service) dmLimiter(origin string) *rate.Limiter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.dmLimits == nil {
+		s.dmLimits = map[string]*rate.Limiter{}
+	}
+	lim := s.dmLimits[origin]
+	if lim == nil {
+		lim = rate.NewLimiter(rate.Every(time.Hour/DMInvitesPerHour), DMInvitesPerHour)
+		s.dmLimits[origin] = lim
+	}
+	return lim
 }
 
 // nameReplica gives replica roomID the name its host sent. If activate
@@ -354,11 +436,19 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 	return tx.Commit()
 }
 
-// applyRoom renames the replica, and archives it when the host did.
+// applyRoom renames the replica, and archives it when the host did. Its
+// kind is the invite's: a room event of another kind is refused.
 func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.RoomPayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.Name == "" || len(p.Name) > 128 {
 		return refused("room event: bad payload")
+	}
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT kind FROM rooms WHERE id = ?`, roomID).Scan(&kind); err != nil {
+		return err
+	}
+	if cmp.Or(p.Kind, "room") != kind {
+		return refused("room event: kind %q, the replica is %s", p.Kind, kind)
 	}
 	if p.Archived {
 		_, err := tx.ExecContext(ctx, `UPDATE rooms SET name = ?, archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
@@ -373,9 +463,10 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 }
 
 // applyMember adds a member to the replica or sets its rights. A member
-// of this server must be one of its bots. When it is the first bot of
-// ours in an archived replica (invited again), the replica is active
-// again.
+// of this server must be one of its bots; a direct conversation takes
+// ours by invite only, which checks their DM policy, so here it only
+// sets the rights of one it has. When it is the first bot of ours in an
+// archived replica (invited again), the replica is active again.
 func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MemberPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -389,14 +480,20 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 	if err != nil {
 		return err
 	}
-	var bot, ours bool
+	var bot, ours, uninvited bool
 	if local {
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = ? AND handle IS NOT NULL
-			AND is_admin = 0 AND revoked_at IS NULL), `+localMember, key, roomID).Scan(&bot, &ours); err != nil {
+			AND is_admin = 0 AND revoked_at IS NULL), `+localMember+`,
+			EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
+			AND NOT EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?)`,
+			key, roomID, roomID, roomID, key).Scan(&bot, &ours, &uninvited); err != nil {
 			return err
 		}
-		if !bot {
+		switch {
+		case !bot:
 			return refused("member event: no bot of ours is %s", p.Address)
+		case uninvited:
+			return refused("member event: %s was not invited into the direct conversation", p.Address)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)
@@ -817,19 +914,28 @@ func (s *Service) unreachable(host string, status int, err error) error {
 // codeRE is an error code as this server writes them.
 var codeRE = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
+// errCode is the error code of body, an error answer of a peer, or def
+// when it has none.
+func errCode(body []byte, def string) string {
+	var env struct {
+		Error struct{ Code string } `json:"error"`
+	}
+	if json.Unmarshal(body, &env) != nil || !codeRE.MatchString(env.Error.Code) {
+		return def
+	}
+	return env.Error.Code
+}
+
 // hostError is host's 4xx answer as a refusal: its status, its code
 // (host_refused when it is none), and its message marked as the host's,
 // on one line, at most 200 characters of it. Nothing else of the body
 // is kept.
 func hostError(host string, status int, body []byte) error {
 	var env struct {
-		Error struct{ Code, Message string } `json:"error"`
+		Error struct{ Message string } `json:"error"`
 	}
 	_ = json.Unmarshal(body, &env)
-	code, msg := env.Error.Code, oneLine(env.Error.Message, 200)
-	if !codeRE.MatchString(code) {
-		code = "host_refused"
-	}
+	code, msg := errCode(body, "host_refused"), oneLine(env.Error.Message, 200)
 	if msg == "" {
 		msg = fmt.Sprintf("status %d", status)
 	}
