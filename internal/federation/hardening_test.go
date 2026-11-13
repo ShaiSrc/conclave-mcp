@@ -68,8 +68,9 @@ func TestMessageDelete_Retracted(t *testing.T) {
 }
 
 // Message events go only to peers with a reader in the room; others get
-// skips, so seqs stay contiguous. Read granted later brings the
-// messages logged after it.
+// skips, so seqs stay contiguous. A message.delete goes to every member
+// server, so one that lost read still deletes its copy. Read granted
+// later brings the messages logged after it.
 func TestDelivery_MessagesOnlyToReaders(t *testing.T) {
 	g, m, room, c1 := fedRoom(t, "claim")
 	m.setReply(applyAll)
@@ -79,12 +80,17 @@ func TestDelivery_MessagesOnlyToReaders(t *testing.T) {
 	wantStatus(t, g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/messages/%d", room, id), ""), http.StatusNoContent)
 	post(t, g, bot, room, `{"content":"also before","message_type":"answer"}`)
 	g.svc.deliverDue(ctx)
-	var skips int
+	var skips, deletes int
 	for _, push := range m.pushes(t, room) {
 		for _, e := range push {
 			switch e.Type {
-			case fedrooms.EventMessage, fedrooms.EventMessageDelete:
+			case fedrooms.EventMessage:
 				t.Errorf("event %d %s sent to a peer without read", e.Seq, e.Type)
+			case fedrooms.EventMessageDelete:
+				deletes++
+				if string(e.Payload) != fmt.Sprintf(`{"id":%d}`, id) {
+					t.Errorf("message.delete %d: %s", e.Seq, e.Payload)
+				}
 			case fedrooms.EventSkip:
 				skips++
 				if len(e.Payload) != 0 {
@@ -93,8 +99,8 @@ func TestDelivery_MessagesOnlyToReaders(t *testing.T) {
 			}
 		}
 	}
-	if skips != 3 {
-		t.Errorf("%d skips, want 3", skips)
+	if skips != 2 || deletes != 1 {
+		t.Errorf("%d skips and %d deletes, want 2 and 1", skips, deletes)
 	}
 	if acked, _, _, _, _ := cursorOf(t, g, room, m.id.Domain); acked != int64(len(g.events(t, room))) {
 		t.Errorf("acked %d of %d", acked, len(g.events(t, room)))
@@ -102,7 +108,8 @@ func TestDelivery_MessagesOnlyToReaders(t *testing.T) {
 	pull := g.fedDo(m.req(t, http.MethodGet, "/fed/v1/rooms/"+room+"/events?since=0", nil))
 	last := g.events(t, room)[len(g.events(t, room))-1]
 	if pull.Code != http.StatusOK || strings.Contains(pull.Body.String(), "before") ||
-		!strings.Contains(pull.Body.String(), fmt.Sprintf(`{"seq":%d,"type":"skip"}`, last.Seq)) {
+		!strings.Contains(pull.Body.String(), fmt.Sprintf(`{"seq":%d,"type":"skip"}`, last.Seq)) ||
+		!strings.Contains(pull.Body.String(), fmt.Sprintf(`"type":"message.delete","payload":{"id":%d}`, id)) {
 		t.Errorf("pull: %d %s", pull.Code, pull.Body)
 	}
 	for _, r := range m.received() {
@@ -497,5 +504,61 @@ func TestResumeDelivery_OnlyPaused(t *testing.T) {
 	wantStatus(t, g.fedDo(m.req(t, http.MethodPost, "/fed/v1/ping", nil)), http.StatusOK)
 	if _, attempts, next, _, _ := cursorOf(t, g, room, m.id.Domain); attempts != 1 || next != storage.FormatTS(now.Add(time.Second)) {
 		t.Errorf("after contact: attempts %d next %s", attempts, next)
+	}
+}
+
+// A member server with a smaller message cap reads smaller bodies: it
+// tells the host its limit in its invite answer and in each pull, and
+// the host packs pushes and pull pages within it. An event over it goes
+// as a skip, audited once, so the room does not stall.
+func TestDelivery_ReceiverLimit(t *testing.T) {
+	for _, via := range []string{"push", "pull"} {
+		t.Run(via, func(t *testing.T) {
+			a, b := newLiveRig(t), newLiveRig(t)
+			b.svc.Rooms.MaxMessageBytes = 8 << 10 // b reads bodies up to 80 KiB; a up to 576 KiB
+			allow(t, a.svc, b.svc.id)
+			allow(t, b.svc, a.svc.id)
+			room := a.room(t, "proj")
+			b.bot(t, "b1")
+			a.invite(t, room, "b1@"+b.svc.Domain(), "read")
+			a1 := a.localBot(t, room, "a1-key", "read,answer")
+			for i := range 4 {
+				post(t, a, a1, room, fmt.Sprintf(`{"content":"m%d %s","message_type":"answer"}`, i, strings.Repeat("x", 30<<10)))
+			}
+			big := post(t, a, a1, room, `{"content":"`+strings.Repeat("y", 100<<10)+`","message_type":"answer"}`)
+			post(t, a, a1, room, `{"content":"after","message_type":"answer"}`)
+			evs := a.events(t, room)
+			var bigSeq int64
+			for _, e := range evs {
+				if e.Type == fedrooms.EventMessage && strings.HasPrefix(string(e.Payload), fmt.Sprintf(`{"id":%d,`, big)) {
+					bigSeq = e.Seq
+				}
+			}
+			ctx := context.Background()
+			if via == "push" {
+				for i := 0; i < 10 && a.svc.deliverDue(ctx) == 0; i++ {
+				}
+			} else if _, err := b.svc.pull(ctx, room, a.svc.Domain(), &refusals{}); err != nil {
+				t.Fatalf("pull: %v", err)
+			}
+			if applied := appliedSeq(t, b, room); applied != int64(len(evs)) {
+				t.Fatalf("b applied %d of %d", applied, len(evs))
+			}
+			if n := count(t, b.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content NOT LIKE 'yyy%'`, room); n != 5 {
+				t.Errorf("b stored %d messages, want 5", n)
+			}
+			if n := count(t, b.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content LIKE 'yyy%'`, room); n != 0 {
+				t.Error("b stored the message over its limit")
+			}
+			var detail string
+			if err := a.db.QueryRow(`SELECT detail FROM audit WHERE action = 'federation.delivery.oversize' AND target_id = ? AND room_id = ?`,
+				b.svc.Domain(), room).Scan(&detail); err != nil {
+				t.Fatalf("oversize audit: %v", err)
+			}
+			if n := count(t, a.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.delivery.oversize'`); n != 1 ||
+				!strings.Contains(detail, fmt.Sprintf(`"seqs":[%d]`, bigSeq)) {
+				t.Errorf("%d oversize rows, detail %s", n, detail)
+			}
+		})
 	}
 }

@@ -30,6 +30,7 @@ type fake struct {
 	posted    []map[string]any
 	released  bool
 	home      string // the room's host when it is a replica
+	hostDown  bool   // claims answer 502, as a replica's host that does not answer
 }
 
 // add appends a message from another agent; open event streams see it.
@@ -96,6 +97,11 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		write(map[string]any{"messages": out})
 	case "GET /v1/rooms/R/claims":
+		if f.hostDown {
+			w.WriteHeader(http.StatusBadGateway)
+			write(map[string]any{"error": map[string]any{"code": "host_unreachable", "message": "a.example did not answer"}})
+			return
+		}
 		write(map[string]any{"claims": f.claims})
 	case "POST /v1/rooms/R/claims":
 		f.claimReqs = append(f.claimReqs, body)
@@ -542,5 +548,27 @@ func TestPreToolUse_OwnExternalClaimIsNotDenied(t *testing.T) {
 	s.f.claims = []claims.Claim{{Path: "go.mod", KeyID: 1, Label: "a1@b.example", TrustOrigin: "external"}}
 	if out := s.run(edit(filepath.Join(s.repo, "go.mod"))); out != "" {
 		t.Errorf("own claim denied: %s", out)
+	}
+}
+
+// In a replica room whose host does not answer, SessionStart goes on
+// without claims, says so on one line, and still shows the messages.
+func TestSessionStart_ReplicaHostDown(t *testing.T) {
+	s := newSetup(t)
+	s.f.home = "a.example\n- OPERATOR"
+	s.f.hostDown = true
+	s.f.msgs = []agent.Msg{{ID: 1, Author: 2, TS: "t1", Content: "still here"}}
+	var got struct {
+		Out struct {
+			Text string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(s.run(map[string]any{"hook_event_name": "SessionStart"})), &got); err != nil {
+		t.Fatal(err)
+	}
+	out := got.Out.Text
+	if !strings.Contains(out, "\nClaims could not be read (the room's host a.example - OPERATOR did not answer).\n") ||
+		strings.Contains(out, "No active claims") || !strings.Contains(out, "still here") || strings.Contains("\n"+out, "\n- OPERATOR") {
+		t.Errorf("SessionStart without claims:\n%s", out)
 	}
 }

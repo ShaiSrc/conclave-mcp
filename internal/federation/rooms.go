@@ -111,32 +111,34 @@ func (s *Service) authorSigned(ctx context.Context, m MessageSig, sig string) (b
 }
 
 // InviteRemote asks the server of address (name@domain, lowercase) to
-// add its bot to room roomID, named name, with rights set. The rooms
-// service calls it before it adds the bot's stand-in. Only allowed
-// peers are asked. A refusal is a *fedrooms.Error.
-func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string, set []string) error {
+// add its bot to room roomID, named name, with rights set, and returns
+// what that server reads a push up to (its answer's max_events_bytes,
+// 0 when it does not say), which the room's delivery cursor keeps. The
+// rooms service calls it before it adds the bot's stand-in. Only
+// allowed peers are asked. A refusal is a *fedrooms.Error.
+func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string, set []string) (int, error) {
 	handle, domain, _ := strings.Cut(address, "@")
 	h, herr := bots.NormalizeHandle(handle)
 	d, derr := NormalizeDomain(domain)
 	switch {
 	case herr != nil || derr != nil || h+"@"+d != address:
-		return &fedrooms.Error{Status: http.StatusBadRequest, Code: "invalid_address", Message: "address must be name@domain, name a bot's handle"}
+		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "invalid_address", Message: "address must be name@domain, name a bot's handle"}
 	case d == s.id.Domain:
-		return &fedrooms.Error{Status: http.StatusBadRequest, Code: "own_domain", Message: "a bot of this server is invited by its key_id"}
+		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "own_domain", Message: "a bot of this server is invited by its key_id"}
 	}
 	peer, err := s.peers.Get(ctx, d)
 	if err != nil && !errors.Is(err, ErrPeerNotFound) {
-		return err
+		return 0, err
 	}
 	if peer.Status != statusAllowed {
-		return &fedrooms.Error{Status: http.StatusForbidden, Code: "peer_not_allowed", Message: d + " is not an allowed peer"}
+		return 0, &fedrooms.Error{Status: http.StatusForbidden, Code: "peer_not_allowed", Message: d + " is not an allowed peer"}
 	}
 	body, _ := json.Marshal(struct {
 		Name   string   `json:"name"`
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
 	}{name, h, set})
-	status, err := s.postSigned(ctx, d, "/fed/v1/rooms/"+roomID+"/invite", body)
+	status, out, err := s.sendSigned(ctx, http.MethodPost, d, "/fed/v1/rooms/"+roomID+"/invite", body, maxBody)
 	var refusal *fedrooms.Error
 	switch {
 	case err != nil:
@@ -153,7 +155,7 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	detail, _ := json.Marshal(map[string]any{"address": address, "rights": set})
 	if refusal != nil {
 		s.auditRoom(ctx, "federation.room.invite", d, roomID, "error:"+refusal.Code, string(detail))
-		return refusal
+		return 0, refusal
 	}
 	s.auditRoom(ctx, "federation.room.invite", d, roomID, "ok", string(detail))
 	// Its answer is contact: delivery paused while it was away or
@@ -161,14 +163,11 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	if err := s.resumeDelivery(ctx, d); err != nil {
 		s.logger.Warn("federation delivery resume failed", "domain", d, "err", err)
 	}
-	return nil
-}
-
-// postSigned sends a signed POST of body to path on domain and returns
-// the status.
-func (s *Service) postSigned(ctx context.Context, domain, path string, body []byte) (int, error) {
-	status, _, err := s.sendSigned(ctx, http.MethodPost, domain, path, body, maxBody)
-	return status, err
+	var answer struct {
+		Max int `json:"max_events_bytes"`
+	}
+	_ = json.Unmarshal(out, &answer)
+	return max(answer.Max, 0), nil
 }
 
 // sendSigned sends a signed room request to path on domain, with body
@@ -459,10 +458,12 @@ func (s *Service) handleRoomLeave(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleRoomEvents answers GET /fed/v1/rooms/{id}/events?since=N: the
-// events of the room's log after seq N, in order, at most 100 and
-// within the events budget, and with <, > and & as stored; message
-// events are skips unless the origin has a reader in the room.
+// handleRoomEvents answers GET /fed/v1/rooms/{id}/events?since=N&max=M:
+// the events of the room's log after seq N, in order, at most 100 and
+// within the events budget and M, what the origin reads the answer up
+// to (ours without it), and with <, > and & as stored; message events
+// are skips unless the origin has a reader in the room, and so is an
+// event over M.
 func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	roomID, ok := s.roomPeer(w, r)
 	if !ok {
@@ -477,7 +478,16 @@ func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		since = n
 	}
-	out, err := s.loadEvents(r.Context(), roomID, OriginFrom(r.Context()), since, math.MaxInt64)
+	var limit int
+	if q := r.URL.Query().Get("max"); q != "" {
+		n, err := strconv.ParseInt(q, 10, 32)
+		if err != nil || n < 0 {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "max must be a byte count from 0")
+			return
+		}
+		limit = int(n)
+	}
+	out, err := s.loadEvents(r.Context(), roomID, OriginFrom(r.Context()), since, math.MaxInt64, limit)
 	if err != nil {
 		s.fail(w, r, err)
 		return

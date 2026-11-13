@@ -533,8 +533,10 @@ func (e *testEnv) start() {
 		e.t.Fatalf("server.New: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	e.t.Cleanup(cancel)
 	done := make(chan struct{})
+	// Registered after the database's cleanup, so it runs first: the
+	// server and its federation loops stop before the database closes.
+	e.t.Cleanup(func() { cancel(); <-done })
 	go func() {
 		defer close(done)
 		if err := srv.Start(ctx); err != nil && !isShutdownErr(err) {

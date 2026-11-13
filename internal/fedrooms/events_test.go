@@ -40,7 +40,7 @@ func join(t *testing.T, db *sql.DB, room, address, rights, domain string) int64 
 			room, id, rights); err != nil {
 			return err
 		}
-		return LogJoin(context.Background(), tx, room, id, domain)
+		return LogJoin(context.Background(), tx, room, id, domain, 1<<10, 0) // events up to 66 KiB
 	})
 	return id
 }
@@ -193,7 +193,7 @@ func TestLog_OnlyRoomsWithStandIns(t *testing.T) {
 				LogMessage(ctx, tx, "R", h.firstMsg, domain, 256<<10),
 				LogRoom(ctx, tx, "R", domain),
 				LogRemove(ctx, tx, "R", h.plain, domain),
-				LogJoin(ctx, tx, "R", h.plain, domain),
+				LogJoin(ctx, tx, "R", h.plain, domain, 1<<10, 0),
 			} {
 				if err != nil {
 					return err
@@ -370,5 +370,31 @@ func TestLogMessage_EventTooLarge(t *testing.T) {
 	inTx(t, h.db, func(tx *sql.Tx) error { return LogMessage(ctx, tx, "R", id, "a.example", 256<<10) })
 	if got := len(events(t, h.db, "R")); got != n+1 {
 		t.Errorf("256 KiB cap: logged %d events, want 1", got-n)
+	}
+}
+
+// The snapshot logs an older message whose event would not fit as a
+// blanked one, in the shape of a deleted message: its seq is kept, its
+// content, metadata and signature are not.
+func TestLogJoin_SnapshotBlanksOversize(t *testing.T) {
+	h := newHostRoom(t, "R", 0)
+	big := addKey(t, h.db, `INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, origin_sig,
+		trust_origin) VALUES ('R', ?, '2026-01-04T00:00:00.000000000Z', ?, 'text/plain', 'answer', '{"k":"v"}', 'sig', 'internal')`,
+		h.bot, strings.Repeat("x", 80<<10))
+	join(t, h.db, "R", "c1@c.example", "read", "a.example")
+	got := events(t, h.db, "R")
+	// room, three members, the operator's message and the big one.
+	if len(got) != 6 {
+		t.Fatalf("snapshot has %d events, want 6", len(got))
+	}
+	want := `{"id":` + strconv.FormatInt(big, 10) + `,"author":"b1@a.example","ts":"2026-01-04T00:00:00.000000000Z",` +
+		`"content_type":"text/plain","message_type":"answer","content":"","deleted":true}`
+	if e := got[5]; e.Type != EventMessage || string(e.Payload) != want {
+		t.Errorf("big message: %s %.200s, want %s", e.Type, e.Payload, want)
+	}
+	// LogDelete's blank has the same shape.
+	inTx(t, h.db, func(tx *sql.Tx) error { return LogDelete(context.Background(), tx, "R", big) })
+	if got := events(t, h.db, "R"); string(got[5].Payload) != want {
+		t.Errorf("blanked again: %s", got[5].Payload)
 	}
 }

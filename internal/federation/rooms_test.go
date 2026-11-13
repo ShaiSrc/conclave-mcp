@@ -139,6 +139,7 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	rs.FedDomain, rs.InviteRemote, rs.FedNotify, rs.Leave = svc.Domain(), svc.InviteRemote, svc.DeliverSoon, svc.LeaveRemote
 	ms := messages.NewService(db, 0, broker)
 	ms.FedDomain, ms.FedNotify, ms.Forward = svc.Domain(), svc.DeliverSoon, svc.ForwardMessage
+	rs.MaxMessageBytes = ms.MaxMessageBytes
 	cs := claims.NewService(db)
 	cs.Forward = svc.ForwardClaims
 	cl := chi.NewRouter()

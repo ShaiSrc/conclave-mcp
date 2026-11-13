@@ -47,12 +47,16 @@ type Service struct {
 	// nothing is logged and invites by address answer 404.
 	FedDomain string
 	// InviteRemote asks the server of address (name@domain, lowercase)
-	// to add its bot to room roomID, named name, with rights. A refusal
+	// to add its bot to room roomID, named name, with rights, and returns
+	// what that server reads a push up to (0: it did not say). A refusal
 	// is a *fedrooms.Error. Set by the server with federation on.
-	InviteRemote func(ctx context.Context, roomID, name, address string, rights []string) error
+	InviteRemote func(ctx context.Context, roomID, name, address string, rights []string) (int, error)
 	// FedNotify, when set, is called after each change of a room's
 	// members or state: it wakes the federation delivery worker.
 	FedNotify func()
+	// MaxMessageBytes is the message cap, which bounds the events of a
+	// room's snapshot.
+	MaxMessageBytes int
 	// Leave tells the host of replica room roomID that keyID, a bot of
 	// this server, leaves the room; the bot is removed here after it.
 	// A refusal is a *fedrooms.Error. Set by the server with federation
@@ -430,7 +434,7 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 			"key is already a member of another room; pass allow_multi_room to add it anyway")
 		return
 	}
-	if _, ok := s.addMember(w, r, id, req.KeyID, "", set); !ok {
+	if _, ok := s.addMember(w, r, id, req.KeyID, "", set, 0); !ok {
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{"room_id": id, "rights": set})
@@ -477,11 +481,12 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		writeErr(w, r, http.StatusConflict, "limit", fmt.Sprintf("%s has %d stand-ins here already", domain, fedrooms.MaxStandIns))
 		return
 	}
-	if err := s.InviteRemote(r.Context(), roomID, name, address, set); err != nil {
+	readLimit, err := s.InviteRemote(r.Context(), roomID, name, address, set)
+	if err != nil {
 		writeFedErr(w, r, err, "invite")
 		return
 	}
-	keyID, ok := s.addMember(w, r, roomID, 0, address, set)
+	keyID, ok := s.addMember(w, r, roomID, 0, address, set, readLimit)
 	if !ok {
 		return
 	}
@@ -492,9 +497,10 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 
 // addMember adds keyID to roomID with set, or with an address the
 // stand-in of that remote bot, created if needed, and logs it, in one
-// transaction. It returns the key added, or answers the request itself
-// on failure.
-func (s *Service) addMember(w http.ResponseWriter, r *http.Request, roomID string, keyID int64, address string, set rights.Set) (int64, bool) {
+// transaction; readLimit is what the bot's server reads a push up to.
+// It returns the key added, or answers the request itself on failure.
+func (s *Service) addMember(w http.ResponseWriter, r *http.Request, roomID string, keyID int64, address string, set rights.Set,
+	readLimit int) (int64, bool) {
 	ctx := r.Context()
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -522,7 +528,7 @@ func (s *Service) addMember(w http.ResponseWriter, r *http.Request, roomID strin
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert member")
 		return 0, false
 	}
-	if err := fedrooms.LogJoin(ctx, tx, roomID, keyID, s.FedDomain); err != nil {
+	if err := fedrooms.LogJoin(ctx, tx, roomID, keyID, s.FedDomain, s.MaxMessageBytes, readLimit); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
 		return 0, false
 	}
@@ -634,6 +640,7 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
 		return
 	}
+	agreed := false // the host let our bot leave its replica
 	switch {
 	case !home.Valid: // hosted here, or no such room (404 below)
 	case !local:
@@ -647,6 +654,7 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 			writeFedErr(w, r, err, "leave")
 			return
 		}
+		agreed = true
 	}
 	tx, err := s.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -666,8 +674,9 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "delete member")
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	// Once the host agreed, its removal push may have taken the bot out
+	// while we waited for its answer: the leave is done all the same.
+	if n, _ := res.RowsAffected(); n == 0 && !agreed {
 		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
 		return
 	}

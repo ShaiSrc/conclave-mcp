@@ -161,3 +161,42 @@ func TestServerDocument(t *testing.T) {
 		t.Errorf("document:\n got %s\nwant %s", got, want)
 	}
 }
+
+// A handle key-<digits>, possible before such handles were reserved,
+// could take another key's address: with federation on, the server
+// does not start until the operator renames it.
+func TestNew_RefusesKeyAddressHandles(t *testing.T) {
+	db := testDB(t)
+	key := func(handle string, revoked bool) int64 {
+		var at any
+		if revoked {
+			at = "2026-01-02T00:00:00Z"
+		}
+		res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, handle, revoked_at) VALUES (?, 'h', ?, '2026-01-01T00:00:00Z', ?, ?)`,
+			"l-"+handle, "p-"+handle, handle, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	k5, k12 := key("key-5", false), key("key-12", false)
+	key("key-7", true)
+	key("key-x", false)
+	key("keys-1", false)
+	_, err := New(db, Options{Domain: local})
+	want := fmt.Sprintf("key-<digits> name the addresses of keys without a handle (key ids %d, %d)", k5, k12)
+	if err == nil || !strings.Contains(err.Error(), want) ||
+		!strings.Contains(err.Error(), "rename these handles with: conclave-mcp bots handle <key-id> <new-handle>") {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := db.Exec(`UPDATE api_keys SET handle = 'five' WHERE id = ?`, k5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE api_keys SET handle = NULL WHERE id = ?`, k12); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(db, Options{Domain: local}); err != nil {
+		t.Errorf("after renaming: %v", err)
+	}
+}

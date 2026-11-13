@@ -212,7 +212,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	detail, _ := json.Marshal(map[string]any{"handle": h, "rights": set})
 	s.auditRoom(ctx, "federation.room.invite", origin, roomID, "ok", string(detail))
-	writeJSON(w, http.StatusCreated, map[string]string{"room_id": roomID})
+	// max_events_bytes is what this server reads a push up to: the host
+	// packs its pushes within it.
+	writeJSON(w, http.StatusCreated, map[string]any{"room_id": roomID, "max_events_bytes": s.eventsLimit()})
 }
 
 // nameReplica gives replica roomID the name its host sent. If activate
@@ -599,7 +601,8 @@ func localMetadata(wire json.RawMessage, reply *int64) ([]byte, error) {
 
 // pull fetches and applies the events of replica roomID after the last
 // it applied from its host, page by page, until a page brings nothing
-// new. Refused events go to rf. It returns the last seq applied.
+// new. Each asks for pages within what this server reads (max). Refused
+// events go to rf. It returns the last seq applied.
 func (s *Service) pull(ctx context.Context, roomID, host string, rf *refusals) (int64, error) {
 	var applied int64
 	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&applied); err != nil {
@@ -607,7 +610,7 @@ func (s *Service) pull(ctx context.Context, roomID, host string, rf *refusals) (
 	}
 	for range maxPullPages {
 		status, body, err := s.sendSigned(ctx, http.MethodGet, host,
-			fmt.Sprintf("/fed/v1/rooms/%s/events?since=%d", roomID, applied), nil, s.eventsLimit())
+			fmt.Sprintf("/fed/v1/rooms/%s/events?since=%d&max=%d", roomID, applied, s.eventsLimit()), nil, s.eventsLimit())
 		if err != nil {
 			return applied, err
 		}
@@ -642,7 +645,7 @@ func (s *Service) catchupLoop(ctx context.Context) {
 }
 
 // catchUp pulls for each active replica whose host is an allowed peer:
-// the hosts at once, at most maxPeerRuns, each within peerBudget, its
+// the hosts at once, at most maxPeerRuns, each within the peer budget, its
 // rooms one after the other and each pull within 30 seconds, so a slow
 // host holds up only its own rooms. It returns when all are done.
 func (s *Service) catchUp(ctx context.Context) {
@@ -674,7 +677,7 @@ func (s *Service) catchUp(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			}
-			hctx, cancel := context.WithTimeout(ctx, peerBudget)
+			hctx, cancel := context.WithTimeout(ctx, s.budget)
 			defer cancel()
 			for _, room := range rooms {
 				if hctx.Err() != nil {

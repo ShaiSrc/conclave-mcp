@@ -297,11 +297,15 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 		return err
 	}
 	st.SelfID = me.ID
+	room := h.room(ctx, repo, st)
 	var held struct {
 		Claims []claims.Claim `json:"claims"`
 	}
-	if _, err := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + st.RoomID + "/claims", Out: &held}); err != nil {
-		return err
+	// A replica room's claims are its host's: when the host does not
+	// answer, the session starts without them.
+	_, claimsErr := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + st.RoomID + "/claims", Out: &held})
+	if claimsErr != nil && room.Home == "" {
+		return claimsErr
 	}
 	msgs, err := agent.FetchNew(ctx, h.C, st.RoomID, st)
 	if err != nil {
@@ -314,12 +318,14 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	if agent.HasOperator(msgs) {
 		b.WriteString(agent.OperatorNote + "\n")
 	}
-	room := h.room(ctx, repo, st)
 	fmt.Fprintf(&b, "Conclave: you are %s in room %s; use this room_id with the conclave tools.\n",
 		agent.OneLine(me.Label), room.Title())
-	if len(held.Claims) == 0 {
+	switch {
+	case claimsErr != nil:
+		fmt.Fprintf(&b, "Claims could not be read (the room's host %s did not answer).\n", agent.OneLine(room.Home))
+	case len(held.Claims) == 0:
 		b.WriteString("No active claims.\n")
-	} else {
+	default:
 		b.WriteString("Active claims (do not edit paths others hold):\n")
 		for _, c := range held.Claims {
 			// "- claim " first: a path must not be able to start the line

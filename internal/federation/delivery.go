@@ -27,6 +27,9 @@ const (
 	peerBudget      = time.Minute        // per peer and pass, of delivery and of catch-up
 	maxPeerRuns     = 8                  // peers served at once, by delivery and by catch-up
 	maxLastError    = 500                // bytes of fed_delivery.last_error
+	eventWrap       = 64                 // bytes around an event's payload: {"seq":…,"type":…,"payload":…},
+	bodyWrap        = 16                 // and around the events of a body: {"events":[…]}
+	maxOversizeLog  = 5                  // seqs kept in a federation.delivery.oversize row
 )
 
 // peerAllowed is a condition on fed_delivery rows that each update of
@@ -36,10 +39,12 @@ const (
 const peerAllowed = ` AND EXISTS (SELECT 1 FROM federation_peers p WHERE p.domain = fed_delivery.peer AND p.status = 'allowed')`
 
 // eventsBudget is what a push or a pull packs events into: 64 KiB plus
-// the message cap. The first event always goes, so one may be larger;
-// eventsLimit, 64 KiB plus twice the cap, is what bodies carrying
-// events are read up to; a message whose event would not fit in it is
-// refused when it is sent (fedrooms.ErrEventTooLarge).
+// the message cap, or less when the receiver reads less. The first
+// event always goes, so one may be larger; eventsLimit, 64 KiB plus
+// twice the cap, is what bodies carrying events are read up to, here,
+// and what this server tells hosts it reads (in its invite answer and
+// its pulls); a message whose event would not fit in it is refused when
+// it is sent (fedrooms.ErrEventTooLarge).
 func (s *Service) eventsBudget() int { return maxBody + s.Rooms.MaxMessageBytes }
 func (s *Service) eventsLimit() int  { return fedrooms.EventLimit(s.Rooms.MaxMessageBytes) }
 
@@ -78,6 +83,7 @@ type cursor struct {
 	attempts   int
 	failing    sql.NullString
 	next       string // next_try_at, "" when due at once
+	maxBody    int    // what the peer reads a push up to, 0 when unknown
 }
 
 // pending selects the cursors with events to send: not paused, the peer
@@ -114,7 +120,7 @@ func (s *Service) startDue(ctx context.Context) time.Duration {
 // cursor of those peers is due, at most deliveryIdle.
 func (s *Service) plan(ctx context.Context, now time.Time) (map[string][]cursor, []string, time.Duration, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT d.room_id, d.peer, d.acked_seq, d.attempts, d.failing_since,
-		COALESCE(d.next_try_at, '')`+pending+` ORDER BY d.peer, d.room_id`)
+		COALESCE(d.next_try_at, ''), d.max_body`+pending+` ORDER BY d.peer, d.room_id`)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -124,7 +130,7 @@ func (s *Service) plan(ctx context.Context, now time.Time) (map[string][]cursor,
 	defer s.runMu.Unlock()
 	for rows.Next() {
 		var c cursor
-		if err := rows.Scan(&c.room, &c.peer, &c.acked, &c.attempts, &c.failing, &c.next); err != nil {
+		if err := rows.Scan(&c.room, &c.peer, &c.acked, &c.attempts, &c.failing, &c.next, &c.maxBody); err != nil {
 			return nil, nil, 0, err
 		}
 		switch t, err := time.Parse(time.RFC3339Nano, c.next); {
@@ -142,11 +148,13 @@ func (s *Service) plan(ctx context.Context, now time.Time) (map[string][]cursor,
 }
 
 // runPeer pushes peer's due cursors one after the other, in one of
-// maxPeerRuns slots and within peerBudget, so a slow peer holds up
+// maxPeerRuns slots and within the peer budget, so a slow peer holds up
 // neither the others nor, past its budget, its own next pass. A peer
 // that does not answer is not asked again in the run: its other cursors
 // count the same failure. Cursors left when the budget is spent wait
-// for the next pass.
+// for the next pass; their order is shuffled for each run, so the ones
+// left differ from pass to pass and no room waits behind the others for
+// ever.
 func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 	defer func() {
 		s.runMu.Lock()
@@ -161,7 +169,11 @@ func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 	case <-ctx.Done():
 		return
 	}
-	pctx, cancel := context.WithTimeout(ctx, peerBudget)
+	for i := len(cs) - 1; i > 0; i-- {
+		j := min(int(s.jitter()*float64(i+1)), i)
+		cs[i], cs[j] = cs[j], cs[i]
+	}
+	pctx, cancel := context.WithTimeout(ctx, s.budget)
 	defer cancel()
 	now := s.now()
 	var down error
@@ -201,7 +213,7 @@ func (s *Service) push(ctx, pctx context.Context, c cursor) (unreachable bool, e
 		}
 		return false, err
 	}
-	evs, err := s.loadEvents(ctx, c.room, c.peer, c.acked, upto)
+	evs, err := s.loadEvents(ctx, c.room, c.peer, c.acked, upto, c.maxBody)
 	if err != nil || len(evs) == 0 {
 		return false, err
 	}
@@ -289,40 +301,66 @@ func (s *Service) reads(ctx context.Context, roomID, peer string) (bool, error) 
 
 // loadEvents returns roomID's events after seq since, up to seq upto,
 // as peer gets them: at most 100 and, past the first, within
-// eventsBudget. A peer without a reader in the room (reads, checked
-// now) gets each message and message.delete event as a skip, which
-// keeps its seqs contiguous; the other events go to every member server,
-// which needs the members and the room to render it.
-func (s *Service) loadEvents(ctx context.Context, roomID, peer string, since, upto int64) ([]fedrooms.Event, error) {
+// eventsBudget and limit, what peer reads a body up to (0 when unknown:
+// then taken to be what this server reads). A peer without a reader in
+// the room (reads, checked now) gets each message event as a skip,
+// which keeps its seqs contiguous. The other events go to every member
+// server: it needs the members and the room to render it, and a
+// message.delete, which carries only an id, lets one that lost read
+// delete its copy. An event over limit goes as a skip too, so it cannot
+// stall the room; one federation.delivery.oversize row per call names
+// them.
+func (s *Service) loadEvents(ctx context.Context, roomID, peer string, since, upto int64, limit int) ([]fedrooms.Event, error) {
 	reader, err := s.reads(ctx, roomID, peer)
 	if err != nil {
 		return nil, err
 	}
+	if limit <= 0 {
+		limit = s.eventsLimit()
+	}
+	limit -= bodyWrap
+	budget := min(s.eventsBudget(), limit)
 	rows, err := s.db.QueryContext(ctx, `SELECT seq, type, payload FROM fed_events
 		WHERE room_id = ? AND seq > ? AND seq <= ? ORDER BY seq LIMIT ?`, roomID, since, upto, maxRoomEvents)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out, size := []fedrooms.Event{}, 0
+	out, size, oversize := []fedrooms.Event{}, 0, []int64(nil)
 	for rows.Next() {
 		var e fedrooms.Event
 		var payload string
 		if err := rows.Scan(&e.Seq, &e.Type, &payload); err != nil {
 			return nil, err
 		}
-		if !reader && (e.Type == fedrooms.EventMessage || e.Type == fedrooms.EventMessageDelete) {
+		over := false
+		switch {
+		case e.Type == fedrooms.EventMessage && !reader:
 			e.Type, payload = fedrooms.EventSkip, ""
+		case len(payload)+eventWrap > limit:
+			e.Type, payload, over = fedrooms.EventSkip, "", true
 		}
-		if size += len(payload) + 64; len(out) > 0 && size > s.eventsBudget() { // 64: the event's other fields
+		if size += len(payload) + eventWrap; len(out) > 0 && size > budget {
 			break
+		}
+		if over {
+			oversize = append(oversize, e.Seq)
 		}
 		if payload != "" {
 			e.Payload = json.RawMessage(payload)
 		}
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	_ = rows.Close() // before the audit write
+	if len(oversize) > 0 {
+		detail, _ := json.Marshal(map[string]any{"count": len(oversize), "seqs": oversize[:min(len(oversize), maxOversizeLog)],
+			"limit": limit + bodyWrap})
+		s.auditRoom(ctx, "federation.delivery.oversize", peer, roomID, "error:too_large", string(detail))
+	}
+	return out, nil
 }
 
 // failed records a failed push of c at now: the next try after the

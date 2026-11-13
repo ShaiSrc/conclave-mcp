@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -241,6 +243,52 @@ func TestDelivery_DeadPeerOncePerPass(t *testing.T) {
 	for _, r := range []string{room, other} {
 		if _, attempts, _, _, _ := cursorOf(t, g, r, m.id.Domain); attempts != 1 {
 			t.Errorf("room %s: attempts %d", r, attempts)
+		}
+	}
+}
+
+// A peer's rooms are pushed in an order shuffled for each pass: when its
+// budget allows one push a pass, every due room is attempted within a
+// few passes, none held back by the rooms before it.
+func TestDelivery_FairOrder(t *testing.T) {
+	g, m, first, _ := fedRoom(t, "read")
+	rooms := []string{first}
+	for i := range 3 {
+		r := g.room(t, fmt.Sprint("r", i))
+		g.invite(t, r, m.addr("c1"), "read")
+		rooms = append(rooms, r)
+	}
+	g.svc.budget = 300 * time.Millisecond
+	var served atomic.Int32
+	m.setReply(func(path string, body []byte) (int, string) {
+		if served.Add(1) > 1 { // the second push of a pass outlasts the budget
+			time.Sleep(time.Second)
+		}
+		return applyAll(path, body)
+	})
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	fixClock(g, &now, 0)
+	g.svc.jitter = rand.New(rand.NewPCG(1, 2)).Float64
+	ctx := context.Background()
+	for pass := 1; ; pass++ {
+		for _, r := range rooms {
+			post(t, g, g.admin, r, `{"content":"more"}`)
+		}
+		served.Store(0)
+		g.svc.startDue(ctx)
+		g.svc.runs.Wait()
+		now = now.Add(2 * time.Hour) // past any backoff
+		missing := 0
+		for _, r := range rooms {
+			if len(m.pushes(t, r)) == 0 {
+				missing++
+			}
+		}
+		if missing == 0 {
+			break
+		}
+		if pass == 12 {
+			t.Fatalf("%d of %d rooms not attempted in %d passes", missing, len(rooms), pass)
 		}
 	}
 }

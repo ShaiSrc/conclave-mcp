@@ -19,8 +19,9 @@
 -- id of a message event (NULL for the other types), by which a deleted
 -- message's events are blanked and a retried proposal finds its event.
 -- fed_delivery is the cursor of each member server, failing_since the
--- start of its current run of failed pushes. Timestamps use the
--- fixed-width storage.FormatTS form.
+-- start of its current run of failed pushes, and max_body what the
+-- member server said it reads a push up to (0: it did not say).
+-- Timestamps use the fixed-width storage.FormatTS form.
 
 ALTER TABLE api_keys ADD COLUMN remote_domain TEXT;
 DROP INDEX idx_api_keys_prefix;
@@ -56,6 +57,7 @@ CREATE TABLE fed_delivery (
     last_error    TEXT NOT NULL DEFAULT '',
     paused        INTEGER NOT NULL DEFAULT 0,
     failing_since TEXT,
+    max_body      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (room_id, peer)
 );
 CREATE INDEX fed_delivery_peer ON fed_delivery(peer);

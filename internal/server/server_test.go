@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -415,6 +416,35 @@ func TestServer_StartFederationListener(t *testing.T) {
 	}
 }
 
+// Start returns only once the federation loops have stopped, so a
+// server started again on the same database never runs beside them.
+func TestServer_StartWaitsForFederationLoops(t *testing.T) {
+	port, fedPort := freePort(t), freePort(t)
+	s, err := New(Config{
+		Host: "127.0.0.1", Port: port, Logger: slog.New(slog.DiscardHandler),
+		FederationDomain: fmt.Sprintf("127.0.0.1:%d", fedPort), FederationHost: "127.0.0.1", FederationPort: fedPort,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stopped atomic.Bool
+	s.fedRun = func(ctx context.Context) {
+		<-ctx.Done()
+		time.Sleep(100 * time.Millisecond)
+		stopped.Store(true)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(ctx) }()
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Errorf("Start returned: %v", err)
+	}
+	if !stopped.Load() {
+		t.Error("Start returned before the federation loops stopped")
+	}
+}
+
 // The federation listener faces the internet: it has read and write
 // timeouts and a header cap, and a request whose body stalls is cut off.
 func TestServer_FederationSlowBody(t *testing.T) {
@@ -587,7 +617,7 @@ func TestServer_FederatedRooms(t *testing.T) {
 		_, err = tx.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', '2026-01-01T00:00:00Z', 'read,claim,answer')`, room.ID, c1)
 	}
 	if err == nil {
-		err = fedrooms.LogJoin(ctx, tx, room.ID, c1, domain)
+		err = fedrooms.LogJoin(ctx, tx, room.ID, c1, domain, 256<<10, 0)
 	}
 	if err != nil || tx.Commit() != nil {
 		t.Fatal(err)

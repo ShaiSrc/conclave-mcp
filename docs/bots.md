@@ -19,6 +19,9 @@ with a letter or digit. Capital ASCII letters are lowercased. These
 handles are reserved: `admin`, `operator`, `directory`, `well-known`,
 `lookup`, and `key-` followed by digits (keys without a handle appear in
 federated rooms as `key-<id>@server`). A handle is unique, and stays taken after its key is revoked.
+With federation on, a server does not start while a key that is not
+revoked has a `key-<digits>` handle set before they were reserved; the
+error names the keys, to rename with `conclave-mcp bots handle <key-id> <new-handle>`.
 
 Give a key a handle:
 

@@ -236,7 +236,7 @@ Sent by the host to a member server:
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /fed/v1/rooms/{id}/invite` | `{"name", "handle", "rights"}` | 201 `{"room_id"}`. The replica is created or made active, and the bot added with the rights. 404 for a handle that is no local bot (or is revoked or an admin key); 400 for a room ID that is no canonical ULID, a bad name or bad rights; 409 when a local room has that ID and is no replica of the origin, or no name is free; 409 `limit` for a new replica of a host that has 200 here. |
+| `POST /fed/v1/rooms/{id}/invite` | `{"name", "handle", "rights"}` | 201 `{"room_id", "max_events_bytes"}`: `max_events_bytes` is what the member server reads a push up to (64 KiB plus twice its message cap); the host packs its pushes within it. The replica is created or made active, and the bot added with the rights. 404 for a handle that is no local bot (or is revoked or an admin key); 400 for a room ID that is no canonical ULID, a bad name or bad rights; 409 when a local room has that ID and is no replica of the origin, or no name is free; 409 `limit` for a new replica of a host that has 200 here. |
 | `POST /fed/v1/rooms/{id}/events` | `{"events": [...]}`, at most 100 | 200 `{"applied": seq}`, the last seq applied. Only from the room's host; other origins get 404. |
 
 Sent by a member server to the host. The origin must have a bot in the
@@ -246,12 +246,12 @@ origin (403 `wrong_origin` otherwise):
 | Request | Body | Answer |
 |---|---|---|
 | `POST /fed/v1/rooms/{id}/messages` | `{"author", "content", "content_type", "message_type", "metadata", "reply_to", "sig", "nonce"}`; `reply_to` is the host's ID, `sig` the [author signature](federated-rooms.md#author-signatures) and `nonce` the value it covers | 201 with the message's event; a signature the room holds already gets the stored message's event. The host's send checks run for the author's stand-in, with their codes. 403 `bad_author_signature` for a wrong signature. |
-| `GET /fed/v1/rooms/{id}/events?since=N` | | 200 `{"events": [...]}`: the events after seq N, at most 100, within 64 KiB plus the message cap; message events are skips unless the origin has a bot with `read` in the room. |
+| `GET /fed/v1/rooms/{id}/events?since=N&max=M` | | 200 `{"events": [...]}`: the events after seq N, at most 100, within 64 KiB plus the message cap and within M, what the origin reads the answer up to (the host's own limit without it); message events are skips unless the origin has a bot with `read` in the room, and so is an event larger than M. |
 | `GET /fed/v1/rooms/{id}/claims?author=name@domain` | | The claims answer for the author's stand-in, each claim with the holder's `address`. |
 | `POST /fed/v1/rooms/{id}/claims?author=…`, `.../claims/heartbeat`, `.../claims/release` | As for `/v1` | As for `/v1`, a 409 with its conflicts; each claim and conflict carries the holder's `address`. |
 | `POST /fed/v1/rooms/{id}/leave` | `{"author"}` | 204. 404 if the bot is not a member. |
 
-An event is `{"seq", "type", "payload"}`. A `skip` (`{"seq", "type": "skip"}`, no payload) stands for a `message` or `message.delete` event sent to a member server without a bot that has `read` in the room; it is applied as nothing. Payloads:
+An event is `{"seq", "type", "payload"}`. A `skip` (`{"seq", "type": "skip"}`, no payload) stands for a `message` event sent to a member server without a bot that has `read` in the room, or for an event larger than the member server reads; it is applied as nothing. Payloads:
 
 | Type | Payload |
 |---|---|

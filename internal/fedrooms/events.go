@@ -133,8 +133,11 @@ func Logged(ctx context.Context, q DB, roomID string) (bool, error) {
 
 // LogJoin logs that keyID joined roomID: the room's snapshot when keyID
 // is its first stand-in member, else keyID's member event. A stand-in's
-// server gets a delivery cursor.
-func LogJoin(ctx context.Context, tx *sql.Tx, roomID string, keyID int64, domain string) error {
+// server gets a delivery cursor, which keeps readLimit, what that server
+// said it reads a push up to (0: unknown). maxMessageBytes is the
+// message cap, which bounds the snapshot's events as it bounds
+// LogMessage's.
+func LogJoin(ctx context.Context, tx *sql.Tx, roomID string, keyID int64, domain string, maxMessageBytes, readLimit int) error {
 	if domain == "" {
 		return nil
 	}
@@ -143,8 +146,8 @@ func LogJoin(ctx context.Context, tx *sql.Tx, roomID string, keyID int64, domain
 		return err
 	}
 	if remote.Valid {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO fed_delivery(room_id, peer) VALUES (?, ?) ON CONFLICT DO NOTHING`,
-			roomID, remote.String); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO fed_delivery(room_id, peer, max_body) VALUES (?, ?, ?)
+			ON CONFLICT(room_id, peer) DO UPDATE SET max_body = excluded.max_body`, roomID, remote.String, readLimit); err != nil {
 			return err
 		}
 		var n int
@@ -153,7 +156,7 @@ func LogJoin(ctx context.Context, tx *sql.Tx, roomID string, keyID int64, domain
 			return err
 		}
 		if n == 1 {
-			return snapshot(ctx, tx, roomID, domain)
+			return snapshot(ctx, tx, roomID, domain, EventLimit(maxMessageBytes)-eventEnvelope)
 		}
 	}
 	return LogMember(ctx, tx, roomID, keyID, domain)
@@ -203,7 +206,7 @@ func LogMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, dom
 	if ok, err := logged(ctx, tx, roomID, domain); !ok {
 		return err
 	}
-	return logMessage(ctx, tx, roomID, msgID, domain, EventLimit(maxMessageBytes)-eventEnvelope)
+	return logMessage(ctx, tx, roomID, msgID, domain, EventLimit(maxMessageBytes)-eventEnvelope, false)
 }
 
 // LogDelete retracts message msgID of roomID, deleted in tx: each of
@@ -236,8 +239,11 @@ func logged(ctx context.Context, tx *sql.Tx, roomID, domain string) (bool, error
 }
 
 // snapshot starts roomID's log: the room, its members but admin keys,
-// and its latest 200 messages that are not deleted, oldest first.
-func snapshot(ctx context.Context, tx *sql.Tx, roomID, domain string) error {
+// and its latest 200 messages that are not deleted, oldest first. A
+// message whose event would be over max bytes was stored before the
+// room federated, so it is not refused now: it is logged blanked, as a
+// deleted one, which keeps its seq and which replicas skip.
+func snapshot(ctx context.Context, tx *sql.Tx, roomID, domain string, max int) error {
 	if err := logRoom(ctx, tx, roomID); err != nil {
 		return err
 	}
@@ -257,7 +263,7 @@ func snapshot(ctx context.Context, tx *sql.Tx, roomID, domain string) error {
 		return err
 	}
 	for _, id := range msgs {
-		if err := logMessage(ctx, tx, roomID, id, domain, 0); err != nil {
+		if err := logMessage(ctx, tx, roomID, id, domain, max, true); err != nil {
 			return err
 		}
 	}
@@ -307,10 +313,10 @@ func logMember(ctx context.Context, tx *sql.Tx, roomID string, keyID int64, doma
 	return appendEvent(ctx, tx, roomID, EventMember, MemberPayload{Address: addr, Rights: rights.FromStorage(stored)})
 }
 
-// logMessage logs message msgID; with max above 0, a payload over max
-// bytes is ErrEventTooLarge. The snapshot passes 0: a message stored
-// before the room federated is not refused after the fact.
-func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, domain string, max int) error {
+// logMessage logs message msgID. A payload over max bytes is
+// ErrEventTooLarge, or with blank logged as LogDelete blanks one: id,
+// author, ts, content type and message type, empty content, deleted.
+func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, domain string, max int, blank bool) error {
 	var (
 		p                MessagePayload
 		author           int64
@@ -333,8 +339,14 @@ func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, dom
 	if err != nil {
 		return err
 	}
-	if max > 0 && len(b) > max {
-		return ErrEventTooLarge
+	if len(b) > max {
+		if !blank {
+			return ErrEventTooLarge
+		}
+		if b, err = Marshal(MessagePayload{ID: p.ID, Author: p.Author, TS: p.TS, ContentType: p.ContentType,
+			MessageType: p.MessageType, Deleted: true}); err != nil {
+			return err
+		}
 	}
 	return insertEvent(ctx, tx, roomID, EventMessage, b, msgID)
 }
