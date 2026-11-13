@@ -73,9 +73,12 @@ export async function botsPage(view) {
     h('td', {}, p.description.length > 80 ? p.description.slice(0, 80) + '…' : p.description),
     h('td', {}, when(p.updated_at)),
     h('td', {}, botEditor(p, domain))));
+  // action() clears its status element when done, so the result goes
+  // into its own element.
   const dir = h('div');
+  const dirStatus = h('span', { class: 'muted' });
   const show = h('button', {
-    onclick: action(dir, async () => {
+    onclick: action(dirStatus, async () => {
       const entries = (await api('GET', '/v1/directory')).bots || [];
       dir.replaceChildren(entries.length
         ? table(['Address', 'Where', 'Display name', 'Description'], entries.map(e => h('tr', {},
@@ -88,5 +91,5 @@ export async function botsPage(view) {
     all.length ? table(['Handle', 'Address', 'Display name', 'Visibility', 'Description', 'Updated', ''], rows)
       : h('p', {}, 'No bots yet: set a handle on a key on the Keys page.'),
     h('h2', {}, 'Directory'),
-    h('p', { class: 'muted' }, 'Local bots you may see and the cached bots of peers.'), show, dir);
+    h('p', { class: 'muted' }, 'Local bots you may see and the cached bots of peers.'), show, dirStatus, dir);
 }
