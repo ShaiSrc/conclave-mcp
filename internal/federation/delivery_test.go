@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -275,6 +276,50 @@ func TestDelivery_FairOrder(t *testing.T) {
 			t.Fatalf("after pass %d: %d of %d rooms attempted, want %d", pass, n, len(rooms), pass)
 		}
 	}
+}
+
+// The rotation follows room ids, not positions: when the due set changes
+// between passes ([A C], then [C D], again and again), C is still reached.
+func TestDelivery_FairOrderChangingDueSets(t *testing.T) {
+	g, m, first, _ := fedRoom(t, "read")
+	rooms := []string{first}
+	for i := range 3 {
+		r := g.room(t, fmt.Sprint("r", i))
+		g.invite(t, r, m.addr("c1"), "read")
+		rooms = append(rooms, r)
+	}
+	slices.Sort(rooms)
+	a, c, d := rooms[0], rooms[2], rooms[3]
+	g.svc.budget = 300 * time.Millisecond
+	m.setReply(func(string, []byte) (int, string) {
+		time.Sleep(time.Second)
+		return http.StatusInternalServerError, ""
+	})
+	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	fixClock(g, &now, 0)
+	ctx := context.Background()
+	later := storage.FormatTS(now.Add(1000 * time.Hour))
+	for pass := 1; pass <= 4; pass++ {
+		due := []string{a, c}
+		if pass%2 == 0 {
+			due = []string{c, d}
+		}
+		for _, r := range rooms {
+			next := later
+			if slices.Contains(due, r) {
+				next = ""
+			}
+			if _, err := g.db.Exec(`UPDATE fed_delivery SET next_try_at = NULLIF(?, '') WHERE room_id = ? AND peer = ?`, next, r, m.id.Domain); err != nil {
+				t.Fatal(err)
+			}
+		}
+		g.svc.startDue(ctx)
+		g.svc.runs.Wait()
+		if count(t, g.db, `SELECT COUNT(*) FROM fed_delivery WHERE room_id = ? AND peer = ? AND attempts > 0`, c, m.id.Domain) > 0 {
+			return
+		}
+	}
+	t.Fatal("room C stayed due on every pass but was never attempted")
 }
 
 // A member server gets the events up to its last bot's removal, then

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
@@ -172,18 +173,26 @@ func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 	case <-ctx.Done():
 		return
 	}
-	// ponytail: the offset indexes the rooms due now; when they change
-	// between passes the start moves with them. Keep the last room id
-	// attempted instead if that ever starves one.
+	// cs is in room id order. The run starts after the last room the
+	// previous run attempted and wraps, so every room that stays due is
+	// reached within as many runs as there are rooms, even when the due
+	// set changes between runs.
 	s.runMu.Lock()
-	start := s.rotation[peer] % len(cs)
+	last := s.rotation[peer]
 	s.runMu.Unlock()
+	start, _ := slices.BinarySearchFunc(cs, last, func(c cursor, id string) int { return strings.Compare(c.room, id) })
+	if start < len(cs) && cs[start].room == last {
+		start++
+	}
+	start %= len(cs)
 	cs = slices.Concat(cs[start:], cs[:start])
-	tried := 0
+	tried := ""
 	defer func() {
-		s.runMu.Lock()
-		s.rotation[peer] += max(tried, 1)
-		s.runMu.Unlock()
+		if tried != "" {
+			s.runMu.Lock()
+			s.rotation[peer] = tried
+			s.runMu.Unlock()
+		}
 	}()
 	pctx, cancel := context.WithTimeout(ctx, s.budget)
 	defer cancel()
@@ -193,7 +202,7 @@ func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 		if pctx.Err() != nil {
 			return
 		}
-		tried++
+		tried = c.room
 		err := down
 		if err == nil {
 			var unreachable bool
