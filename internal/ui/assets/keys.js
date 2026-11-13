@@ -22,10 +22,10 @@ function submit(msg, fn) {
   };
 }
 
-// handleCell shows a key's handle; any key but the operator's can get, change or lose
+// handleCell shows a key's handle; only a non-admin key can get, change or lose
 // one (both are confirmed changes; the server refuses admin keys).
 function handleCell(k) {
-  if (k.revoked_at || k.label === 'operator') return k.handle || '';
+  if (k.revoked_at || k.admin || k.label === 'operator') return k.handle || '';
   const input = h('input', { maxlength: 32, placeholder: 'handle', 'aria-label': 'Handle', value: k.handle || '' });
   const msg = h('span');
   const set = h('button', {

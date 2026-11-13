@@ -130,6 +130,7 @@ type keyView struct {
 	RevokedAt   string `json:"revoked_at,omitempty"`
 	TrustOrigin string `json:"trust_origin"`
 	Handle      string `json:"handle"` // the bot handle, empty if none
+	Admin       bool   `json:"admin"`
 }
 
 // createKeyResponse is what POST /v1/keys returns. Note: "key" is
@@ -220,7 +221,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin, COALESCE(handle, '')
+		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin, COALESCE(handle, ''), is_admin
 		 FROM api_keys
 		 ORDER BY id`)
 	if err != nil {
@@ -238,7 +239,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			revoked   sql.NullString
 			trustOrig string
 		)
-		if err := rows.Scan(&k.ID, &k.Label, &prefix, &k.CreatedAt, &lastUsed, &revoked, &trustOrig, &k.Handle); err != nil {
+		if err := rows.Scan(&k.ID, &k.Label, &prefix, &k.CreatedAt, &lastUsed, &revoked, &trustOrig, &k.Handle, &k.Admin); err != nil {
 			writeJSONError(w, r, http.StatusInternalServerError, "internal_error", "scan failed")
 			return
 		}

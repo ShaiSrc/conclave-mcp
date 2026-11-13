@@ -365,4 +365,11 @@ func TestKeys_HandleInWhoamiAndList(t *testing.T) {
 	if body := get("/whoami"); !strings.Contains(body, `"handle":"root-bot"`) {
 		t.Errorf("whoami with a handle: %s", body)
 	}
+	if _, err := db.Exec(`UPDATE api_keys SET is_admin = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	var adm struct{ Keys []struct{ Admin bool } }
+	if err := json.Unmarshal([]byte(get("/keys")), &adm); err != nil || len(adm.Keys) != 2 || !adm.Keys[0].Admin || adm.Keys[1].Admin {
+		t.Errorf("admin flags: %+v %v", adm, err)
+	}
 }
