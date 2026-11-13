@@ -23,6 +23,7 @@ conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
 conclave-mcp agent add <label> --rights all --trust-origin internal [--store]  # new agent key + invite
 conclave-mcp ui setup                                 # URL that registers the web UI passkey
+conclave-mcp federation status|peers list|add|block|remove|ping  # federation (admin key)
 conclave-mcp hook                                     # Claude Code hook (stdin JSON)
 conclave-mcp version                                  # print version
 conclave-mcp help                                     # top-level help
@@ -564,6 +565,32 @@ it works on STDERR. Open it in a browser on the same machine within
 10 minutes. Once a passkey exists the server refuses
 (`409 conflict`): add more passkeys on the UI's Passkeys page, or
 start over with `admin ui-reset --db /path/to/data.db` (service stopped). See [web-ui.md](web-ui.md).
+
+## `federation`
+
+```
+conclave-mcp federation status
+conclave-mcp federation peers list [--format table|json]
+conclave-mcp federation peers add <domain> [--fingerprint SHA256:...] [--note TEXT]
+conclave-mcp federation peers block <domain>
+conclave-mcp federation peers remove <domain>
+conclave-mcp federation peers ping <domain>
+```
+
+Needs the admin key. With federation off, the server answers
+`404 federation_disabled`. See [federation.md](federation.md).
+
+- `status` prints the domain, mode, key ID, fingerprint and peer counts.
+- `peers list` prints `DOMAIN`, `STATUS`, `FINGERPRINT`, `NOTE` and
+  `LAST_SEEN`.
+- `peers add <domain>` without `--fingerprint` fetches the peer's server
+  document, prints `fingerprint of <domain>: SHA256:...` and the command
+  to run next, and changes nothing. Compare the fingerprint with the
+  peer's operator first. With `--fingerprint`, it adds the peer as
+  `allowed` if one of the peer's keys has that fingerprint, and fails
+  with 409 `fingerprint_mismatch` otherwise.
+- `peers block` and `peers remove` change the peer's policy.
+- `peers ping` sends a signed ping and prints `<domain>: <n> ms`.
 
 ## Recipes
 

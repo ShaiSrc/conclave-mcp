@@ -546,6 +546,13 @@ func newTestEnv(t *testing.T) *testEnv {
 // owns the directory, and the test framework handles cleanup".
 func newTestEnvAt(t *testing.T, dir string, _ bool) *testEnv {
 	t.Helper()
+	return newTestEnvCfg(t, dir, nil)
+}
+
+// newTestEnvCfg is newTestEnvAt with a hook that edits the server
+// config before the server starts.
+func newTestEnvCfg(t *testing.T, dir string, edit func(*server.Config)) *testEnv {
+	t.Helper()
 	dbPath := filepath.Join(dir, "data.db")
 
 	// Pick a free port eagerly. We bind, get the port, then close;
@@ -566,6 +573,9 @@ func newTestEnvAt(t *testing.T, dir string, _ bool) *testEnv {
 		ReadHeader:  5 * time.Second,
 		IdleTimeout: 120 * time.Second,
 		Logger:      logger,
+	}
+	if edit != nil {
+		edit(&cfg)
 	}
 
 	db, cleanup, err := storage.Open(context.Background(), dbPath)

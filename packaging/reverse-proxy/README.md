@@ -58,6 +58,15 @@ Key properties:
 
 Reload: `systemctl reload caddy` (or `caddy reload --config ...`).
 
+## Federation
+
+With `CONCLAVE_FEDERATION_DOMAIN` set, the server has a second listener
+(default `127.0.0.1:7433`) for `/.well-known/conclave` and `/fed/`. Both
+reference configs route those two paths to it. The proxy must forward the
+`Host` header and the request URI unchanged, because the signature covers
+both: no `rewrite`, no path prefix stripping, no URI part in nginx's
+`proxy_pass`. Details are in [docs/federation.md](../../docs/federation.md#reverse-proxy).
+
 ## Choosing between nginx and Caddy
 
 | Concern                      | nginx            | Caddy          |

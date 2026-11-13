@@ -63,6 +63,7 @@ cmd/mcp             MCP stdio / HTTP transport
 cmd/hook            Claude Code hook (inbox, claims, Stop, SessionEnd)
 cmd/setup           init and agent add
 cmd/ui              ui setup (asks the server for a setup URL)
+cmd/federation      federation status and peers (talks to server over HTTP)
 internal/server     HTTP routing, middleware (auth, ratelimit, audit)
 internal/auth       argon2id token generation + verification
 internal/keys       keys service + storage
@@ -73,6 +74,7 @@ internal/events     in-process broker (SSE fan-out)
 internal/mcp        MCP tool definitions (17 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
+internal/federation  server identity, signed requests, peers, fetch client (federation listener and admin API)
 internal/ui         web admin UI: embedded pages, passkey login, UI sessions on /v1
 internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
 internal/cli/client shared HTTP client for every subcommand (token resolution)
@@ -82,7 +84,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0009)
+migrations/         numbered SQL migrations (0001..0011)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -122,10 +124,17 @@ ui_sessions(token_hash, created_at, last_seen_at, expires_at)
 ui_setup_tokens(token_hash, expires_at, used_at)
   the web UI (migration 0009): passkey public keys, and the SHA-256 of
   session and setup tokens
+
+federation_keys(key_id, public_key, private_key, created_at, retired_at)
+federation_peers(domain, status, fingerprint, note, added_at, last_seen_at)
+federation_nonces(origin, nonce, expires_at)
+  federation (migration 0011): the server's Ed25519 key, the peer policy
+  (status 'allowed', 'blocked' or 'seen'), and the nonces of verified
+  requests until they expire
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0001..0009`. New migrations are added by creating
+`migrations/0001..0011`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
@@ -159,6 +168,13 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (an admin key may release another key's). | `claim` |
 | `GET` | `/v1/audit` | List audit entries. | admin |
 | `POST` | `/v1/ui/setup-tokens` | One-time token that registers the web UI's first passkey (409 once one exists). Loopback listen address only. | admin |
+| `GET` | `/v1/federation` | Domain, mode, own fingerprint and key ID, peer counts. 404 `federation_disabled` with federation off (all `/v1/federation*` routes). | admin |
+| `GET` | `/v1/federation/peers` | List peers. | admin |
+| `GET` | `/v1/federation/lookup?domain=` | Fetch a domain's server document and return its fingerprint. | admin |
+| `POST` | `/v1/federation/peers` | Add a peer (`domain`, `fingerprint`, `note`); 409 `fingerprint_mismatch` if no key has that fingerprint. | admin |
+| `POST` | `/v1/federation/peers/{domain}/block` | Block a peer. | admin |
+| `DELETE` | `/v1/federation/peers/{domain}` | Remove a peer. | admin |
+| `POST` | `/v1/federation/peers/{domain}/ping` | Send a signed ping; returns `rtt_ms`. | admin |
 | `POST` | `/v1/mcp` | MCP over HTTP; each tool calls the endpoints above with the caller's key. | any key |
 
 On a loopback listen address the server also serves the web UI
@@ -340,6 +356,11 @@ The most important ones:
 | `CONCLAVE_MAX_CONCURRENT_VERIFY` | `32` | Concurrent argon2id verifications. |
 | `CONCLAVE_RATE_LIMIT_PER_MIN` | `600` | Per-key rate limit. |
 | `CONCLAVE_AUDIT_RETENTION` | `17520h` | Audit retention duration. |
+| `CONCLAVE_FEDERATION_DOMAIN` | (off) | Turns federation on. See [federation.md](federation.md). |
+| `CONCLAVE_FEDERATION_HOST` | `127.0.0.1` | Federation listener host. |
+| `CONCLAVE_FEDERATION_PORT` | `7433` | Federation listener port. |
+| `CONCLAVE_FEDERATION_MODE` | `allowlist` | `allowlist` or `open`. |
+| `CONCLAVE_FEDERATION_INSECURE_HTTP` | off | `1`: contact peers over `http://` (tests only). |
 
 The CLI subcommands also read `CONCLAVE_API_KEY`,
 `CONCLAVE_AGENT` (an agent whose key `agent add --store` saved,
@@ -366,6 +387,17 @@ is reachable from outside the host loopback. Bare HTTP over
 a public IP is considered a misconfiguration. See
 [packaging/reverse-proxy/README.md](../packaging/reverse-proxy/README.md)
 for the nginx and Caddy examples.
+
+With federation on, the server has a second listener (default
+`127.0.0.1:7433`) that serves only `/.well-known/conclave` and
+`/fed/v1/*`. The reverse proxy sends those paths to it, with `Host` and
+the request URI unchanged; see [federation.md](federation.md#reverse-proxy).
+
+```
+   reverse proxy
+     |-- /.well-known/conclave, /fed/  ->  127.0.0.1:7433  (federation listener)
+     '-- everything else               ->  127.0.0.1:7432  (agent API, web UI)
+```
 
 ## Where the spec lives
 

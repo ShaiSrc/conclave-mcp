@@ -142,6 +142,23 @@ see SPEC-0005 §11). The recommended monitoring is:
   `request_id`, status, and duration. Pipe to your log
   aggregator and alert on 5xx rate or p99 latency.
 
+## Federation reverse proxy
+
+With `CONCLAVE_FEDERATION_DOMAIN` set, send `/.well-known/conclave` and
+`/fed/` to the federation port (default 7433). The proxy must forward
+`Host` and the request URI unchanged: the signature covers both.
+
+```nginx
+location = /.well-known/conclave { proxy_pass http://127.0.0.1:7433; proxy_set_header Host $http_host; }
+location /fed/ { proxy_pass http://127.0.0.1:7433; proxy_set_header Host $http_host; }
+```
+```caddy
+handle /.well-known/conclave { reverse_proxy 127.0.0.1:7433 }
+handle /fed/* { reverse_proxy 127.0.0.1:7433 }
+```
+
+More in [federation.md](federation.md#reverse-proxy).
+
 ## Security checklist (operator)
 
 Mirrors the v0.1 security constraints (SPEC-0001 §4):
