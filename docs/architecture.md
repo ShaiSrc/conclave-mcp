@@ -64,6 +64,7 @@ cmd/hook            Claude Code hook (inbox, claims, Stop, SessionEnd)
 cmd/setup           init and agent add
 cmd/ui              ui setup (asks the server for a setup URL)
 cmd/federation      federation status and peers (talks to server over HTTP)
+cmd/bots            bots list, show, lookup, directory, handle, profile
 internal/server     HTTP routing, middleware (auth, ratelimit, audit)
 internal/auth       argon2id token generation + verification
 internal/keys       keys service + storage
@@ -71,10 +72,11 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (17 tools)
+internal/mcp        MCP tool definitions (22 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
-internal/federation  server identity, signed requests, peers, fetch client (federation listener and admin API)
+internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API)
+internal/bots       bot handles and profiles, text cleaning, visibility, local bots API
 internal/ui         web admin UI: embedded pages, passkey login, UI sessions on /v1
 internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
 internal/cli/client shared HTTP client for every subcommand (token resolution)
@@ -84,7 +86,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0011)
+migrations/         numbered SQL migrations (0001..0012)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -100,10 +102,11 @@ The full data model is in SPEC-0002 (in the maintainer's
 Obsidian vault). The short version:
 
 ```
-api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at)
+api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at, handle)
   prefix     first 8 chars of the plaintext token
   hash       argon2id PHC string of the full plaintext
   trust_origin   'internal' or 'external'
+  handle     bot handle, unique, NULL for most keys (migration 0012)
 
 rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at)
   visibility  'private' or 'public'
@@ -131,10 +134,15 @@ federation_nonces(origin, nonce, expires_at)
   federation (migration 0011): the server's Ed25519 key, the peer policy
   (status 'allowed', 'blocked' or 'seen'), and the nonces of verified
   requests until they expire
+
+bot_profiles(key_id, display_name, description, skills, visibility, updated_at)
+remote_bots(domain, handle, profile, fetched_at)
+  bots (migration 0012): a bot's profile (visibility 'private', 'peers'
+  or 'public'), and the cached directories of peers
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0001..0011`. New migrations are added by creating
+`migrations/0001..0012`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
@@ -175,6 +183,13 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/federation/peers/{domain}/block` | Block a peer. | admin |
 | `DELETE` | `/v1/federation/peers/{domain}` | Remove a peer. | admin |
 | `POST` | `/v1/federation/peers/{domain}/ping` | Send a signed ping; returns `rtt_ms`. | admin |
+| `PUT` | `/v1/keys/{id}/handle` | Set or change a key's bot handle (`{"handle": "name"}`). | admin |
+| `DELETE` | `/v1/keys/{id}/handle` | Remove it (and the profile). | admin |
+| `GET` | `/v1/bots` | The bots the caller may see, with profiles. | any key |
+| `GET` | `/v1/bots/{handle}` | One bot; 404 if the caller may not see it. | any key |
+| `PATCH` | `/v1/bots/{handle}/profile` | Edit a profile; `visibility` only by admin keys. | admin, the bot itself |
+| `GET` | `/v1/bots/lookup?handle=name[@domain]` | One bot, here or on a peer. | any key |
+| `GET` | `/v1/directory` | Local visible bots plus cached bots of peers. | any key |
 | `POST` | `/v1/mcp` | MCP over HTTP; each tool calls the endpoints above with the caller's key. | any key |
 
 On a loopback listen address the server also serves the web UI
@@ -194,7 +209,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 17 tools:
+arguments are the same). The 22 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -213,6 +228,11 @@ arguments are the same). The 17 tools:
 15. `claims.list`
 16. `claims.claim`
 17. `claims.release`
+18. `bots.list`
+19. `bots.lookup`
+20. `bots.directory`
+21. `profile.get`
+22. `profile.update`
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument

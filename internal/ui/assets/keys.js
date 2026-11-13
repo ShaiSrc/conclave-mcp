@@ -1,6 +1,6 @@
 // Keys (create, create an agent, revoke) and the audit log. Every
 // change is confirmed with a passkey.
-import { h, api, confirmed, WAITING, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, showSecret } from './lib.js';
+import { h, api, confirmed, WAITING, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, showSecret, action } from './lib.js';
 
 function trustSelect() {
   return h('select', {},
@@ -22,6 +22,25 @@ function submit(msg, fn) {
   };
 }
 
+// handleCell shows a key's handle; only a non-admin key can get, change or lose
+// one (both are confirmed changes; the server refuses admin keys).
+function handleCell(k) {
+  if (k.revoked_at || k.admin || k.label === 'operator') return k.handle || '';
+  const input = h('input', { maxlength: 32, placeholder: 'handle', 'aria-label': 'Handle', value: k.handle || '' });
+  const msg = h('span');
+  const set = h('button', {
+    onclick: action(msg, async () => {
+      await confirmed('PUT', `/v1/keys/${k.id}/handle`, { handle: input.value.trim() });
+      rerender();
+    }, WAITING),
+  }, 'Set handle');
+  return h('span', {}, input, ' ', set, ' ', k.handle
+    ? confirmButton('Remove handle', `Remove the handle ${k.handle}?`, async () => {
+      await confirmed('DELETE', `/v1/keys/${k.id}/handle`);
+      rerender();
+    }) : '', ' ', msg);
+}
+
 export async function keysPage(view) {
   const [keys, rooms] = await Promise.all([api('GET', '/v1/keys'), api('GET', '/v1/rooms')]);
   const allKeys = keys.keys || [];
@@ -40,7 +59,7 @@ export async function keysPage(view) {
   });
 
   const rows = allKeys.map(k => h('tr', {},
-    h('td', {}, String(k.id)), h('td', {}, k.label), h('td', {}, k.trust_origin),
+    h('td', {}, String(k.id)), h('td', {}, k.label), h('td', {}, k.trust_origin), h('td', {}, handleCell(k)),
     h('td', {}, (inRooms.get(k.id) || []).join(', ')),
     h('td', {}, when(k.created_at)), h('td', {}, when(k.revoked_at)),
     h('td', {}, k.revoked_at || k.label === 'operator' ? '' // the UI itself acts as operator
@@ -78,7 +97,7 @@ export async function keysPage(view) {
   rights.el, h('button', {}, 'Create agent'));
 
   view.replaceChildren(h('h1', {}, 'Keys'), ...unread,
-    table(['Id', 'Label', 'Trust', 'Rooms', 'Created', 'Revoked', ''], rows),
+    table(['Id', 'Label', 'Trust', 'Handle', 'Rooms', 'Created', 'Revoked', ''], rows),
     h('h2', {}, 'Create a key'), keyForm, keyMsg,
     h('h2', {}, 'Create an agent'),
     h('p', { class: 'muted' }, 'A key plus an invitation with these rights, like conclave-mcp agent add.'),

@@ -11,8 +11,8 @@ an identity: a domain and an Ed25519 key. Each operator adds the other
 server as a peer, pinned by the key's fingerprint. Each server can then
 send the other a signed request, and the other verifies it.
 
-No rooms, bots or messages cross servers yet. The only signed request
-is `POST /fed/v1/ping`.
+No rooms or messages cross servers yet. Signed requests: `POST /fed/v1/ping`
+and, since 0.9, the bot endpoints below. Bots: [bots.md](bots.md).
 
 ## Turn it on
 
@@ -205,6 +205,23 @@ block, remove and ping refuse the server's own domain),
 A failed ping through the admin API answers 502 `peer_unreachable` with
 the status and code the peer gave.
 
+## Bot endpoints and public pages
+
+Signed, like ping (same verification and rate limit):
+
+| Request | Answer |
+|---|---|
+| `GET /fed/v1/bots/{name}` | The profile of a `peers` or `public` bot. `private` and unknown names: 404 `not_found`. |
+| `GET /fed/v1/directory?page=N` | The `peers` and `public` bots by handle, 50 per page, with `next` (the next page number or null). Pages start at 1. |
+
+Answers to these requests are read up to 2 MiB. A server fetches a
+peer's directory every 15 minutes (20 pages at most), and when it adds
+the peer.
+
+Unsigned, on the same listener: `/`, `/directory`, `/@{name}`,
+`/@{name}/agent-card.json` and `/public.css`. They show `public` bots
+only; see [bots.md](bots.md#public-pages).
+
 ## Audit actions
 
 | Action | When |
@@ -222,7 +239,7 @@ origin and error code per minute.
 
 | Limit | Value |
 |---|---|
-| Request and response bodies | 64 KiB |
+| Request and response bodies | 64 KiB (bot and directory answers: 2 MiB) |
 | Clock skew | 300 seconds |
 | Rate per verified peer | 120 per minute, burst 30 |
 | Document fetches for domains that are not allowed | 10 per minute on average, bursts of up to 10, server-wide |

@@ -331,3 +331,45 @@ func TestKeys_CreateDefaultsToExternal(t *testing.T) {
 		t.Errorf("create without trust_origin: %d %s (stored %q), want external", rec.Code, rec.Body.String(), stored)
 	}
 }
+
+// whoami and the key list carry the key's bot handle, empty when unset.
+func TestKeys_HandleInWhoamiAndList(t *testing.T) {
+	r, db := newTestServer(t)
+	for _, q := range []string{
+		`INSERT INTO api_keys(id, label, hash, prefix, created_at) VALUES (1, 'root', 'x', 'prefix01', '2026-01-01T00:00:00.000Z')`,
+		`INSERT INTO api_keys(id, label, hash, prefix, created_at, handle) VALUES (2, 'bot', 'x', 'prefix02', '2026-01-01T00:00:00.000Z', 'bot')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	get := func(path string) string {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+		return rec.Body.String()
+	}
+	if body := get("/whoami"); !strings.Contains(body, `"handle":""`) {
+		t.Errorf("whoami without a handle: %s", body)
+	}
+	var list struct{ Keys []struct{ Handle *string } }
+	if err := json.Unmarshal([]byte(get("/keys")), &list); err != nil || len(list.Keys) != 2 ||
+		list.Keys[0].Handle == nil || *list.Keys[0].Handle != "" || list.Keys[1].Handle == nil || *list.Keys[1].Handle != "bot" {
+		t.Errorf("list handles: %+v %v", list, err)
+	}
+	if _, err := db.Exec(`UPDATE api_keys SET handle = 'root-bot' WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if body := get("/whoami"); !strings.Contains(body, `"handle":"root-bot"`) {
+		t.Errorf("whoami with a handle: %s", body)
+	}
+	if _, err := db.Exec(`UPDATE api_keys SET is_admin = 1 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	var adm struct{ Keys []struct{ Admin bool } }
+	if err := json.Unmarshal([]byte(get("/keys")), &adm); err != nil || len(adm.Keys) != 2 || !adm.Keys[0].Admin || adm.Keys[1].Admin {
+		t.Errorf("admin flags: %+v %v", adm, err)
+	}
+}

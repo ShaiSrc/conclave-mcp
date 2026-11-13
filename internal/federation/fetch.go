@@ -144,7 +144,7 @@ func (f *Fetcher) document(ctx context.Context, domain string, allowPrivate bool
 	if err != nil {
 		return Document{}, err
 	}
-	status, body, err := f.send(req, allowPrivate)
+	status, body, err := f.send(req, allowPrivate, maxBody)
 	if err != nil {
 		return Document{}, err
 	}
@@ -180,20 +180,20 @@ func (f *Fetcher) newRequest(ctx context.Context, method, domain, path string, b
 	return http.NewRequestWithContext(ctx, method, scheme+"://"+domain+path, bytes.NewReader(body))
 }
 
-// send does req and returns the status and body, read up to maxBody.
-func (f *Fetcher) send(req *http.Request, allowPrivate bool) (int, []byte, error) {
+// send does req and returns the status and body, read up to limit bytes.
+func (f *Fetcher) send(req *http.Request, allowPrivate bool, limit int) (int, []byte, error) {
 	req = req.WithContext(context.WithValue(req.Context(), allowPrivateKey{}, allowPrivate))
 	resp, err := f.client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(limit)+1))
 	if err != nil {
 		return 0, nil, err
 	}
-	if len(body) > maxBody {
-		return 0, nil, fmt.Errorf("response from %s is over %d bytes", req.URL.Host, maxBody)
+	if len(body) > limit {
+		return 0, nil, fmt.Errorf("response from %s is over %d bytes", req.URL.Host, limit)
 	}
 	return resp.StatusCode, body, nil
 }
@@ -210,7 +210,7 @@ func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error
 		return 0, err
 	}
 	start := time.Now()
-	status, resp, err := s.fetch.send(req, s.fetch.isAllowed(domain))
+	status, resp, err := s.fetch.send(req, s.fetch.isAllowed(domain), maxBody)
 	rtt := time.Since(start)
 	if err != nil {
 		return 0, err
