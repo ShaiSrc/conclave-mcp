@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	maxBotsBody    = 256 << 10 // responses to bot and directory requests
-	directoryPage  = 100       // bots per /fed/v1/directory page
-	directoryPages = 10        // pages read per peer and refresh
+	maxBotsBody    = 2 << 20 // responses to bot and directory requests
+	directoryPage  = 50      // bots per /fed/v1/directory page
+	directoryPages = 20      // pages read per peer and refresh
 	directoryEvery = 15 * time.Minute
 )
 
@@ -43,7 +43,7 @@ func (s *Service) handleFedBot(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case err == nil && p.Visibility != bots.Private:
-		writeJSON(w, http.StatusOK, p)
+		writeBotJSON(w, p)
 	case err == nil, errors.Is(err, bots.ErrInvalid), errors.Is(err, bots.ErrNotFound):
 		writeErr(w, r, http.StatusNotFound, "not_found", "no such bot")
 	default:
@@ -79,7 +79,16 @@ func (s *Service) handleFedDirectory(w http.ResponseWriter, r *http.Request) {
 			next = &n
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"bots": out, "next": next})
+	writeBotJSON(w, map[string]any{"bots": out, "next": next})
+}
+
+// writeBotJSON writes a 200 without escaping <, > and &, which would
+// take 6 bytes each and push a full page over the peer's fetch cap.
+func writeBotJSON(w http.ResponseWriter, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(body)
 }
 
 // BotRoutes mounts on the /v1 router, which authenticates every
@@ -209,7 +218,7 @@ func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, name, dom
 }
 
 // getSigned sends a signed GET of path to domain and returns the
-// status and the body, read up to 256 KiB.
+// status and the body, read up to 2 MiB.
 func (s *Service) getSigned(ctx context.Context, domain, path string) (int, []byte, error) {
 	req, err := s.fetch.newRequest(ctx, http.MethodGet, domain, path, nil)
 	if err != nil {
@@ -273,7 +282,7 @@ func (s *Service) refreshLogged(ctx context.Context, domain string) {
 	}
 }
 
-// refreshDirectory reads up to 10 pages of domain's directory and
+// refreshDirectory reads up to 20 pages of domain's directory and
 // replaces its cached bots with them, cleaned. Entries with an invalid
 // handle, one naming a server included, are dropped. On an error the
 // old rows stay. A peer no longer allowed when the rows are written

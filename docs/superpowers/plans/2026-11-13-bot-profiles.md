@@ -105,13 +105,13 @@ A revoked key's handle stays reserved, so it cannot be reused for an impostor. R
 
 **Behaviour, as in the spec:**
 - `GET /fed/v1/bots/{name}`, behind `Verify`.
-- `GET /fed/v1/directory?page=N`, behind `Verify`. 100 per page; `{"bots":[...],"next":N|null}`.
+- `GET /fed/v1/directory?page=N`, behind `Verify`. 50 per page; `{"bots":[...],"next":N|null}`.
 - `GET /v1/bots/lookup?handle=` and `GET /v1/directory` for any key.
-- Outbound signed GETs go through the `Fetcher` client and its dialer rules. Responses are capped at 256 KiB.
+- Outbound signed GETs go through the `Fetcher` client and its dialer rules. Responses are capped at 2 MiB.
 - Remote profiles are cleaned and truncated on receipt. An entry whose handle is invalid is dropped. Each entry is tied to the domain that was asked.
 - The refresh loop:
   - runs every 15 minutes and right after a peer is added;
-  - fetches at most 10 pages per peer;
+  - fetches at most 20 pages per peer;
   - deletes a peer's rows when it is removed or blocked;
   - stops with the context.
 - The `bots` package must not import `federation`. Pass a small interface or a function into federation instead.

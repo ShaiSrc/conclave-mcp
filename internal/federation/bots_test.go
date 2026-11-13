@@ -170,7 +170,7 @@ func TestFedBots_SignedOnly(t *testing.T) {
 		p.Visibility != bots.Peers {
 		t.Errorf("bot: %d %s", rec.Code, rec.Body)
 	}
-	if rec := serve(svc, signedGet(t, peer, "/fed/v1/directory")); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"handle":"alice"`) {
+	if rec := serve(svc, signedGet(t, peer, "/fed/v1/directory")); rec.Code != 200 || !strings.Contains(rec.Body.String(), "\"handle\":\"alice\"") {
 		t.Errorf("directory: %d %s", rec.Code, rec.Body)
 	}
 }
@@ -190,10 +190,10 @@ func TestFedBots_PrivateIs404(t *testing.T) {
 	}
 }
 
-// The directory lists peers and public bots, 100 a page, by handle.
+// The directory lists peers and public bots, 50 a page, by handle.
 func TestFedDirectory_Paging(t *testing.T) {
 	svc := newLocal(t, "allowlist")
-	for i := range 101 {
+	for i := range 51 {
 		addBot(t, svc.db, fmt.Sprintf("bot%03d", i), []string{bots.Peers, bots.Public}[i%2])
 	}
 	addBot(t, svc.db, "aaa-private", bots.Private)
@@ -212,10 +212,10 @@ func TestFedDirectory_Paging(t *testing.T) {
 		return out.Bots, out.Next
 	}
 	b, next := page("")
-	if len(b) != 100 || b[0].Handle != "bot000" || b[99].Handle != "bot099" || next == nil || *next != 2 {
+	if len(b) != 50 || b[0].Handle != "bot000" || b[49].Handle != "bot049" || next == nil || *next != 2 {
 		t.Errorf("page 1: %d bots, next %v", len(b), next)
 	}
-	if b, next = page("?page=2"); len(b) != 1 || b[0].Handle != "bot100" || next != nil {
+	if b, next = page("?page=2"); len(b) != 1 || b[0].Handle != "bot050" || next != nil {
 		t.Errorf("page 2: %+v, next %v", b, next)
 	}
 	if b, next = page("?page=3"); len(b) != 0 || next != nil {
@@ -311,13 +311,13 @@ func TestLookup_FederationOff(t *testing.T) {
 }
 
 // A remote answer is signed for, checked and cleaned: an answer for
-// another bot or another server is refused, as is one over 256 KiB.
+// another bot or another server is refused, as is one over 2 MiB.
 func TestLookup_RemoteAnswerChecked(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	answers := map[string]string{
 		"/fed/v1/bots/bob":  `{"handle":"bob","display_name":"‮Bob\u0000","description":"hi​","skills":[{"id":"x","name":"X"},{"id":"Bad Id"}],"visibility":"peers"}`,
 		"/fed/v1/bots/wide": `{"handle":"wide","description":"` + strings.Repeat("a", 100<<10) + `"}`,
-		"/fed/v1/bots/big":  `{"handle":"big","description":"` + strings.Repeat("a", 300<<10) + `"}`,
+		"/fed/v1/bots/big":  `{"handle":"big","description":"` + strings.Repeat("a", 3<<20) + `"}`,
 		"/fed/v1/bots/eve":  `{"handle":"mallory"}`,
 		"/fed/v1/bots/carl": `{"handle":"carl@other.example"}`,
 		"/fed/v1/bots/junk": `not json`,
@@ -381,7 +381,7 @@ func TestDirectory_Refresh(t *testing.T) {
 	wantList(t, addresses(t, botDo(svc, svc.db, plainKey, "/v1/directory")), "alice@b.example", "pub@"+d+" remote")
 }
 
-// A refresh reads at most 10 pages, drops entries with an invalid
+// A refresh reads at most 20 pages, drops entries with an invalid
 // handle or another server's, and cleans the text. A failed refresh
 // keeps the rows.
 func TestDirectory_RefreshChecksEntries(t *testing.T) {
@@ -400,22 +400,22 @@ func TestDirectory_RefreshChecksEntries(t *testing.T) {
 	if err := svc.refreshDirectory(ctx, d); err != nil {
 		t.Fatal(err)
 	}
-	if n := pages.Load(); n != 10 {
-		t.Errorf("pages fetched: %d, want 10", n)
+	if n := pages.Load(); n != 20 {
+		t.Errorf("pages fetched: %d, want 20", n)
 	}
 	got := addresses(t, botDo(svc, svc.db, plainKey, "/v1/directory"))
-	if len(got) != 10 || got[0] != "p1@"+d+" remote" {
+	if len(got) != 20 || got[0] != "p1@"+d+" remote" {
 		t.Errorf("directory: %q", got)
 	}
-	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ? AND json_extract(profile, '$.display_name') = 'P'`, d); n != 10 {
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ? AND json_extract(profile, '$.display_name') = 'P'`, d); n != 20 {
 		t.Errorf("cleaned rows: %d", n)
 	}
 	failing.Store(true)
 	if err := svc.refreshDirectory(ctx, d); err == nil {
 		t.Error("refresh from a failing peer succeeded")
 	}
-	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, d); n != 10 {
-		t.Errorf("rows after a failed refresh: %d, want 10", n)
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, d); n != 20 {
+		t.Errorf("rows after a failed refresh: %d, want 20", n)
 	}
 }
 
@@ -484,4 +484,47 @@ func TestDirectory_RefreshAfterAdd(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop with its context")
 	}
+}
+
+// A full directory page of maximum-size profiles full of <, > and &
+// stays under the fetch cap, and a refresh accepts it.
+func TestDirectory_FullPageFitsCap(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	peer := newPeer(t, svc)
+	allow(t, svc, peer.id)
+	mark := func(n int) string { return strings.Repeat("<&>", n/3+1)[:n] }
+	skills := make([]bots.Skill, 20)
+	for i := range skills {
+		skills[i] = bots.Skill{ID: fmt.Sprintf("skill-%02d", i), Name: mark(64), Description: mark(300)}
+	}
+	for i := range directoryPage {
+		h := fmt.Sprintf("bot%03d", i)
+		addBot(t, peer.db, h, bots.Public)
+		name, desc := mark(64), mark(1000)
+		if _, err := bots.NewStore(peer.db).Update(ctx, h, bots.Patch{DisplayName: &name, Description: &desc, Skills: &skills}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := serve(peer, signedGet2(t, svc.id, peer.id.Domain, "/fed/v1/directory"))
+	if rec.Code != 200 || rec.Body.Len() >= maxBotsBody || strings.Contains(rec.Body.String(), "\\u003c") {
+		t.Fatalf("page: status %d, %d bytes (cap %d)", rec.Code, rec.Body.Len(), maxBotsBody)
+	}
+	if err := svc.refreshDirectory(ctx, peer.id.Domain); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, peer.id.Domain); n != directoryPage {
+		t.Errorf("cached bots: %d, want %d", n, directoryPage)
+	}
+}
+
+// signedGet2 is a GET of path on domain, signed by id.
+func signedGet2(t *testing.T, id *Identity, domain, path string) *http.Request {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Host = domain
+	if err := id.SignRequest(req, domain, nil); err != nil {
+		t.Fatal(err)
+	}
+	return req
 }
