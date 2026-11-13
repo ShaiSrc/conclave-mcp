@@ -119,7 +119,7 @@ func TestHandle_SetChangeRemove(t *testing.T) {
 	}
 	rec = do(s, adminC(admin), "GET", "/v1/bots/agent-c", "")
 	if p := profileOf(t, rec); p.Handle != "agent-c" || p.Visibility != Private || p.DisplayName != "" ||
-		!strings.Contains(rec.Body.String(), `"skills":[]`) {
+		!strings.Contains(rec.Body.String(), `"skills":[]`) || strings.Contains(rec.Body.String(), "updated_at") {
 		t.Errorf("a handle without a profile row must read as an empty private profile: %s", rec.Body)
 	}
 	want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent-d"}`), 200, "")
@@ -256,6 +256,66 @@ func TestProfile_WhoEdits(t *testing.T) {
 	}
 }
 
+// A bot's save writes only the fields it sent: it keeps the visibility
+// and the other fields an admin set, also when the bot read the profile
+// before the admin wrote it. A first save fills the rest with defaults.
+func TestProfile_BotSaveKeepsAdminChanges(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	pub, desc, name := Public, "set by the admin", "Bot name"
+	if _, err := w.s.Update(ctx, "peers", Patch{Visibility: &pub}, true); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := w.s.Update(ctx, "peers", Patch{DisplayName: &name}, false); err != nil || p.Visibility != Public {
+		t.Errorf("after the admin: %+v, %v", p, err)
+	}
+
+	priv := Private
+	w.s.afterRead = func() {
+		w.s.afterRead = nil
+		if _, err := w.s.Update(ctx, "peers", Patch{Visibility: &priv, Description: &desc}, true); err != nil {
+			t.Error(err)
+		}
+	}
+	name = "Renamed"
+	p, err := w.s.Update(ctx, "peers", Patch{DisplayName: &name}, false)
+	if err != nil || p.Visibility != Private || p.Description != desc || p.DisplayName != name {
+		t.Errorf("returned %+v, %v", p, err)
+	}
+	if p, err := w.s.Get(ctx, "peers"); err != nil || p.Visibility != Private || p.Description != desc || p.DisplayName != name {
+		t.Errorf("stored %+v, %v", p, err)
+	}
+
+	fresh := addKey(t, w.db, "fresh", false)
+	if err := w.s.SetHandle(ctx, fresh, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	if p, err := w.s.Update(ctx, "fresh", Patch{Description: &desc}, false); err != nil || p.Visibility != Private ||
+		p.Description != desc || p.DisplayName != "" || p.Skills == nil || len(p.Skills) != 0 {
+		t.Errorf("first save: %+v, %v", p, err)
+	}
+}
+
+// Every local profile carries its key's trust origin.
+func TestProfile_TrustOrigin(t *testing.T) {
+	w := newWorld(t)
+	if _, err := w.db.Exec(`UPDATE api_keys SET trust_origin = 'external' WHERE id = ?`, w.pub); err != nil {
+		t.Fatal(err)
+	}
+	for h, origin := range map[string]string{"pub": "external", "peers": "internal"} {
+		if p := profileOf(t, do(w.s, keyC(w.plain), "GET", "/v1/bots/"+h, "")); p.TrustOrigin != origin {
+			t.Errorf("%s: trust origin %q, want %q", h, p.TrustOrigin, origin)
+		}
+	}
+	if body := do(w.s, keyC(w.plain), "GET", "/v1/bots", "").Body.String(); !strings.Contains(body, `"handle":"pub"`) ||
+		!strings.Contains(body, `"trust_origin":"external"`) || !strings.Contains(body, `"trust_origin":"internal"`) {
+		t.Errorf("list: %s", body)
+	}
+	if p := profileOf(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"description":"d"}`)); p.TrustOrigin != "external" {
+		t.Errorf("patch answer: %+v", p)
+	}
+}
+
 func TestVisibility_Matrix(t *testing.T) {
 	w := newWorld(t)
 	gone := addKey(t, w.db, "gone", false)
@@ -324,6 +384,7 @@ func TestAudit_Rows(t *testing.T) {
 	want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"bob"}`), 200, "")
 	want(t, do(s, keyC(k), "PATCH", "/v1/bots/bob/profile", `{"description":"d"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"B","visibility":"public"}`), 200, "")
+	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"C","description":"d","visibility":"public"}`), 200, "")
 	want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 204, "")
 
 	rows, err := db.Query(`SELECT actor_key_id, action, target_type, target_id, result, detail FROM audit ORDER BY id`)
@@ -344,6 +405,7 @@ func TestAudit_Rows(t *testing.T) {
 		fmt.Sprintf(`%d bot.handle.set key %d ok {"handle":"bob"}`, admin, k),
 		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private"}`, k),
 		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public"}`, admin),
 		fmt.Sprintf(`%d bot.handle.remove key %d ok {"handle":"bob"}`, admin, k),
 	}
 	if !slices.Equal(got, wantRows) {

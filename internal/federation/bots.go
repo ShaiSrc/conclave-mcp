@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/bots"
@@ -20,9 +21,14 @@ import (
 
 const (
 	maxBotsBody    = 2 << 20 // responses to bot and directory requests
-	directoryPage  = 50      // bots per /fed/v1/directory page
+	directoryPage  = 50      // bots per /fed/v1/directory page, and kept of a fetched one
 	directoryPages = 20      // pages read per peer and refresh
+	maxPeerBots    = 1000    // cached bots per peer
+	maxDirectory   = 5000    // entries of /v1/directory
 	directoryEvery = 15 * time.Minute
+	refreshTimeout = 30 * time.Second // per peer and refresh
+	lookupsPerKey  = 60               // remote lookups per key and minute
+	lookupKeyBurst = 10
 )
 
 // entry is a bot as a lookup or the directory return it: its profile,
@@ -33,16 +39,36 @@ type entry struct {
 	Remote  bool   `json:"remote"`
 }
 
-// handleFedBot answers GET /fed/v1/bots/{name}: a peers or public bot.
-// Private and unknown names get the same 404.
+// shared returns the least visibility the verified origin reads: peers
+// for an allowed peer, public for a seen one (open mode).
+func (s *Service) shared(ctx context.Context) (string, error) {
+	p, err := s.peers.Get(ctx, OriginFrom(ctx))
+	switch {
+	case err != nil && !errors.Is(err, ErrPeerNotFound):
+		return "", err
+	case p.Status == statusAllowed:
+		return bots.Peers, nil
+	}
+	return bots.Public, nil
+}
+
+// handleFedBot answers GET /fed/v1/bots/{name}: a public bot, or a
+// peers one for an allowed peer. Anything else gets the 404 of an
+// unknown name.
 func (s *Service) handleFedBot(w http.ResponseWriter, r *http.Request) {
+	least, err := s.shared(r.Context())
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
 	h, err := bots.NormalizeHandle(chi.URLParam(r, "name"))
 	var p bots.Profile
 	if err == nil {
 		p, err = s.botStore.Get(r.Context(), h)
 	}
 	switch {
-	case err == nil && p.Visibility != bots.Private:
+	case err == nil && (p.Visibility == bots.Public || p.Visibility == least):
+		p.TrustOrigin = ""
 		writeBotJSON(w, p)
 	case err == nil, errors.Is(err, bots.ErrInvalid), errors.Is(err, bots.ErrNotFound):
 		writeErr(w, r, http.StatusNotFound, "not_found", "no such bot")
@@ -52,8 +78,8 @@ func (s *Service) handleFedBot(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleFedDirectory answers GET /fed/v1/directory?page=N (from 1): the
-// peers and public bots, 100 a page, by handle, and the next page
-// number or null.
+// public bots, and the peers ones for an allowed peer, 50 a page, by
+// handle, and the next page number or null.
 func (s *Service) handleFedDirectory(w http.ResponseWriter, r *http.Request) {
 	page := 1
 	if q := r.URL.Query().Get("page"); q != "" {
@@ -64,12 +90,20 @@ func (s *Service) handleFedDirectory(w http.ResponseWriter, r *http.Request) {
 		}
 		page = n
 	}
-	// ponytail: loads every listed bot for each page; page in SQL if
-	// directories grow into the thousands.
-	all, err := s.botStore.List(r.Context(), bots.Peers)
+	least, err := s.shared(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
+	}
+	// ponytail: loads every listed bot for each page; page in SQL if
+	// directories grow into the thousands.
+	all, err := s.botStore.List(r.Context(), least)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	for i := range all {
+		all[i].TrustOrigin = ""
 	}
 	out, next := []bots.Profile{}, (*int)(nil)
 	if pages := (len(all) + directoryPage - 1) / directoryPage; page <= pages {
@@ -121,6 +155,7 @@ func (a botAPI) local(p bots.Profile) entry {
 }
 
 func (a botAPI) lookup(w http.ResponseWriter, r *http.Request) {
+	c, _ := auth.FromContext(r.Context())
 	name, domain, qualified := strings.Cut(r.URL.Query().Get("handle"), "@")
 	h, err := bots.NormalizeHandle(name)
 	if err != nil {
@@ -138,11 +173,10 @@ func (a botAPI) lookup(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if d != a.svc.id.Domain {
-			a.svc.lookupRemote(w, r, h, d)
+			a.svc.lookupRemote(w, r, c.KeyID, h, d)
 			return
 		}
 	}
-	c, _ := auth.FromContext(r.Context())
 	p, err := a.store.Get(r.Context(), h)
 	switch {
 	case err == nil && bots.Visible(c, p):
@@ -161,14 +195,16 @@ func (a botAPI) directory(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
+	// ponytail: one answer of at most 5000 entries, the rest left out;
+	// page it (?page=N, like /fed/v1/directory) if directories outgrow it.
 	out := []entry{}
 	for _, p := range all {
-		if bots.Visible(c, p) {
+		if bots.Visible(c, p) && len(out) < maxDirectory {
 			out = append(out, a.local(p))
 		}
 	}
-	if a.svc != nil {
-		remote, err := a.svc.cachedBots(r.Context())
+	if a.svc != nil && len(out) < maxDirectory {
+		remote, err := a.svc.cachedBots(r.Context(), maxDirectory-len(out))
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 			return
@@ -178,27 +214,29 @@ func (a botAPI) directory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"bots": out})
 }
 
-// lookupRemote asks domain for its bot name, if the policy lets the
-// peer in. A domain that is not allowed spends the budget of fetches
-// for strangers.
-func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, name, domain string) {
+// lookupRemote asks domain for its bot name, for key keyID. Only an
+// allowed peer, or a seen one in open mode, is asked: a lookup cannot
+// make the server contact any other host. Each key has its own limit.
+func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int64, name, domain string) {
+	if lim := s.lookupLimiter(keyID); !lim.Allow() {
+		w.Header().Set("Retry-After", retryAfter(lim))
+		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "too many remote lookups, try again later")
+		return
+	}
 	peer, err := s.peers.Get(r.Context(), domain)
 	if err != nil && !errors.Is(err, ErrPeerNotFound) {
 		s.fail(w, r, err)
 		return
 	}
-	if !s.admits(peer) {
+	if peer.Status != statusAllowed && (s.mode != modeOpen || peer.Status != statusSeen) {
 		writeErr(w, r, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
-		return
-	}
-	if peer.Status != statusAllowed && !s.fetch.limit.Allow() {
-		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", ErrFetchLimited.Error())
 		return
 	}
 	status, body, err := s.getSigned(r.Context(), domain, "/fed/v1/bots/"+name)
 	switch {
 	case err != nil:
-		writeErr(w, r, http.StatusBadGateway, "peer_unreachable", err.Error())
+		s.logger.Warn("federation bot lookup failed", "domain", domain, "err", err)
+		writeErr(w, r, http.StatusBadGateway, "peer_unreachable", "peer did not answer")
 		return
 	case status == http.StatusNotFound:
 		writeErr(w, r, http.StatusNotFound, "not_found", "no such bot on "+domain)
@@ -230,9 +268,23 @@ func (s *Service) getSigned(ctx context.Context, domain, path string) (int, []by
 	return s.fetch.send(req, s.fetch.isAllowed(domain), maxBotsBody)
 }
 
-// cachedBots returns the cached bots of peers, by domain and handle.
-func (s *Service) cachedBots(ctx context.Context) ([]entry, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT domain, profile FROM remote_bots ORDER BY domain, handle`)
+// lookupLimiter returns the remote-lookup limiter of key keyID.
+// ponytail: one per key, never evicted; keys are bounded by the table.
+func (s *Service) lookupLimiter(keyID int64) *rate.Limiter {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	lim := s.keyLimiters[keyID]
+	if lim == nil {
+		lim = rate.NewLimiter(rate.Every(time.Minute/lookupsPerKey), lookupKeyBurst)
+		s.keyLimiters[keyID] = lim
+	}
+	return lim
+}
+
+// cachedBots returns up to limit cached bots of peers, by domain and
+// handle.
+func (s *Service) cachedBots(ctx context.Context, limit int) ([]entry, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT domain, profile FROM remote_bots ORDER BY domain, handle LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -247,18 +299,37 @@ func (s *Service) cachedBots(ctx context.Context) ([]entry, error) {
 		if err := json.Unmarshal([]byte(profile), &p); err != nil {
 			return nil, err
 		}
+		p.TrustOrigin = bots.External
 		out = append(out, entry{Profile: p, Address: p.Handle + "@" + domain, Remote: true})
 	}
 	return out, rows.Err()
 }
 
-// refreshSoon asks Run to refresh domain's directory next. With Run
-// busy or not running the request is dropped; the 15-minute refresh
-// catches up.
+// refreshSoon asks the refresh loop to refresh domain's directory next.
+// With the loop busy or not running the request is dropped; the
+// 15-minute refresh catches up.
 func (s *Service) refreshSoon(domain string) {
 	select {
 	case s.refresh <- domain:
 	default:
+	}
+}
+
+// refreshLoop refreshes the cached directories of the allowed peers
+// every 15 minutes, and of a peer right after it is added, until ctx is
+// done.
+func (s *Service) refreshLoop(ctx context.Context) {
+	t := time.NewTicker(directoryEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.refreshDirectories(ctx)
+		case domain := <-s.refresh:
+			s.refreshLogged(ctx, domain)
+		}
 	}
 }
 
@@ -276,20 +347,25 @@ func (s *Service) refreshDirectories(ctx context.Context) {
 	}
 }
 
+// refreshLogged refreshes domain's directory within 30 seconds and logs
+// a failure, unless ctx ended.
 func (s *Service) refreshLogged(ctx context.Context, domain string) {
-	if err := s.refreshDirectory(ctx, domain); err != nil && ctx.Err() == nil {
+	peerCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
+	defer cancel()
+	if err := s.refreshDirectory(peerCtx, domain); err != nil && ctx.Err() == nil {
 		s.logger.Warn("federation directory refresh failed", "domain", domain, "err", err)
 	}
 }
 
 // refreshDirectory reads up to 20 pages of domain's directory and
-// replaces its cached bots with them, cleaned. Entries with an invalid
-// handle, one naming a server included, are dropped. On an error the
-// old rows stay. A peer no longer allowed when the rows are written
-// gets none.
+// replaces its cached bots with them, cleaned: at most 50 of a page and
+// 1000 in all. Entries with an invalid handle, one naming a server
+// included, are dropped. On an error the old rows stay. A peer no longer
+// allowed when the rows are written gets none.
 func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 	var got []bots.Profile
-	for page := 1; page <= directoryPages; page++ {
+	cut := false
+	for page := 1; page <= directoryPages && len(got) < maxPeerBots; page++ {
 		status, body, err := s.getSigned(ctx, domain, "/fed/v1/directory?page="+strconv.Itoa(page))
 		if err != nil {
 			return err
@@ -304,14 +380,20 @@ func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 		if err := json.Unmarshal(body, &out); err != nil {
 			return fmt.Errorf("directory of %s: %w", domain, err)
 		}
+		if len(out.Bots) > directoryPage {
+			out.Bots, cut = out.Bots[:directoryPage], true
+		}
 		for _, p := range out.Bots {
-			if p, ok := bots.CleanRemote(p); ok {
+			if p, ok := bots.CleanRemote(p); ok && len(got) < maxPeerBots {
 				got = append(got, p)
 			}
 		}
 		if out.Next == nil {
 			break
 		}
+	}
+	if cut {
+		s.logger.Warn("federation directory page over 50 bots, the rest dropped", "domain", domain)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)

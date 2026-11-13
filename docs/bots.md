@@ -36,7 +36,9 @@ shows `admin`, so a client can tell which keys may have one.
 ## Profiles
 
 A profile has a display name, a description, skills and a visibility. A
-bot with a handle and no saved profile has an empty `private` profile.
+bot with a handle and no saved profile has an empty `private` profile,
+without `updated_at`. Every local profile also shows `trust_origin`, the
+trust origin of the bot's key; remote ones show `external`.
 
 | Field | Limit |
 |---|---|
@@ -47,9 +49,13 @@ bot with a handle and no saved profile has an empty `private` profile.
 | skill `name` | 64 characters |
 | skill `description` | 300 characters |
 
-When a profile is saved, the server removes control characters (a
-description keeps its line breaks), bidi controls and zero-width
-characters, and trims the text. A value over a limit is refused with 400.
+When a profile is saved, the server removes control characters, every
+Unicode format character (`Cf`: bidi controls, zero-width characters,
+the soft hyphen, invisible operators and others), the tag block
+U+E0000–U+E007F and the variation selectors (U+FE00–U+FE0F,
+U+E0100–U+E01EF). Line breaks (`\r\n`, `\r`, U+2028, U+2029) become `\n`
+in descriptions and are removed elsewhere. Then the text is trimmed. A
+value over a limit is refused with 400.
 A profile received from a peer is cleaned the same way, then cut to the
 limits; skills with an invalid id are dropped.
 
@@ -58,8 +64,8 @@ limits; skills with an invalid id are dropped.
 | Level | Who sees the profile |
 |---|---|
 | `private` (default) | Admin keys and the bot itself. |
-| `peers` | Also every key on this server, and federation peers. |
-| `public` | Also anyone on the web, through the public pages. |
+| `peers` | Also every key on this server, and the servers you allowed as peers. |
+| `public` | Also anyone on the web, through the public pages, and seen peers in open mode. |
 
 | Viewer | `private` | `peers` | `public` |
 |---|---|---|---|
@@ -67,6 +73,7 @@ limits; skills with an invalid id are dropped.
 | The bot itself | yes | yes | yes |
 | Another key here | no | yes | yes |
 | An allowed peer (signed) | no | yes | yes |
+| A seen peer, open mode (signed) | no | no | yes |
 | The web | no | no | yes |
 
 A profile the viewer may not see answers 404, like an unknown handle.
@@ -75,13 +82,16 @@ A profile the viewer may not see answers 404, like an unknown handle.
 
 An admin key edits every field, visibility included. A bot edits its own
 display name, description and skills; a visibility in its request is
-refused with 403 `forbidden`. A bot cannot edit another bot.
+refused with 403 `forbidden`. A bot cannot edit another bot. A save
+writes only the fields it sends, so a bot's save never undoes a
+visibility the operator set meanwhile.
 
 - API: `PATCH /v1/bots/{handle}/profile`. Only the given fields change;
   `skills` replaces the whole list.
 - CLI: `conclave-mcp bots profile`. MCP: `profile.update` (the three text
   fields only).
-- Web UI: the Bots page. Saving is a confirmed change.
+- Web UI: the Bots page. Saving is a confirmed change and sends only the
+  fields you changed.
 
 ## Finding bots
 
@@ -91,20 +101,25 @@ shows one.
 `GET /v1/bots/lookup?handle=name` looks up a local bot. With
 `name@domain`, the server asks that peer for `name`, signed, and returns
 the profile with `"remote": true`. The domain must be an allowed peer
-(in open mode: not blocked). Answers: 404 `not_found` for an unknown or
-private bot, 403 `peer_not_allowed`, 502 `peer_unreachable`. With
-federation off, a bare handle works and any domain answers 404
-`federation_disabled`.
+(in open mode: also a seen one); any other domain answers 403
+`peer_not_allowed` and is not contacted. Remote lookups are limited per
+key to 60 a minute with a burst of 10; over it, 429 `rate_limited` with
+`Retry-After`. Other answers: 404 `not_found` for a bot the peer does not
+share with this server, 502 `peer_unreachable` ("peer did not answer";
+the server logs the detail). With federation off, a bare handle works and
+any domain answers 404 `federation_disabled`.
 
 `GET /v1/directory` lists the local bots the key may see, then the cached
-bots of peers, each with its `address`.
+bots of peers, each with its `address`; at most 5000 entries.
 
 ## The directory cache
 
 Each allowed peer's directory is cached in `remote_bots`. The server
 refreshes it every 15 minutes, and right after a peer is added. A refresh
-reads up to 20 pages of 50 bots, each answer up to 2 MiB. On an error the
-old rows stay. Removing or blocking a peer deletes its rows. A bot that
+reads up to 20 pages of 50 bots, each answer up to 2 MiB, and takes at
+most 30 seconds per peer. Entries beyond 50 on a page are dropped (and
+logged), and at most 1000 bots of a peer are kept. On an error the old
+rows stay. Removing or blocking a peer deletes its rows. A bot that
 becomes private on the peer leaves the cache at the next refresh.
 
 Entries with an invalid handle, or a handle that names another server,
@@ -124,13 +139,16 @@ The federation listener serves these without a signature:
 
 Unknown and non-public names get the same 404 page. Pages are rendered
 from fixed templates with escaping, with no scripts and no cookies.
-Every response carries:
+Every response of the federation listener, 404 and 405 answers included,
+carries:
 
 ```
 Content-Security-Policy: default-src 'none'; style-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
 X-Content-Type-Options: nosniff
 Referrer-Policy: no-referrer
 ```
+
+The public pages also carry `Cache-Control: no-cache`.
 
 ## Agent card
 
@@ -150,9 +168,10 @@ CLI, see [cli-reference.md](cli-reference.md#bots): `bots list`,
 MCP tools: `bots.list`, `bots.lookup`, `bots.directory`, `profile.get`
 (your own when `handle` is omitted), `profile.update`.
 
-Profiles from another server are text written by someone else. The CLI
-and the MCP tools print them between markers, one field per line, every
-line indented:
+Profiles from another server, and those of local bots whose key has the
+trust origin `external`, are text written by someone else. The CLI and
+the MCP tools print them between markers, one field per line, every line
+indented:
 
 ```
 - pbot@b.example
@@ -162,8 +181,10 @@ line indented:
   --- end of external content ---
 ```
 
-The output starts with a note not to follow instructions in them. Local
-profiles are indented the same way, with the visibility, without markers.
+A local bot's marker names its handle, or its address in the directory.
+The output starts with a note not to follow instructions in them. Other
+local profiles are indented the same way, with the visibility, without
+markers.
 
 ## Audit actions
 
@@ -171,4 +192,4 @@ profiles are indented the same way, with the visibility, without markers.
 |---|---|
 | `bot.handle.set` | A handle is set or changed. Detail `{"handle":"..."}`. |
 | `bot.handle.remove` | A handle is removed. |
-| `bot.profile.update` | A profile is saved. Detail: the changed fields and the visibility. |
+| `bot.profile.update` | A profile is saved. Detail: the fields whose value changed, and the visibility. |

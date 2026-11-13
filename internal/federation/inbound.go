@@ -128,13 +128,7 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			return
 		}
 		if lim := s.limiter(origin); !lim.Allow() {
-			rsv := lim.Reserve()
-			delay := rsv.Delay()
-			rsv.Cancel()
-			if delay < time.Second {
-				delay = time.Second
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(int(delay.Seconds())))
+			w.Header().Set("Retry-After", retryAfter(lim))
 			s.refuse(w, r, origin, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
 			return
 		}
@@ -242,6 +236,15 @@ func (s *Service) limiter(origin string) *rate.Limiter {
 	return lim
 }
 
+// retryAfter is the Retry-After value for lim: the wait for its next
+// token, at least a second.
+func retryAfter(lim *rate.Limiter) string {
+	rsv := lim.Reserve()
+	delay := rsv.Delay()
+	rsv.Cancel()
+	return strconv.Itoa(int(max(delay, time.Second).Seconds()))
+}
+
 // checkKeyChange runs when a request for a known peer names a key
 // other than its stored one. Anyone can send that, so it is audited
 // only on evidence: the peer's own document lists the presented key.
@@ -340,14 +343,15 @@ func (s *Service) pruneNonces(ctx context.Context, now time.Time) error {
 	return err
 }
 
-// Run deletes expired nonces every minute and refreshes the cached
-// directories of the allowed peers every 15 minutes, and of a peer
-// right after it is added, until ctx is done.
+// Run deletes expired nonces every minute and runs the directory
+// refresh loop beside it, until ctx is done; it returns once both have
+// stopped.
 func (s *Service) Run(ctx context.Context) {
+	done := make(chan struct{})
+	go func() { s.refreshLoop(ctx); close(done) }()
+	defer func() { <-done }()
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
-	dir := time.NewTicker(directoryEvery)
-	defer dir.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -356,10 +360,6 @@ func (s *Service) Run(ctx context.Context) {
 			if err := s.pruneNonces(ctx, now); err != nil {
 				s.logger.Warn("federation nonce pruning failed", "err", err)
 			}
-		case <-dir.C:
-			s.refreshDirectories(ctx)
-		case domain := <-s.refresh:
-			s.refreshLogged(ctx, domain)
 		}
 	}
 }

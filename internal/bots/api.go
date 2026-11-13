@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
@@ -90,27 +91,28 @@ func (s *Store) handlePatch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON: "+err.Error())
 		return
 	}
-	p, err := s.Update(r.Context(), p.Handle, patch, admin)
+	np, err := s.Update(r.Context(), p.Handle, patch, admin)
 	if err != nil {
 		fail(w, r, err)
 		return
 	}
+	// The audit names the fields this request changed.
 	fields := []string{}
-	add := func(name string, set bool) {
-		if set {
+	add := func(name string, changed bool) {
+		if changed {
 			fields = append(fields, name)
 		}
 	}
-	add("display_name", patch.DisplayName != nil)
-	add("description", patch.Description != nil)
-	add("skills", patch.Skills != nil)
-	add("visibility", patch.Visibility != nil)
+	add("display_name", patch.DisplayName != nil && np.DisplayName != p.DisplayName)
+	add("description", patch.Description != nil && np.Description != p.Description)
+	add("skills", patch.Skills != nil && !slices.Equal(np.Skills, p.Skills))
+	add("visibility", patch.Visibility != nil && np.Visibility != p.Visibility)
 	detail, _ := json.Marshal(struct {
 		Fields     []string `json:"fields"`
 		Visibility string   `json:"visibility"`
-	}{fields, p.Visibility})
-	_ = audit.Write(r.Context(), s.db, c.KeyID, "bot.profile.update", "bot", p.Handle, "", "ok", string(detail))
-	writeJSON(w, http.StatusOK, p)
+	}{fields, np.Visibility})
+	_ = audit.Write(r.Context(), s.db, c.KeyID, "bot.profile.update", "bot", np.Handle, "", "ok", string(detail))
+	writeJSON(w, http.StatusOK, np)
 }
 
 // keyParam returns the {id} of a handle request from an admin key, or

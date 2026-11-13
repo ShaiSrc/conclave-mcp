@@ -40,7 +40,13 @@ type Skill struct {
 	Description string `json:"description"`
 }
 
-// Profile is a bot's public face. KeyID is 0 for remote bots.
+// External is the trust origin of text written outside the
+// organisation: remote profiles and the keys marked external.
+const External = "external"
+
+// Profile is a bot's public face. KeyID is 0 for remote bots. UpdatedAt
+// is zero without a saved row. TrustOrigin is the trust origin of the
+// bot's key, External for a remote bot; federation answers leave it out.
 type Profile struct {
 	KeyID       int64     `json:"-"`
 	Handle      string    `json:"handle"`
@@ -48,7 +54,8 @@ type Profile struct {
 	Description string    `json:"description"`
 	Skills      []Skill   `json:"skills"`
 	Visibility  string    `json:"visibility"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	UpdatedAt   time.Time `json:"updated_at,omitzero"`
+	TrustOrigin string    `json:"trust_origin,omitempty"`
 }
 
 // Patch changes the fields that are not nil.
@@ -68,13 +75,16 @@ func Visible(viewer auth.Claims, p Profile) bool {
 }
 
 // Store reads and writes handles and profiles. Revoked keys are hidden.
-type Store struct{ db *sql.DB }
+type Store struct {
+	db        *sql.DB
+	afterRead func() // test hook: runs in Update between the read and the write
+}
 
 // NewStore returns a Store on db.
 func NewStore(db *sql.DB) *Store { return &Store{db: db} }
 
 const selectProfiles = `SELECT k.id, k.handle, COALESCE(p.display_name, ''), COALESCE(p.description, ''),
-	COALESCE(p.skills, '[]'), COALESCE(p.visibility, 'private'), p.updated_at
+	COALESCE(p.skills, '[]'), COALESCE(p.visibility, 'private'), p.updated_at, k.trust_origin
 	FROM api_keys k LEFT JOIN bot_profiles p ON p.key_id = k.id
 	WHERE k.handle IS NOT NULL AND k.revoked_at IS NULL `
 
@@ -91,7 +101,7 @@ func (s *Store) query(ctx context.Context, where string, args ...any) ([]Profile
 			skills  string
 			updated sql.NullString
 		)
-		if err := rows.Scan(&p.KeyID, &p.Handle, &p.DisplayName, &p.Description, &skills, &p.Visibility, &updated); err != nil {
+		if err := rows.Scan(&p.KeyID, &p.Handle, &p.DisplayName, &p.Description, &skills, &p.Visibility, &updated, &p.TrustOrigin); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(skills), &p.Skills); err != nil {
@@ -140,16 +150,24 @@ func (s *Store) List(ctx context.Context, minVisibility string) ([]Profile, erro
 	return s.query(ctx, `AND COALESCE(p.visibility, 'private') IN (?`+strings.Repeat(`, ?`, len(vis)-1)+`)`, vis...)
 }
 
-// Update cleans the patched fields, checks the limits and stores the
-// profile of handle. Only asAdmin may change the visibility.
+// Update cleans the patched fields, checks the limits and writes them
+// to the profile of handle, which it returns as stored. Fields not in
+// the patch keep their stored value, in the same statement, so a stale
+// read cannot undo another write. Only asAdmin may change the
+// visibility.
 func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin bool) (Profile, error) {
 	if patch.Visibility != nil && !asAdmin {
 		return Profile{}, ErrForbidden
 	}
-	p, err := s.Get(ctx, handle)
+	cur, err := s.Get(ctx, handle)
 	if err != nil {
 		return Profile{}, err
 	}
+	if s.afterRead != nil {
+		s.afterRead()
+	}
+	// p holds the patched values, and the defaults a new row gets.
+	p := Profile{Skills: []Skill{}, Visibility: Private}
 	if patch.DisplayName != nil {
 		p.DisplayName = Clean(*patch.DisplayName, false)
 	}
@@ -168,17 +186,21 @@ func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin 
 	if err := check(p); err != nil {
 		return Profile{}, err
 	}
-	p.UpdatedAt = time.Now().UTC()
 	skills, _ := json.Marshal(p.Skills)
 	_, err = s.db.ExecContext(ctx, `INSERT INTO bot_profiles(key_id, display_name, description, skills, visibility, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?)
-		ON CONFLICT(key_id) DO UPDATE SET display_name = excluded.display_name, description = excluded.description,
-		skills = excluded.skills, visibility = excluded.visibility, updated_at = excluded.updated_at`,
-		p.KeyID, p.DisplayName, p.Description, string(skills), p.Visibility, storage.FormatTS(p.UpdatedAt))
+		ON CONFLICT(key_id) DO UPDATE SET
+		display_name = CASE WHEN ? THEN excluded.display_name ELSE bot_profiles.display_name END,
+		description = CASE WHEN ? THEN excluded.description ELSE bot_profiles.description END,
+		skills = CASE WHEN ? THEN excluded.skills ELSE bot_profiles.skills END,
+		visibility = CASE WHEN ? THEN excluded.visibility ELSE bot_profiles.visibility END,
+		updated_at = excluded.updated_at`,
+		cur.KeyID, p.DisplayName, p.Description, string(skills), p.Visibility, storage.FormatTS(time.Now()),
+		patch.DisplayName != nil, patch.Description != nil, patch.Skills != nil, asAdmin && patch.Visibility != nil)
 	if err != nil {
 		return Profile{}, err
 	}
-	return p, nil
+	return s.ByKey(ctx, cur.KeyID)
 }
 
 var skillIDRE = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
@@ -229,7 +251,7 @@ func CleanRemote(p Profile) (_ Profile, ok bool) {
 	}
 	out := Profile{Handle: h, DisplayName: truncate(Clean(p.DisplayName, false), maxDisplayName),
 		Description: truncate(Clean(p.Description, true), maxDescription),
-		Skills:      []Skill{}, Visibility: Peers, UpdatedAt: p.UpdatedAt}
+		Skills:      []Skill{}, Visibility: Peers, UpdatedAt: p.UpdatedAt, TrustOrigin: External}
 	if p.Visibility == Public {
 		out.Visibility = Public
 	}

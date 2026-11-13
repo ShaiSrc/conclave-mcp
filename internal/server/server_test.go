@@ -301,6 +301,17 @@ func TestServer_FederationListener(t *testing.T) {
 	if rec := serve(s.Handler(), "/fed/v1/ping"); rec.Code != http.StatusNotFound {
 		t.Errorf("/fed/v1/ping on the main listener: %d, want 404", rec.Code)
 	}
+	// Router-level 404 and 405 answers carry the public headers too.
+	for _, req := range []*http.Request{uiRequest("GET", "/@x/", "localhost:7432"), uiRequest("GET", "/directory/", "localhost:7432"),
+		uiRequest("HEAD", "/", "localhost:7432")} {
+		rec := httptest.NewRecorder()
+		s.fed.Handler.ServeHTTP(rec, req)
+		h := rec.Header()
+		if rec.Code < 400 || !strings.HasPrefix(h.Get("Content-Security-Policy"), "default-src 'none'") ||
+			h.Get("X-Content-Type-Options") != "nosniff" || h.Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("%s %s on the federation listener: %d, headers %v", req.Method, req.URL, rec.Code, h)
+		}
+	}
 }
 
 // Listener addresses are built with JoinHostPort, so an IPv6 host is

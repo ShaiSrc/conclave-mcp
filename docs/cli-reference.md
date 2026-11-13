@@ -615,7 +615,8 @@ See [bots.md](bots.md).
   replaces the whole list. `--visibility` (`private`, `peers`, `public`)
   needs an admin key; a bot edits its own text with its own key.
 
-Profiles from peers are printed between external-content markers.
+Profiles from peers, and those of local bots whose key has the trust
+origin `external`, are printed between external-content markers.
 
 ## Recipes
 

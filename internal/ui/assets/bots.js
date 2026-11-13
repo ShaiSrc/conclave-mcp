@@ -21,8 +21,8 @@ function publishNote(vis, domain, handle) {
       ? `Visibility public: anyone on the web can see this profile at https://${domain}/@${handle}`
       : 'Visibility public: anyone who can reach this server can see this profile.';
   }
-  if (vis === 'peers') return 'Visibility peers: the servers you federate with can find this bot and read its profile.';
-  return 'Visibility private: only keys on this server can see this profile.';
+  if (vis === 'peers') return 'Visibility peers: every key on this server and the servers you allowed as peers can see this profile.';
+  return 'Visibility private: only admin keys and the bot itself can see this profile.';
 }
 
 function skillRow(s, rows) {
@@ -47,12 +47,19 @@ function botEditor(p, domain) {
   const note = h('p', { class: 'muted' }, publishNote(p.visibility, domain, p.handle));
   vis.addEventListener('change', () => note.replaceChildren(publishNote(vis.value, domain, p.handle)));
   const msg = h('div');
+  // Only changed fields are sent, so a save cannot undo another
+  // writer's change to a field this form did not touch.
+  const loadedSkills = JSON.stringify((p.skills || []).map(s => ({ id: s.id, name: s.name, description: s.description })));
   const save = h('button', {
     onclick: action(msg, async () => {
-      await confirmed('PATCH', `/v1/bots/${encodeURIComponent(p.handle)}/profile`, {
-        display_name: name.value, description: desc.value,
-        skills: rows.map(r => r.value()), visibility: vis.value,
-      });
+      const patch = {};
+      if (name.value !== p.display_name) patch.display_name = name.value;
+      if (desc.value !== p.description) patch.description = desc.value;
+      const skills = rows.map(r => r.value());
+      if (JSON.stringify(skills) !== loadedSkills) patch.skills = skills;
+      if (vis.value !== p.visibility) patch.visibility = vis.value;
+      if (!Object.keys(patch).length) throw new Error('Nothing to save: no field changed.');
+      await confirmed('PATCH', `/v1/bots/${encodeURIComponent(p.handle)}/profile`, patch);
       rerender();
     }, WAITING),
   }, 'Save');
@@ -71,7 +78,7 @@ export async function botsPage(view) {
     h('td', {}, p.handle), h('td', {}, domain ? `${p.handle}@${domain}` : p.handle),
     h('td', {}, p.display_name), h('td', {}, p.visibility),
     h('td', {}, p.description.length > 80 ? p.description.slice(0, 80) + '…' : p.description),
-    h('td', {}, when(p.updated_at)),
+    h('td', {}, p.updated_at ? when(p.updated_at) : '—'),
     h('td', {}, botEditor(p, domain))));
   // action() clears its status element when done, so the result goes
   // into its own element.

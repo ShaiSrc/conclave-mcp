@@ -55,6 +55,23 @@ func TestPublic_Headers(t *testing.T) {
 			t.Errorf("%s: headers %v", path, h)
 		}
 	}
+	// Router-level 404 and 405 answers carry them too.
+	for _, req := range []*http.Request{httptest.NewRequest(http.MethodGet, "/@x/", nil),
+		httptest.NewRequest(http.MethodGet, "/directory/", nil), httptest.NewRequest(http.MethodHead, "/", nil),
+		httptest.NewRequest(http.MethodPost, "/directory", nil)} {
+		rec := serve(svc, req)
+		h := rec.Header()
+		if rec.Code < 400 || h.Get("Content-Security-Policy") != wantCSP || h.Get("X-Content-Type-Options") != "nosniff" ||
+			h.Get("Referrer-Policy") != "no-referrer" {
+			t.Errorf("%s %s: %d, headers %v", req.Method, req.URL, rec.Code, h)
+		}
+	}
+	// Pages are revalidated, so a bot made private leaves caches.
+	for _, path := range []string{"/directory", "/@pub", "/@nobody", "/@pub/agent-card.json"} {
+		if got := pubGet(svc, path).Header().Get("Cache-Control"); got != "no-cache" {
+			t.Errorf("%s: Cache-Control %q", path, got)
+		}
+	}
 	want := map[string]string{
 		"/directory": "text/html; charset=utf-8", "/@pub": "text/html; charset=utf-8", "/@nobody": "text/html; charset=utf-8",
 		"/@pub/agent-card.json": "application/json", "/public.css": "text/css; charset=utf-8",

@@ -31,8 +31,9 @@ func init() {
 	css, _ = publicFS.ReadFile("public/public.css")
 }
 
-// publicHeaders sets the headers every public response carries: no
-// script, no style but /public.css, no image, no framing, no referrer.
+// publicHeaders sets the headers every response of the federation
+// listener carries: no script, no style but /public.css, no image, no
+// framing, no referrer.
 func publicHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
@@ -43,11 +44,20 @@ func publicHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// noCache makes caches revalidate a public page, so a bot no longer
+// public leaves them at once.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // publicRoutes mounts the pages of public bots. They need no
 // signature and show nothing but public profiles.
 func (s *Service) publicRoutes(r chi.Router) {
 	r.Group(func(r chi.Router) {
-		r.Use(publicHeaders)
+		r.Use(noCache)
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/directory", http.StatusFound) })
 		r.Get("/directory", s.handlePublicDirectory)
 		r.Get("/@{name}", s.handlePublicBot)

@@ -40,10 +40,11 @@ type Service struct {
 	fetch        *Fetcher
 	lookups      *rate.Limiter // operator lookups and adds
 	botStore     *bots.Store
-	refresh      chan string // peers whose directory Run fetches next
+	refresh      chan string // peers whose directory the refresh loop fetches next
 
-	mu       sync.Mutex
-	limiters map[string]*rate.Limiter // per verified peer
+	mu          sync.Mutex
+	limiters    map[string]*rate.Limiter // per verified peer
+	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
 
 	warnLog, keyChecks minuteGate
 }
@@ -64,7 +65,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 		logger = slog.Default()
 	}
 	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
-		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{},
+		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{}, keyLimiters: map[int64]*rate.Limiter{},
 		botStore: bots.NewStore(db), refresh: make(chan string, 16),
 		lookups: rate.NewLimiter(rate.Every(time.Minute/lookupsPerMinute), lookupBurst)}
 	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {
@@ -74,9 +75,12 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	return s, nil
 }
 
-// PublicRoutes mounts the routes of the federation listener. Every
-// /fed/v1 route is behind Verify.
+// PublicRoutes mounts the routes of the federation listener, on a
+// router without routes yet. Every response, the router's own 404 and
+// 405 included, carries the public headers; every /fed/v1 route is
+// behind Verify.
 func (s *Service) PublicRoutes(r chi.Router) {
+	r.Use(publicHeaders)
 	s.publicRoutes(r)
 	r.Get("/.well-known/conclave", s.handleDocument)
 	r.Route("/fed/v1", func(r chi.Router) {

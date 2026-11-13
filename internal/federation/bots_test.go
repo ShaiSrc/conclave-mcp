@@ -190,6 +190,37 @@ func TestFedBots_PrivateIs404(t *testing.T) {
 	}
 }
 
+// A seen peer (open mode) reads only public profiles: a peers profile
+// answers it the same 404 as an unknown name. Once allowed, it reads
+// peers profiles too.
+func TestFedBots_SeenPeerGetsPublicOnly(t *testing.T) {
+	svc := newLocal(t, "open")
+	addBot(t, svc.db, "pbot", bots.Peers)
+	addBot(t, svc.db, "wbot", bots.Public)
+	seen := testIdentity(t, "c.example")
+	if _, err := svc.peers.RecordSeen(context.Background(), seen.Domain, seen.Public); err != nil {
+		t.Fatal(err)
+	}
+	unknown := serve(svc, signedGet(t, seen, "/fed/v1/bots/nobody"))
+	wantErr(t, unknown, http.StatusNotFound, "not_found")
+	if rec := serve(svc, signedGet(t, seen, "/fed/v1/bots/pbot")); rec.Code != 404 || rec.Body.String() != unknown.Body.String() {
+		t.Errorf("peers bot to a seen peer: %d %s", rec.Code, rec.Body)
+	}
+	if rec := serve(svc, signedGet(t, seen, "/fed/v1/bots/wbot")); rec.Code != 200 {
+		t.Errorf("public bot to a seen peer: %d %s", rec.Code, rec.Body)
+	}
+	if dir := serve(svc, signedGet(t, seen, "/fed/v1/directory")).Body.String(); !strings.Contains(dir, `"handle":"wbot"`) || strings.Contains(dir, "pbot") {
+		t.Errorf("directory to a seen peer: %s", dir)
+	}
+	allow(t, svc, seen)
+	if rec := serve(svc, signedGet(t, seen, "/fed/v1/bots/pbot")); rec.Code != 200 {
+		t.Errorf("peers bot to an allowed peer: %d %s", rec.Code, rec.Body)
+	}
+	if dir := serve(svc, signedGet(t, seen, "/fed/v1/directory")).Body.String(); !strings.Contains(dir, `"handle":"pbot"`) {
+		t.Errorf("directory to an allowed peer: %s", dir)
+	}
+}
+
 // The directory lists peers and public bots, 50 a page, by handle.
 func TestFedDirectory_Paging(t *testing.T) {
 	svc := newLocal(t, "allowlist")
@@ -260,7 +291,7 @@ func TestLookup_Peer(t *testing.T) {
 	addBot(t, peer.db, "hidden", bots.Private)
 	d := peer.id.Domain
 	if e := entryOf(t, lookup(svc, svc.db, plainKey, "bob@"+d)); e.Handle != "bob" || e.Address != "bob@"+d || !e.Remote ||
-		e.DisplayName != "Bot bob" || e.Visibility != bots.Public {
+		e.DisplayName != "Bot bob" || e.Visibility != bots.Public || e.TrustOrigin != "external" {
 		t.Errorf("bob: %+v", e)
 	}
 	wantErr(t, lookup(svc, svc.db, plainKey, "hidden@"+d), http.StatusNotFound, "not_found")
@@ -282,13 +313,117 @@ func TestLookup_PeerNotAllowed(t *testing.T) {
 	wantErr(t, lookup(svc, svc.db, plainKey, "bob@"+d), http.StatusForbidden, "peer_not_allowed")
 }
 
-// In open mode a lookup on a domain that is not allowed spends the
-// budget of fetches for strangers.
-func TestLookup_OpenModeBudget(t *testing.T) {
-	svc := newLocal(t, "open")
-	for svc.fetch.limit.Allow() {
+// Only allowed peers, and seen ones in open mode, are asked. Any other
+// domain answers 403 without a connection, and no lookup spends the
+// fetch budget for strangers.
+func TestLookup_OnlyAdmittedPeersAreAsked(t *testing.T) {
+	ctx := context.Background()
+	var hits atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, `{"handle":"bob"}`)
+	}))
+	t.Cleanup(srv.Close)
+	d := srv.Listener.Addr().String()
+	for _, mode := range []string{"allowlist", "open"} {
+		svc := newLocal(t, mode)
+		allowLoopback(svc)
+		wantErr(t, lookup(svc, svc.db, plainKey, "bob@"+d), http.StatusForbidden, "peer_not_allowed")
+		if _, err := svc.peers.RecordSeen(ctx, d, testIdentity(t, d).Public); err != nil {
+			t.Fatal(err)
+		}
+		if rec := lookup(svc, svc.db, plainKey, "bob@"+d); mode == "open" {
+			if e := entryOf(t, rec); e.Address != "bob@"+d || !e.Remote {
+				t.Errorf("seen peer in open mode: %+v", e)
+			}
+		} else {
+			wantErr(t, rec, http.StatusForbidden, "peer_not_allowed")
+		}
+		if n := svc.fetch.limit.Tokens(); n < fetchesPerMinute {
+			t.Errorf("%s: the fetch budget for strangers was spent: %v left", mode, n)
+		}
 	}
-	wantErr(t, lookup(svc, svc.db, plainKey, "bob@unknown.example"), http.StatusTooManyRequests, "rate_limited")
+	if n := hits.Load(); n != 1 {
+		t.Errorf("requests to the peer: %d, want 1 (the seen peer in open mode)", n)
+	}
+}
+
+// Remote lookups are limited per key: a burst of 10, then 429 with
+// Retry-After. Other keys and local lookups are not affected.
+func TestLookup_PerKeyLimit(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	addBot(t, svc.db, "alice", bots.Peers)
+	for range 10 {
+		wantErr(t, lookup(svc, svc.db, plainKey, "bob@c.example"), http.StatusForbidden, "peer_not_allowed")
+	}
+	rec := lookup(svc, svc.db, plainKey, "bob@c.example")
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if ra, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || ra < 1 {
+		t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+	wantErr(t, lookup(svc, svc.db, auth.Claims{KeyID: 100}, "bob@c.example"), http.StatusForbidden, "peer_not_allowed")
+	if e := entryOf(t, lookup(svc, svc.db, plainKey, "alice@b.example")); e.Handle != "alice" {
+		t.Errorf("local lookup: %+v", e)
+	}
+}
+
+// A peer that does not answer gets a generic 502; the detail goes to
+// the log only.
+func TestLookup_UnreachableIsGeneric(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	var log strings.Builder
+	svc.logger = slog.New(slog.NewTextHandler(&log, nil))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := ln.Addr().String()
+	_ = ln.Close()
+	allow(t, svc, testIdentity(t, d))
+	rec := lookup(svc, svc.db, plainKey, "bob@"+d)
+	wantErr(t, rec, http.StatusBadGateway, "peer_unreachable")
+	var env struct{ Error struct{ Message string } }
+	if _ = json.Unmarshal(rec.Body.Bytes(), &env); env.Error.Message != "peer did not answer" {
+		t.Errorf("message %q", env.Error.Message)
+	}
+	if !strings.Contains(log.String(), "level=WARN") || !strings.Contains(log.String(), d) || !strings.Contains(log.String(), "refused") {
+		t.Errorf("log: %s", log.String())
+	}
+}
+
+// Local bots carry their key's trust origin, remote ones are external,
+// and federation answers leave it out.
+func TestBots_TrustOrigin(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	addBot(t, svc.db, "alice", bots.Peers)
+	addBot(t, svc.db, "ext", bots.Peers)
+	if _, err := svc.db.Exec(`UPDATE api_keys SET trust_origin = 'external' WHERE handle = 'ext'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.db.Exec(`INSERT INTO remote_bots(domain, handle, profile, fetched_at)
+		VALUES ('a.example', 'bob', '{"handle":"bob","trust_origin":"internal"}', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	for h, want := range map[string]string{"alice": "internal", "ext@b.example": "external"} {
+		if e := entryOf(t, lookup(svc, svc.db, plainKey, h)); e.TrustOrigin != want {
+			t.Errorf("lookup %s: trust origin %q, want %q", h, e.TrustOrigin, want)
+		}
+	}
+	var dir struct{ Bots []entry }
+	_ = json.Unmarshal(botDo(svc, svc.db, plainKey, "/v1/directory").Body.Bytes(), &dir)
+	got := []string{}
+	for _, e := range dir.Bots {
+		got = append(got, e.Address+" "+e.TrustOrigin)
+	}
+	wantList(t, got, "alice@b.example internal", "ext@b.example external", "bob@a.example external")
+
+	peer := testIdentity(t, "a.example")
+	allow(t, svc, peer)
+	for _, path := range []string{"/fed/v1/bots/ext", "/fed/v1/directory"} {
+		if rec := serve(svc, signedGet(t, peer, path)); rec.Code != 200 || strings.Contains(rec.Body.String(), "trust_origin") {
+			t.Errorf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+	}
 }
 
 // With federation off, a bare handle is a local lookup and any domain
@@ -419,6 +554,51 @@ func TestDirectory_RefreshChecksEntries(t *testing.T) {
 	}
 }
 
+// A refresh keeps at most 50 entries of a page and 1000 of a peer.
+func TestDirectory_RefreshBounds(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	// page answers with 5000 bots named after the page number, and a
+	// next page only if more.
+	page := func(more bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			n, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			list := make([]string, 5000)
+			for i := range list {
+				list[i] = fmt.Sprintf(`{"handle":"p%02d-%04d"}`, n, i)
+			}
+			next := "null"
+			if more {
+				next = strconv.Itoa(n + 1)
+			}
+			_, _ = fmt.Fprintf(w, `{"bots":[%s],"next":%s}`, strings.Join(list, ","), next)
+		}
+	}
+	for d, want := range map[string]int{fakePeer(t, svc, page(false)): 50, fakePeer(t, svc, page(true)): 1000} {
+		if err := svc.refreshDirectory(ctx, d); err != nil {
+			t.Fatal(err)
+		}
+		if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, d); n != want {
+			t.Errorf("cached bots: %d, want %d", n, want)
+		}
+	}
+}
+
+// /v1/directory lists at most 5000 bots, the local ones first.
+func TestDirectory_Cap(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	addBot(t, svc.db, "alice", bots.Peers)
+	if _, err := svc.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5100)
+		INSERT INTO remote_bots(domain, handle, profile, fetched_at)
+		SELECT 'a.example', printf('r%05d', i), json_object('handle', printf('r%05d', i)), '2026-01-01T00:00:00Z' FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	got := addresses(t, botDo(svc, svc.db, plainKey, "/v1/directory"))
+	if len(got) != 5000 || got[0] != "alice@b.example" || got[1] != "r00001@a.example remote" {
+		t.Errorf("%d entries, first %q", len(got), got[:min(len(got), 2)])
+	}
+}
+
 // A peer blocked while its directory is fetched gets no rows.
 func TestDirectory_RefreshAfterBlock(t *testing.T) {
 	svc := newLocal(t, "allowlist")
@@ -486,35 +666,42 @@ func TestDirectory_RefreshAfterAdd(t *testing.T) {
 	}
 }
 
-// A full directory page of maximum-size profiles full of <, > and &
-// stays under the fetch cap, and a refresh accepts it.
+// A full directory page of maximum-size profiles stays under the fetch
+// cap, and a refresh accepts it. Each run fills every field with one of
+// the costliest characters after cleaning: a 4-byte character; <, > and
+// & (6 bytes each if escaped); U+2028 (6 bytes in JSON unless cleaned).
 func TestDirectory_FullPageFitsCap(t *testing.T) {
 	ctx := context.Background()
 	svc := newLocal(t, "allowlist")
 	peer := newPeer(t, svc)
 	allow(t, svc, peer.id)
-	mark := func(n int) string { return strings.Repeat("<&>", n/3+1)[:n] }
-	skills := make([]bots.Skill, 20)
-	for i := range skills {
-		skills[i] = bots.Skill{ID: fmt.Sprintf("skill-%02d", i), Name: mark(64), Description: mark(300)}
-	}
 	for i := range directoryPage {
-		h := fmt.Sprintf("bot%03d", i)
-		addBot(t, peer.db, h, bots.Public)
-		name, desc := mark(64), mark(1000)
-		if _, err := bots.NewStore(peer.db).Update(ctx, h, bots.Patch{DisplayName: &name, Description: &desc, Skills: &skills}, true); err != nil {
+		addBot(t, peer.db, fmt.Sprintf("bot%03d", i), bots.Public)
+	}
+	for _, c := range []string{"😀", "<&>", "\u2028"} {
+		// fill is n characters: c between two letters, so trimming keeps them.
+		fill := func(n int) string { return "x" + string([]rune(strings.Repeat(c, n))[:n-2]) + "x" }
+		skills := make([]bots.Skill, 20)
+		for i := range skills {
+			skills[i] = bots.Skill{ID: fmt.Sprintf("%032d", i), Name: fill(64), Description: fill(300)}
+		}
+		name, desc := fill(64), fill(1000)
+		for i := range directoryPage {
+			if _, err := peer.botStore.Update(ctx, fmt.Sprintf("bot%03d", i), bots.Patch{DisplayName: &name, Description: &desc, Skills: &skills}, true); err != nil {
+				t.Fatal(err)
+			}
+		}
+		rec := serve(peer, signedGet2(t, svc.id, peer.id.Domain, "/fed/v1/directory"))
+		t.Logf("%+q: a full page is %d bytes", c, rec.Body.Len())
+		if rec.Code != 200 || rec.Body.Len() >= maxBotsBody || strings.Contains(rec.Body.String(), "\\u") {
+			t.Fatalf("%+q: status %d, %d bytes (cap %d)", c, rec.Code, rec.Body.Len(), maxBotsBody)
+		}
+		if err := svc.refreshDirectory(ctx, peer.id.Domain); err != nil {
 			t.Fatal(err)
 		}
-	}
-	rec := serve(peer, signedGet2(t, svc.id, peer.id.Domain, "/fed/v1/directory"))
-	if rec.Code != 200 || rec.Body.Len() >= maxBotsBody || strings.Contains(rec.Body.String(), "\\u003c") {
-		t.Fatalf("page: status %d, %d bytes (cap %d)", rec.Code, rec.Body.Len(), maxBotsBody)
-	}
-	if err := svc.refreshDirectory(ctx, peer.id.Domain); err != nil {
-		t.Fatal(err)
-	}
-	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, peer.id.Domain); n != directoryPage {
-		t.Errorf("cached bots: %d, want %d", n, directoryPage)
+		if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, peer.id.Domain); n != directoryPage {
+			t.Errorf("%+q: cached bots: %d, want %d", c, n, directoryPage)
+		}
 	}
 }
 
