@@ -102,7 +102,12 @@ func Open(ctx context.Context, dbPath string) (*sql.DB, func() error, error) {
 		"&_pragma=foreign_keys(ON)" +
 		"&_pragma=busy_timeout(5000)" +
 		"&_pragma=temp_store(MEMORY)" +
-		"&_pragma=mmap_size(268435456)"
+		"&_pragma=mmap_size(268435456)" +
+		// Transactions take the write lock when they begin. A deferred
+		// transaction that reads first cannot upgrade while another
+		// connection writes (SQLITE_BUSY_SNAPSHOT), and busy_timeout
+		// does not help there; the federation workers write often.
+		"&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, noopClose, fmt.Errorf("sql.Open: %w", err)
