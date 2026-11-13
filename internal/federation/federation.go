@@ -5,13 +5,13 @@ package federation
 
 import (
 	"context"
-	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/time/rate"
@@ -36,12 +36,12 @@ type Service struct {
 	logger       *slog.Logger
 	peers        *Peers
 	fetch        *Fetcher
+	lookups      *rate.Limiter // operator lookups and adds
 
 	mu       sync.Mutex
-	keys     map[string]ed25519.PublicKey // peer keys by fingerprint
-	limiters map[string]*rate.Limiter     // per verified peer
+	limiters map[string]*rate.Limiter // per verified peer
 
-	warnLog, keyAudits, keyFetches minuteGate
+	warnLog, keyChecks minuteGate
 }
 
 // New returns the federation service for opts.Domain, loading the
@@ -60,7 +60,8 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 		logger = slog.Default()
 	}
 	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
-		peers: &Peers{db: db}, keys: map[string]ed25519.PublicKey{}, limiters: map[string]*rate.Limiter{}}
+		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{},
+		lookups: rate.NewLimiter(rate.Every(time.Minute/lookupsPerMinute), lookupBurst)}
 	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {
 		p, err := s.peers.Get(context.Background(), domain)
 		return err == nil && p.Status == statusAllowed

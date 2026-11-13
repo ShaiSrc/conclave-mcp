@@ -31,7 +31,11 @@ type remote struct {
 
 func (rm *remote) domain() string { return rm.id.Domain }
 
-func newRemote(t *testing.T) *remote {
+func newRemote(t *testing.T) *remote { return newRemoteHook(t, nil) }
+
+// newRemoteHook is newRemote, calling onFetch with the remote's
+// identity before it serves its document.
+func newRemoteHook(t *testing.T, onFetch func(*Identity)) *remote {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -40,6 +44,9 @@ func newRemote(t *testing.T) *remote {
 	rm := &remote{id: testIdentity(t, ln.Addr().String())}
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		rm.hits.Add(1)
+		if onFetch != nil {
+			onFetch(rm.id)
+		}
 		_ = json.NewEncoder(w).Encode(rm.id.Document())
 	}))
 	_ = srv.Listener.Close()
@@ -66,7 +73,7 @@ func allowLoopback(svc *Service) {
 
 func allow(t *testing.T, svc *Service, id *Identity) {
 	t.Helper()
-	if err := svc.peers.Allow(context.Background(), id.Domain, id.Fingerprint(), ""); err != nil {
+	if err := svc.peers.Allow(context.Background(), id.Domain, id.Public, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -155,7 +162,7 @@ func TestVerify_AllowlistRefusesUnknown(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
 	wantErr(t, serve(svc, signed(t, rm.id, local, "{}")), http.StatusForbidden, "peer_not_allowed")
-	if _, err := svc.peers.RecordSeen(context.Background(), rm.domain(), rm.id.Fingerprint()); err != nil {
+	if _, err := svc.peers.RecordSeen(context.Background(), rm.domain(), rm.id.Public); err != nil {
 		t.Fatal(err)
 	}
 	wantErr(t, serve(svc, signed(t, rm.id, local, "{}")), http.StatusForbidden, "peer_not_allowed")
@@ -187,8 +194,8 @@ func TestVerify_AllowedPeer(t *testing.T) {
 	allow(t, svc, rm.id)
 	wantOK(t, serve(svc, signed(t, rm.id, local, "{}")))
 	wantOK(t, serve(svc, signed(t, rm.id, local, "{}")))
-	if n := rm.hits.Load(); n != 1 {
-		t.Errorf("document fetched %d times, want 1 (key cached)", n)
+	if n := rm.hits.Load(); n != 0 {
+		t.Errorf("document fetched %d times, want 0 (stored key)", n)
 	}
 	p, err := svc.peers.Get(context.Background(), rm.domain())
 	if err != nil || p.Status != "allowed" || p.LastSeenAt == nil {
@@ -199,17 +206,18 @@ func TestVerify_AllowedPeer(t *testing.T) {
 	}
 }
 
-// Step 4: a key other than the pinned (allowlist) or recorded (open)
-// one is refused and audited, before anything is fetched.
+// Step 4: a key other than the stored one is refused. The peer's
+// document lists the presented key, which is evidence of a key change:
+// audited, once per peer a minute.
 func TestVerify_KeyChanged(t *testing.T) {
 	ctx := context.Background()
-	other := testIdentity(t, "x.example").Fingerprint()
+	other := testIdentity(t, "x.example")
 	for _, tc := range []struct {
 		mode   string
 		record func(*Service, string) error
 	}{
-		{"allowlist", func(s *Service, d string) error { return s.peers.Allow(ctx, d, other, "") }},
-		{"open", func(s *Service, d string) error { _, err := s.peers.RecordSeen(ctx, d, other); return err }},
+		{"allowlist", func(s *Service, d string) error { return s.peers.Allow(ctx, d, other.Public, "") }},
+		{"open", func(s *Service, d string) error { _, err := s.peers.RecordSeen(ctx, d, other.Public); return err }},
 	} {
 		svc := newLocal(t, tc.mode)
 		allowLoopback(svc)
@@ -217,36 +225,37 @@ func TestVerify_KeyChanged(t *testing.T) {
 		if err := tc.record(svc, rm.domain()); err != nil {
 			t.Fatal(err)
 		}
-		wantErr(t, serve(svc, signed(t, rm.id, local, "{}")), http.StatusUnauthorized, "bad_signature")
+		for i := 0; i < 2; i++ {
+			wantErr(t, serve(svc, signed(t, rm.id, local, "{}")), http.StatusUnauthorized, "bad_signature")
+		}
 		var targetType, targetID, detail string
 		if err := svc.db.QueryRow(`SELECT target_type, target_id, detail FROM audit
 			WHERE action = 'federation.key_changed'`).Scan(&targetType, &targetID, &detail); err != nil {
-			t.Fatalf("%s: no key_changed audit row: %v", tc.mode, err)
+			t.Fatalf("%s: no single key_changed audit row: %v", tc.mode, err)
 		}
-		want := fmt.Sprintf(`{"presented":%q,"expected":%q}`, rm.id.KeyID, other)
+		want := fmt.Sprintf(`{"presented":%q,"expected":%q}`, rm.id.Fingerprint(), other.Fingerprint())
 		if targetType != "federation_peer" || targetID != rm.domain() || detail != want {
 			t.Errorf("%s: audit %s %s %s, want peer %s %s", tc.mode, targetType, targetID, detail, rm.domain(), want)
 		}
-		if n := rm.hits.Load(); n != 0 {
-			t.Errorf("%s: document fetched %d times", tc.mode, n)
+		if n := rm.hits.Load(); n != 1 {
+			t.Errorf("%s: document fetched %d times, want 1", tc.mode, n)
 		}
 	}
 }
 
-// Step 4: the request names the pinned key, but the peer's document
-// now serves another key.
-func TestVerify_KeyChangedInDocument(t *testing.T) {
+// Step 4: a known peer's stored key verifies its requests, whatever its
+// document serves now; nothing is fetched.
+func TestVerify_UsesStoredKey(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
 	old := testIdentity(t, rm.domain())
 	allow(t, svc, old)
-	wantErr(t, serve(svc, signed(t, old, local, "{}")), http.StatusUnauthorized, "bad_signature")
-	var detail string
-	if err := svc.db.QueryRow(`SELECT detail FROM audit WHERE action = 'federation.key_changed'`).Scan(&detail); err != nil {
-		t.Fatal(err)
+	wantOK(t, serve(svc, signed(t, old, local, "{}")))
+	if n := rm.hits.Load(); n != 0 {
+		t.Errorf("document fetched %d times", n)
 	}
-	if want := fmt.Sprintf(`{"presented":%q,"expected":%q}`, rm.id.KeyID, old.Fingerprint()); detail != want {
-		t.Errorf("detail %s, want %s", detail, want)
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit`); n != 0 {
+		t.Errorf("audit rows: %d", n)
 	}
 }
 
@@ -423,7 +432,9 @@ func TestPing_Body(t *testing.T) {
 	}
 }
 
-func TestVerify_LogsRefusalsOncePerOrigin(t *testing.T) {
+// One warn line per origin and error code a minute: a forged origin
+// cannot silence another code for it.
+func TestVerify_LogsRefusalsOncePerOriginAndCode(t *testing.T) {
 	var logs bytes.Buffer
 	svc, err := New(testDB(t), Options{Domain: local, Mode: "allowlist", Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	if err != nil {
@@ -431,11 +442,74 @@ func TestVerify_LogsRefusalsOncePerOrigin(t *testing.T) {
 	}
 	a, b := newRemote(t), newRemote(t)
 	for i := 0; i < 3; i++ {
-		serve(svc, signed(t, a.id, local, "{}"))
+		serve(svc, signed(t, a.id, local, "{}")) // peer_not_allowed
 	}
+	allow(t, svc, a.id)
+	serve(svc, signedAt(a.id, time.Now().Unix()-1000)) // clock_skew
 	serve(svc, signed(t, b.id, local, "{}"))
-	if n := strings.Count(logs.String(), "level=WARN"); n != 2 {
-		t.Errorf("%d warn lines, want 2:\n%s", n, logs.String())
+	if n := strings.Count(logs.String(), "level=WARN"); n != 3 {
+		t.Errorf("%d warn lines, want 3:\n%s", n, logs.String())
+	}
+}
+
+// Step 4: a request naming a key other than the stored one is refused.
+// Anyone can send one, so it is audited only when the peer's own
+// document lists that key, and the document is fetched at most once
+// per peer a minute.
+func TestVerify_ForgedKeyNotAudited(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	rm := newRemote(t)
+	allow(t, svc, rm.id)
+	forger := testIdentity(t, rm.domain())
+	for i := 0; i < 2; i++ {
+		wantErr(t, serve(svc, signed(t, forger, local, "{}")), http.StatusUnauthorized, "bad_signature")
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit`); n != 0 {
+		t.Errorf("audit rows: %d, want 0", n)
+	}
+	if n := rm.hits.Load(); n != 1 {
+		t.Errorf("document fetched %d times, want 1", n)
+	}
+}
+
+// Step 10: a row that appears for the origin while its first request is
+// verified decides; the request is served only if that row lets the
+// origin in with the key that signed it.
+func TestVerify_FirstContactRace(t *testing.T) {
+	ctx := context.Background()
+	other := testIdentity(t, "x.example")
+	for _, tc := range []struct {
+		name      string
+		meanwhile func(*Service, *Identity) error
+		status    int
+		code      string
+	}{
+		{"blocked", func(s *Service, id *Identity) error { return s.peers.Block(ctx, id.Domain) }, http.StatusForbidden, "peer_not_allowed"},
+		{"another key", func(s *Service, id *Identity) error {
+			_, err := s.peers.RecordSeen(ctx, id.Domain, other.Public)
+			return err
+		}, http.StatusUnauthorized, "bad_signature"},
+		{"same key", func(s *Service, id *Identity) error {
+			_, err := s.peers.RecordSeen(ctx, id.Domain, id.Public)
+			return err
+		}, http.StatusOK, ""},
+	} {
+		svc := newLocal(t, "open")
+		allowLoopback(svc)
+		rm := newRemoteHook(t, func(id *Identity) {
+			if err := tc.meanwhile(svc, id); err != nil {
+				t.Error(err)
+			}
+		})
+		rec := serve(svc, signed(t, rm.id, local, "{}"))
+		if tc.status == http.StatusOK {
+			wantOK(t, rec)
+		} else {
+			wantErr(t, rec, tc.status, tc.code)
+		}
+		if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.peer.seen'`); n != 0 {
+			t.Errorf("%s: peer.seen rows: %d, want 0", tc.name, n)
+		}
 	}
 }
 

@@ -3,6 +3,7 @@ package federation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,9 +53,10 @@ func TestAdmin_Disabled(t *testing.T) {
 func TestAdmin_StatusAndList(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	ctx := context.Background()
-	_ = svc.peers.Allow(ctx, "a.example", "SHA256:x", "n")
+	a := testIdentity(t, "a.example")
+	_ = svc.peers.Allow(ctx, "a.example", a.Public, "n")
 	_ = svc.peers.Block(ctx, "b2.example")
-	_, _ = svc.peers.RecordSeen(ctx, "c.example", "SHA256:y")
+	_, _ = svc.peers.RecordSeen(ctx, "c.example", testIdentity(t, "c.example").Public)
 	var st struct {
 		Domain, Mode, Fingerprint string
 		KeyID                     string `json:"key_id"`
@@ -69,7 +71,8 @@ func TestAdmin_StatusAndList(t *testing.T) {
 	var l struct{ Peers []peerView }
 	rec = adminDo(svc, admin, "GET", "/v1/federation/peers", "")
 	_ = json.Unmarshal(rec.Body.Bytes(), &l)
-	if rec.Code != 200 || len(l.Peers) != 3 || l.Peers[0].Domain != "a.example" || l.Peers[0].Note != "n" {
+	if rec.Code != 200 || len(l.Peers) != 3 || l.Peers[0].Domain != "a.example" || l.Peers[0].Note != "n" ||
+		l.Peers[0].KeyID != a.KeyID || l.Peers[1].KeyID != "" {
 		t.Errorf("list: %d %s", rec.Code, rec.Body)
 	}
 }
@@ -99,9 +102,72 @@ func TestAdmin_LookupAndAdd(t *testing.T) {
 	if rec.Code != 201 || p.Status != "allowed" || p.Note != "hi" {
 		t.Fatalf("add: %d %s", rec.Code, rec.Body)
 	}
-	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action='federation.peer.add' AND target_id=?`, rm.domain()); n != 1 {
-		t.Errorf("add audit rows = %d", n)
+	var detail string
+	if err := svc.db.QueryRow(`SELECT detail FROM audit WHERE action='federation.peer.add' AND target_id=?`, rm.domain()).Scan(&detail); err != nil {
+		t.Fatal(err)
 	}
+	if want := `{"fingerprint":"` + rm.id.Fingerprint() + `"}`; detail != want {
+		t.Errorf("add audit detail %s, want %s", detail, want)
+	}
+}
+
+// A lookup or add that finds a known peer's document without its
+// pinned key is evidence of a key change: audited, as the operator.
+func TestAdmin_LookupKeyChanged(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	rm := newRemote(t)
+	old := testIdentity(t, rm.domain())
+	allow(t, svc, old)
+	if rec := adminDo(svc, admin, "GET", "/v1/federation/lookup?domain="+rm.domain(), ""); rec.Code != 200 {
+		t.Fatalf("lookup: %d %s", rec.Code, rec.Body)
+	}
+	var actor int64
+	var detail string
+	if err := svc.db.QueryRow(`SELECT actor_key_id, detail FROM audit WHERE action = 'federation.key_changed'`).Scan(&actor, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(`{"presented":%q,"expected":%q}`, rm.id.Fingerprint(), old.Fingerprint()); actor != 1 || detail != want {
+		t.Errorf("audit actor %d detail %s, want 1 %s", actor, detail, want)
+	}
+	// The operator re-adds the peer with its new key (one more entry,
+	// from the add's own lookup); after that, lookups are quiet.
+	ok := `{"domain":"` + rm.domain() + `","fingerprint":"` + rm.id.Fingerprint() + `"}`
+	if rec := adminDo(svc, admin, "POST", "/v1/federation/peers", ok); rec.Code != 201 {
+		t.Fatalf("add: %d %s", rec.Code, rec.Body)
+	}
+	adminDo(svc, admin, "GET", "/v1/federation/lookup?domain="+rm.domain(), "")
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_changed'`); n != 2 {
+		t.Errorf("key_changed rows: %d, want 2", n)
+	}
+}
+
+// The admin endpoints refuse this server's own domain, in any spelling.
+func TestAdmin_OwnDomain(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	for _, d := range []string{local, strings.ToUpper(local)} {
+		for _, c := range [][2]string{{"GET", "/v1/federation/lookup?domain=" + d}, {"POST", "/v1/federation/peers/" + d + "/block"},
+			{"DELETE", "/v1/federation/peers/" + d}, {"POST", "/v1/federation/peers/" + d + "/ping"}} {
+			wantErr(t, adminDo(svc, admin, c[0], c[1], ""), 400, "own_domain")
+		}
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM federation_peers`); n != 0 {
+		t.Errorf("peers: %d", n)
+	}
+}
+
+// Operator lookups have their own budget, 30 a minute with a burst of
+// 10, apart from the fetches for strangers.
+func TestAdmin_LookupLimit(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	rm := newRemote(t)
+	for svc.fetch.limit.Allow() {
+	}
+	for i := 0; i < 10; i++ {
+		if rec := adminDo(svc, admin, "GET", "/v1/federation/lookup?domain="+rm.domain(), ""); rec.Code != 200 {
+			t.Fatalf("lookup %d: %d %s", i+1, rec.Code, rec.Body)
+		}
+	}
+	wantErr(t, adminDo(svc, admin, "GET", "/v1/federation/lookup?domain="+rm.domain(), ""), 429, "rate_limited")
 }
 
 func TestAdmin_BlockRemovePing(t *testing.T) {

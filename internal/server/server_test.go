@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,6 +14,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/hermes/conclave-mcp/internal/federation"
+	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
 func TestServer_Healthz(t *testing.T) {
@@ -370,5 +374,75 @@ func TestServer_StartFederationListener(t *testing.T) {
 	}
 	if _, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", fedPort)); err == nil {
 		t.Error("federation listener still open after shutdown")
+	}
+}
+
+// The federation listener faces the internet: it has read and write
+// timeouts and a header cap, and a request whose body stalls is cut off.
+func TestServer_FederationSlowBody(t *testing.T) {
+	ctx := context.Background()
+	fedPort := freePort(t)
+	domain := fmt.Sprintf("127.0.0.1:%d", fedPort)
+	db := uiDB(t)
+	s, err := New(Config{
+		Host: "127.0.0.1", Port: freePort(t),
+		FederationDomain: domain, FederationHost: "127.0.0.1", FederationPort: fedPort, FederationInsecureHTTP: true,
+	}, Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.fed.ReadTimeout != 10*time.Second || s.fed.WriteTimeout != 15*time.Second || s.fed.MaxHeaderBytes != 16<<10 {
+		t.Errorf("federation listener: read %v, write %v, headers %d; want 10s, 15s, 16384",
+			s.fed.ReadTimeout, s.fed.WriteTimeout, s.fed.MaxHeaderBytes)
+	}
+	s.fed.ReadTimeout = 300 * time.Millisecond
+
+	// An allowed peer, so that the request gets as far as its body.
+	peer, err := federation.LoadOrCreateIdentity(ctx, uiDB(t), "peer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO federation_peers(domain, status, fingerprint, public_key, added_at)
+		VALUES ('peer.example', 'allowed', ?, ?, ?)`, peer.Fingerprint(), []byte(peer.Public), storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(runCtx) }()
+	var conn net.Conn
+	for i := 0; i < 200; i++ {
+		if conn, err = net.Dial("tcp", domain); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://"+domain+"/fed/v1/ping", nil)
+	if err := peer.SignRequest(req, domain, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	// The headers and one byte of the two-byte body, then nothing.
+	if _, err := fmt.Fprintf(conn, "POST /fed/v1/ping HTTP/1.1\r\nHost: %s\r\nAuthorization: %s\r\nContent-Length: 2\r\n\r\n{",
+		domain, req.Header.Get("Authorization")); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no answer to a stalled body: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("stalled body: %d, want 400", resp.StatusCode)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Errorf("Start returned: %v", err)
 	}
 }

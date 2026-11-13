@@ -122,10 +122,16 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		fedSvc.PublicRoutes(fr)
 		fr.NotFound(s.notFound)
 		fr.MethodNotAllowed(s.methodNotAllowed)
+		// Strangers reach this listener: whole-request read and write
+		// timeouts (a document fetch of up to 5 s comes before the body
+		// is read) and a small header cap.
 		s.fed = &http.Server{
 			Addr:              fmt.Sprintf("%s:%d", cfg.FederationHost, cfg.FederationPort),
 			Handler:           fr,
 			ReadHeaderTimeout: cfg.ReadHeader,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			MaxHeaderBytes:    16 << 10,
 			IdleTimeout:       cfg.IdleTimeout,
 		}
 	}

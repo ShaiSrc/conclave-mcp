@@ -2,6 +2,7 @@ package federation
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
 	"errors"
 	"time"
@@ -19,9 +20,11 @@ const (
 // ErrPeerNotFound is returned for a domain without a peer row.
 var ErrPeerNotFound = errors.New("federation peer not found")
 
-// Peer is one row of federation_peers.
+// Peer is one row of federation_peers. PublicKey is the pinned key,
+// nil for a domain blocked before it was seen.
 type Peer struct {
 	Domain, Status, Fingerprint, Note string
+	PublicKey                         ed25519.PublicKey
 	AddedAt                           time.Time
 	LastSeenAt                        *time.Time
 }
@@ -29,17 +32,19 @@ type Peer struct {
 // Peers is the peer store: one row per domain, the status is the policy.
 type Peers struct{ db *sql.DB }
 
-const peerCols = `domain, status, fingerprint, note, added_at, last_seen_at`
+const peerCols = `domain, status, fingerprint, public_key, note, added_at, last_seen_at`
 
 func scanPeer(row interface{ Scan(...any) error }) (Peer, error) {
 	var (
 		p     Peer
+		pub   []byte
 		added string
 		seen  sql.NullString
 	)
-	if err := row.Scan(&p.Domain, &p.Status, &p.Fingerprint, &p.Note, &added, &seen); err != nil {
+	if err := row.Scan(&p.Domain, &p.Status, &p.Fingerprint, &pub, &p.Note, &added, &seen); err != nil {
 		return Peer{}, err
 	}
+	p.PublicKey = pub
 	p.AddedAt, _ = time.Parse(time.RFC3339Nano, added)
 	if seen.Valid {
 		t, _ := time.Parse(time.RFC3339Nano, seen.String)
@@ -75,17 +80,18 @@ func (ps *Peers) List(ctx context.Context) ([]Peer, error) {
 	return out, rows.Err()
 }
 
-// Allow makes domain an allowed peer pinned to fingerprint, replacing
-// any earlier status, blocked included.
-func (ps *Peers) Allow(ctx context.Context, domain, fingerprint, note string) error {
-	_, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, fingerprint, note, added_at)
-		VALUES (?, 'allowed', ?, ?, ?)
-		ON CONFLICT(domain) DO UPDATE SET status = 'allowed', fingerprint = excluded.fingerprint, note = excluded.note`,
-		domain, fingerprint, note, storage.FormatTS(time.Now()))
+// Allow makes domain an allowed peer pinned to pub, replacing any
+// earlier status, blocked included.
+func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey, note string) error {
+	_, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, fingerprint, public_key, note, added_at)
+		VALUES (?, 'allowed', ?, ?, ?, ?)
+		ON CONFLICT(domain) DO UPDATE SET status = 'allowed', fingerprint = excluded.fingerprint,
+			public_key = excluded.public_key, note = excluded.note`,
+		domain, Fingerprint(pub), []byte(pub), note, storage.FormatTS(time.Now()))
 	return err
 }
 
-// Block makes domain a blocked peer, keeping a known fingerprint and note.
+// Block makes domain a blocked peer, keeping a known key and note.
 func (ps *Peers) Block(ctx context.Context, domain string) error {
 	_, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, added_at) VALUES (?, 'blocked', ?)
 		ON CONFLICT(domain) DO UPDATE SET status = 'blocked'`,
@@ -107,12 +113,12 @@ func (ps *Peers) Remove(ctx context.Context, domain string) error {
 	return nil
 }
 
-// RecordSeen records domain as seen with fingerprint unless it has a
-// row already, and reports whether it inserted one.
-func (ps *Peers) RecordSeen(ctx context.Context, domain, fingerprint string) (bool, error) {
-	res, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, fingerprint, added_at)
-		VALUES (?, 'seen', ?, ?) ON CONFLICT(domain) DO NOTHING`,
-		domain, fingerprint, storage.FormatTS(time.Now()))
+// RecordSeen records domain as seen with pub unless it has a row
+// already, and reports whether it inserted one.
+func (ps *Peers) RecordSeen(ctx context.Context, domain string, pub ed25519.PublicKey) (bool, error) {
+	res, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, fingerprint, public_key, added_at)
+		VALUES (?, 'seen', ?, ?, ?) ON CONFLICT(domain) DO NOTHING`,
+		domain, Fingerprint(pub), []byte(pub), storage.FormatTS(time.Now()))
 	if err != nil {
 		return false, err
 	}

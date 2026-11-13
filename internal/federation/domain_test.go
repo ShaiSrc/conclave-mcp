@@ -46,6 +46,7 @@ func TestNormalizeDomain(t *testing.T) {
 		"host:0",
 		"host:65536",
 		"host:080",
+		"host:443", // the same server as no port
 		"host:+80",
 		"host:80:80",
 		max + "c", // 254 characters

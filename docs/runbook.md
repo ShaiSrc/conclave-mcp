@@ -146,7 +146,9 @@ see SPEC-0005 §11). The recommended monitoring is:
 
 With `CONCLAVE_FEDERATION_DOMAIN` set, send `/.well-known/conclave` and
 `/fed/` to the federation port (default 7433). The proxy must forward
-`Host` and the request URI unchanged: the signature covers both.
+`Host` and the request URI unchanged: the signature covers the request
+URI and the configured destination domain, and the server compares
+`Host` with its domain.
 
 ```nginx
 location = /.well-known/conclave { proxy_pass http://127.0.0.1:7433; proxy_set_header Host $http_host; }

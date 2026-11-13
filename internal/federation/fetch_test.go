@@ -38,23 +38,31 @@ func docServer(t *testing.T, mutate func(*Document, http.ResponseWriter) bool) (
 }
 
 func TestRefuseNonPublic(t *testing.T) {
-	for _, addr := range []string{
-		"127.0.0.1:80", "127.1.2.3:80", "[::1]:80", // loopback
-		"10.1.2.3:80", "172.16.0.1:80", "172.31.255.255:80", "192.168.1.1:80", // RFC 1918
-		"[fc00::1]:80", "[fd12:3456::1]:80", // RFC 4193
-		"169.254.169.254:80", "[fe80::1]:80", // link-local
-		"100.64.0.1:80", "100.127.255.255:80", // CGNAT
-		"224.0.0.1:80", "239.1.2.3:80", "[ff02::1]:80", // multicast
-		"0.0.0.0:80", "[::]:80", // unspecified
-		"[::ffff:127.0.0.1]:80", "[::ffff:10.0.0.1]:80", "[::ffff:100.64.0.1]:80", // IPv4-mapped
+	for _, a := range []string{
+		"127.0.0.1", "127.1.2.3", "::1", // loopback
+		"10.1.2.3", "172.16.0.1", "172.31.255.255", "192.168.1.1", // RFC 1918
+		"fc00::1", "fd12:3456::1", // RFC 4193
+		"169.254.169.254", "fe80::1", // link-local
+		"100.64.0.1", "100.127.255.255", // CGNAT
+		"224.0.0.1", "239.1.2.3", "ff02::1", // multicast
+		"0.0.0.0", "::", // unspecified
+		"::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:100.64.0.1", // IPv4-mapped
+		"0.1.2.3", "255.255.255.255", "192.0.0.170", "198.18.0.1", "240.0.0.1", // other special IPv4
+		"fec0::1", "::a00:1", "2001:db8::1", // site-local, IPv4-compatible, documentation
+		"2002:a00:1::", "2001::1", // 6to4, Teredo
+		"64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b:1::a00:1", // NAT64 of private and loopback
 	} {
-		if err := refuseNonPublic("tcp", addr, nil); !errors.Is(err, errNonPublicAddr) {
-			t.Errorf("%s: %v, want refused", addr, err)
+		if err := refuseNonPublic("tcp", net.JoinHostPort(a, "80"), nil); !errors.Is(err, errNonPublicAddr) {
+			t.Errorf("%s: %v, want refused", a, err)
 		}
 	}
-	for _, addr := range []string{"8.8.8.8:443", "1.1.1.1:443", "100.128.0.1:443", "100.63.255.255:443", "172.32.0.1:443", "[2001:4860:4860::8888]:443"} {
-		if err := refuseNonPublic("tcp", addr, nil); err != nil {
-			t.Errorf("%s: %v, want allowed", addr, err)
+	for _, a := range []string{
+		"8.8.8.8", "1.1.1.1", "100.128.0.1", "100.63.255.255", "172.32.0.1",
+		"2001:4860:4860::8888", "2606:4700::1",
+		"64:ff9b::808:808", // NAT64 of 8.8.8.8
+	} {
+		if err := refuseNonPublic("tcp", net.JoinHostPort(a, "443"), nil); err != nil {
+			t.Errorf("%s: %v, want allowed", a, err)
 		}
 	}
 }

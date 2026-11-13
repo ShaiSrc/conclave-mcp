@@ -22,7 +22,7 @@ no second listener, no key and no change: `/v1/federation*` answers 404
 
 | Env var | Flag | Default | Meaning |
 |---|---|---|---|
-| `CONCLAVE_FEDERATION_DOMAIN` | `--federation-domain` | (off) | The server's domain, for example `conclave.example.org`. Lowercase letters, digits, dots and hyphens, an optional `:port`, at most 253 characters. Uppercase input is lowercased. |
+| `CONCLAVE_FEDERATION_DOMAIN` | `--federation-domain` | (off) | The server's domain, for example `conclave.example.org`. Lowercase letters, digits, dots and hyphens, an optional `:port`, at most 253 characters. Uppercase input is lowercased. `:443` is refused: it is the same server as no port, so leave it out. |
 | `CONCLAVE_FEDERATION_HOST` | | `127.0.0.1` | Host of the federation listener. |
 | `CONCLAVE_FEDERATION_PORT` | | `7433` | Port of the federation listener. 1 to 65535. |
 | `CONCLAVE_FEDERATION_MODE` | | `allowlist` | `allowlist` or `open`. |
@@ -42,10 +42,11 @@ those two paths to the federation port. Everything else goes to the main
 listener as before.
 
 **The proxy must forward the `Host` header and the request URI
-unchanged.** The signature covers both. The server checks the
-destination against `Host`, and it signs the URI exactly as received.
-A proxy that rewrites the path, strips a prefix, normalizes the query or
-changes `Host` breaks every request with `bad_signature` or
+unchanged.** The signature covers the request URI and the destination
+domain this server is configured with. The server verifies it against
+the URI exactly as received, and compares the `Host` header with its
+domain. A proxy that rewrites the path, strips a prefix, normalizes the
+query or changes `Host` breaks every request with `bad_signature` or
 `wrong_destination`.
 
 nginx. `proxy_pass` without a URI part passes the URI as the client sent
@@ -100,8 +101,8 @@ Other commands: `federation status`, `peers list [--format json]`,
 | `open` | fetched, then verified; recorded as `seen` on its first valid request | verified | 403 |
 
 `blocked` always wins. In open mode the key first seen for a domain is
-the key the server keeps for it (trust on first use). A `seen` peer
-keeps the same pinned fingerprint as an `allowed` one. Blocking and
+the key the server keeps for it (trust on first use). A `seen` peer's
+key is stored and pinned like an `allowed` one's. Blocking and
 removing are in the CLI and the admin API.
 
 ## Server document
@@ -154,10 +155,12 @@ The server checks in this order and stops at the first failure.
 2. The origin must be a valid domain in canonical form. Otherwise 401 `bad_signature`.
 3. Peer policy. Blocked, or unknown in allowlist mode: 403 `peer_not_allowed`.
    Unknown in open mode: fetch the origin's document (see the limits) and use its key.
-4. The key must be the peer's key: the pinned fingerprint for a known
-   peer. A known peer's public key comes from its document and is cached
-   by fingerprint. A cache miss refetches at most once per peer per minute.
-   A wrong key is 401 `bad_signature` and an audit entry `federation.key_changed`.
+4. A known peer's key is the public key stored when it was added or first
+   seen; nothing is fetched. The header's key ID must be that key's.
+   Otherwise 401 `bad_signature` and a warn log line. Anyone can send
+   such a request, so the server audits it (`federation.key_changed`)
+   only on evidence: it fetches the peer's document, at most once per
+   peer per minute, and the document lists the presented key.
 5. The destination, taken from the request's `Host` header, must be this
    server's domain. Otherwise 421 `wrong_destination`.
 6. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
@@ -165,7 +168,10 @@ The server checks in this order and stops at the first failure.
    signature. Otherwise 401 `bad_signature`.
 8. Store the nonce for (origin, nonce). A duplicate: 401 `bad_signature`.
 9. Per-peer rate limit: 429 `rate_limited` with `Retry-After`.
-10. Record an unknown open-mode peer as `seen`; update `last_seen_at`.
+10. Record an unknown open-mode peer as `seen` with its key. If a row for
+    it appeared meanwhile (a concurrent first request, an operator), that
+    row decides: blocked or not allowed is 403 `peer_not_allowed`, another
+    fingerprint is 401 `bad_signature`. Update `last_seen_at`.
 
 Nonces and `seen` peers are stored only after the signature verifies.
 The rate limit counts verified requests only.
@@ -185,10 +191,11 @@ Errors use the usual envelope `{"error":{"code","message","request_id"}}`.
 | 429 | `rate_limited` | Peer over its limit, or open-mode first-contact fetches over their limit. Has `Retry-After`. |
 | 502 | `peer_unreachable` | The origin's document cannot be fetched. |
 
-Admin API errors: `invalid_domain` and `own_domain` (400),
+Admin API errors: `invalid_domain` and `own_domain` (400; lookup, add,
+block, remove and ping refuse the server's own domain),
 `fingerprint_required` (400), `invalid_json` (400), `fingerprint_mismatch`
 (409), `peer_not_found` (404), `peer_unreachable` (502), `rate_limited`
-(429, lookups over the fetch limit), `federation_disabled` (404).
+(429, lookups and adds over their limit), `federation_disabled` (404).
 A failed ping through the admin API answers 502 `peer_unreachable` with
 the status and code the peer gave.
 
@@ -196,14 +203,14 @@ the status and code the peer gave.
 
 | Action | When |
 |---|---|
-| `federation.peer.add` | An operator adds a peer. |
+| `federation.peer.add` | An operator adds a peer. Detail `{"fingerprint":"SHA256:..."}`. |
 | `federation.peer.block` | An operator blocks a peer. |
 | `federation.peer.remove` | An operator removes a peer. |
 | `federation.peer.seen` | An open-mode origin sends its first valid request. |
-| `federation.key_changed` | A known peer presented a key other than its pinned one. At most one entry per peer per minute. |
+| `federation.key_changed` | Evidence that a known peer serves a key other than its pinned one: a refused request presented a key that the peer's own document lists (at most one entry per peer per minute), or an operator's lookup or add found the pinned key missing from the document. Detail `{"presented":"SHA256:...","expected":"SHA256:..."}`. |
 
 Other refused requests go to the server log at warn, at most one line per
-origin per minute.
+origin and error code per minute.
 
 ## Limits
 
@@ -212,13 +219,20 @@ origin per minute.
 | Request and response bodies | 64 KiB |
 | Clock skew | 300 seconds |
 | Rate per verified peer | 120 per minute, burst 30 |
-| Document fetches for domains that are not allowed | 10 per minute, server-wide |
+| Document fetches for domains that are not allowed | 10 per minute on average, bursts of up to 10, server-wide |
+| Operator lookups and adds | 30 per minute, burst 10, apart from the fetches above |
+| Federation listener | read timeout 10 seconds, write timeout 15 seconds, headers at most 16 KiB |
 | Fetch timeout | 5 seconds, no redirects |
 | Nonce storage | until 5 minutes after `ts`; pruned every minute, one minute after expiry |
 
-For domains that are not `allowed`, the fetch client refuses loopback,
-private (RFC 1918, RFC 4193), link-local, CGNAT (100.64.0.0/10),
-multicast and unspecified addresses, checked on the connected address.
+For domains that are not `allowed`, the fetch client refuses every
+address that is not public, checked on the connected address: loopback,
+link-local, multicast, unspecified and broadcast; private (RFC 1918,
+RFC 4193); CGNAT (100.64.0.0/10), 0.0.0.0/8, 192.0.0.0/24,
+198.18.0.0/15 and 240.0.0.0/4; IPv4-compatible (::/96), documentation
+(2001:db8::/32) and site-local (fec0::/10) IPv6; 6to4 (2002::/16) and
+Teredo (2001::/32). A NAT64 address (64:ff9b::/96, 64:ff9b:1::/48) is
+judged by the IPv4 address in its last 32 bits.
 An `allowed` peer may be private, because the operator chose it. This
 also means a server cannot reach a peer on a private address until it is
 allowed. The operator's own lookup (`peers add`) counts as allowed for

@@ -15,7 +15,6 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   audited as `ui.confirm`.
 - `POST /ui/agents`: creates an agent (a key and its invitation) with one
   confirmation, and revokes the key if the invite fails.
-
 - Federation foundation: with `CONCLAVE_FEDERATION_DOMAIN` set, the server
   has an Ed25519 identity, serves it at `/.well-known/conclave` on a
   separate federation listener (`CONCLAVE_FEDERATION_HOST`,

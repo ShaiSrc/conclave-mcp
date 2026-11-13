@@ -9,13 +9,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
 
-	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -34,15 +32,7 @@ func OriginFrom(ctx context.Context) string {
 	return s
 }
 
-var (
-	errUnknownKey   = errors.New("the origin's document does not list the key")
-	errKeyFetchWait = errors.New("peer key fetched less than a minute ago")
-)
-
-// keyChangedError: a peer's document no longer lists its pinned key.
-type keyChangedError struct{ presented string }
-
-func (e *keyChangedError) Error() string { return "the peer's document lists another key" }
+var errUnknownKey = errors.New("the origin's document does not list the key")
 
 // Verify admits only requests signed by a peer the policy lets in. It
 // runs the spec's checks in order; nonces and seen peers are stored
@@ -72,34 +62,23 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.fail(w, r, err)
 			return
 		}
-		if peer.Status == statusBlocked || s.mode != modeOpen && peer.Status != statusAllowed {
+		if !s.admits(peer) {
 			s.refuse(w, r, origin, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
 			return
 		}
 
-		// 3 (open mode, unknown: TOFU) and 4 (the pinned or recorded key).
-		var pub ed25519.PublicKey
+		// 4. A known peer's key is its stored key, used without a fetch.
+		// 3, open mode: an unknown origin's key comes from its document
+		// (TOFU).
+		pub := peer.PublicKey
 		if known {
-			if want := keyIDOf(peer.Fingerprint); want == "" || p.KeyID != want {
-				s.keyChanged(ctx, origin, p.KeyID, peer.Fingerprint)
+			if len(pub) != ed25519.PublicKeySize || p.KeyID != KeyIDFor(pub) {
+				s.checkKeyChange(ctx, peer, p.KeyID)
 				s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "not the peer's pinned key")
 				return
 			}
-			pub, err = s.peerKey(ctx, origin, peer.Fingerprint)
-		} else {
-			var doc Document
-			if doc, err = s.fetch.Document(ctx, origin); err == nil {
-				if pub = keyIn(doc, p.KeyID); pub == nil || KeyIDFor(pub) != p.KeyID {
-					err = errUnknownKey
-				}
-			}
-		}
-		if err != nil {
-			var changed *keyChangedError
+		} else if pub, err = s.firstContactKey(ctx, origin, p.KeyID); err != nil {
 			switch {
-			case errors.As(err, &changed):
-				s.keyChanged(ctx, origin, changed.presented, peer.Fingerprint)
-				s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "the peer's document lists another key")
 			case errors.Is(err, errUnknownKey):
 				s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", err.Error())
 			case errors.Is(err, ErrFetchLimited):
@@ -165,17 +144,31 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 		}
 		// 10. Record a first contact; update last seen.
 		if !known {
-			fp := Fingerprint(pub)
-			inserted, err := s.peers.RecordSeen(ctx, origin, fp)
+			inserted, err := s.peers.RecordSeen(ctx, origin, pub)
 			if err != nil {
 				s.fail(w, r, err)
 				return
 			}
 			if inserted {
-				detail, _ := json.Marshal(map[string]string{"fingerprint": fp})
-				_ = audit.Write(ctx, s.db, 0, "federation.peer.seen", "federation_peer", origin, "", "ok", string(detail))
+				detail, _ := json.Marshal(map[string]string{"fingerprint": Fingerprint(pub)})
+				s.audit(ctx, "federation.peer.seen", origin, "ok", string(detail))
+			} else {
+				// A row appeared since step 3 (another first request, an
+				// operator); it decides.
+				row, err := s.peers.Get(ctx, origin)
+				if err != nil {
+					s.fail(w, r, err)
+					return
+				}
+				if !s.admits(row) {
+					s.refuse(w, r, origin, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
+					return
+				}
+				if row.Fingerprint != Fingerprint(pub) {
+					s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "not the peer's pinned key")
+					return
+				}
 			}
-			s.cacheKey(pub)
 		}
 		if err := s.peers.Touch(ctx, origin); err != nil {
 			s.fail(w, r, err)
@@ -192,14 +185,10 @@ func inWindow(ts int64) bool {
 	return -maxSkew <= d && d <= maxSkew
 }
 
-// keyIDOf returns the key ID that belongs to a fingerprint (KeyIDFor
-// derives it from the key), or "" for a malformed one.
-func keyIDOf(fingerprint string) string {
-	fp, ok := strings.CutPrefix(fingerprint, "SHA256:")
-	if !ok || len(fp) < 16 {
-		return ""
-	}
-	return "ed25519:" + fp[:16]
+// admits reports whether the policy lets p in; the zero Peer is an
+// unknown origin.
+func (s *Service) admits(p Peer) bool {
+	return p.Status != statusBlocked && (s.mode == modeOpen || p.Status == statusAllowed)
 }
 
 // keyIn returns the key in doc whose key ID or fingerprint is want, or
@@ -214,38 +203,17 @@ func keyIn(doc Document, want string) ed25519.PublicKey {
 	return nil
 }
 
-// peerKey returns the key with fingerprint fp, from the cache or from
-// domain's document.
-func (s *Service) peerKey(ctx context.Context, domain, fp string) (ed25519.PublicKey, error) {
-	s.mu.Lock()
-	pub := s.keys[fp]
-	s.mu.Unlock()
-	if pub != nil {
-		return pub, nil
-	}
-	// ponytail: one fetch per peer a minute while its key is not cached,
-	// so forged requests naming a peer cannot make us hammer it. A second
-	// concurrent first request gets 502; add singleflight if that matters.
-	if !s.keyFetches.allow(domain) {
-		return nil, errKeyFetchWait
-	}
-	doc, err := s.fetch.Document(ctx, domain)
+// firstContactKey fetches the document of an unknown origin and returns
+// its key with ID keyID.
+func (s *Service) firstContactKey(ctx context.Context, origin, keyID string) (ed25519.PublicKey, error) {
+	doc, err := s.fetch.Document(ctx, origin)
 	if err != nil {
 		return nil, err
 	}
-	if pub = keyIn(doc, fp); pub == nil {
-		return nil, &keyChangedError{presented: doc.Keys[0].KeyID}
+	if pub := keyIn(doc, keyID); pub != nil && KeyIDFor(pub) == keyID {
+		return pub, nil
 	}
-	s.cacheKey(pub)
-	return pub, nil
-}
-
-// cacheKey remembers a peer key by its fingerprint; a fingerprint
-// names one key, so entries never go stale.
-func (s *Service) cacheKey(pub ed25519.PublicKey) {
-	s.mu.Lock()
-	s.keys[Fingerprint(pub)] = pub
-	s.mu.Unlock()
+	return nil, errUnknownKey
 }
 
 // limiter returns origin's rate limiter. ponytail: one per verified
@@ -262,24 +230,38 @@ func (s *Service) limiter(origin string) *rate.Limiter {
 	return lim
 }
 
-// keyChanged audits a refused key for a known peer. Step 4 runs before
-// any signature is verified, so anyone can trigger it: at most one
-// entry per peer a minute.
-func (s *Service) keyChanged(ctx context.Context, domain, presented, expected string) {
-	if !s.keyAudits.allow(domain) {
+// checkKeyChange runs when a request for a known peer names a key
+// other than its stored one. Anyone can send that, so it is audited
+// only on evidence: the peer's own document lists the presented key.
+// The document is fetched at most once per peer a minute.
+func (s *Service) checkKeyChange(ctx context.Context, peer Peer, presented string) {
+	if !s.keyChecks.allow(peer.Domain) {
 		return
 	}
+	doc, err := s.fetch.Document(ctx, peer.Domain)
+	if err != nil {
+		return
+	}
+	if pub := keyIn(doc, presented); pub != nil && KeyIDFor(pub) == presented {
+		s.keyChanged(ctx, peer.Domain, Fingerprint(pub), peer.Fingerprint, "error:bad_signature")
+	}
+}
+
+// keyChanged audits evidence that domain serves a key other than its
+// pinned one.
+func (s *Service) keyChanged(ctx context.Context, domain, presented, expected, result string) {
 	detail, _ := json.Marshal(struct {
 		Presented string `json:"presented"`
 		Expected  string `json:"expected"`
 	}{presented, expected})
-	_ = audit.Write(ctx, s.db, 0, "federation.key_changed", "federation_peer", domain, "", "error:bad_signature", string(detail))
+	s.audit(ctx, "federation.key_changed", domain, result, string(detail))
 }
 
 // refuse answers with an error and logs it at warn, at most one line
-// per origin a minute.
+// per origin and code a minute, so a forged origin cannot silence
+// another code.
 func (s *Service) refuse(w http.ResponseWriter, r *http.Request, origin string, status int, code, msg string) {
-	if s.warnLog.allow(origin) {
+	if s.warnLog.allow(origin + " " + code) {
 		s.logger.Warn("federation request refused", "origin", origin, "status", status, "code", code, "reason", msg)
 	}
 	writeErr(w, r, status, code, msg)

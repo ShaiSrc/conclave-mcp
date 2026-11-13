@@ -12,8 +12,10 @@ var ErrInvalidDomain = errors.New("invalid federation domain")
 // NormalizeDomain returns the canonical form of a federation domain:
 // lowercase ASCII letters, digits, dots and hyphens, an optional
 // :port from 1 to 65535 without leading zeros, at most 253 characters
-// in all. Labels are non-empty and neither start nor end with a
-// hyphen. IDNA names are accepted only in their ASCII (xn--) form.
+// in all. :443 is refused: it is the same server as no port, so it
+// would be a second spelling. Labels are non-empty and neither start
+// nor end with a hyphen. IDNA names are accepted only in their ASCII
+// (xn--) form.
 func NormalizeDomain(s string) (string, error) {
 	if s == "" || len(s) > 253 {
 		return "", ErrInvalidDomain
@@ -29,7 +31,7 @@ func NormalizeDomain(s string) (string, error) {
 	host, port, hasPort := strings.Cut(s, ":")
 	if hasPort {
 		n, err := strconv.Atoi(port)
-		if err != nil || n < 1 || n > 65535 || port != strconv.Itoa(n) {
+		if err != nil || n < 1 || n > 65535 || n == 443 || port != strconv.Itoa(n) {
 			return "", ErrInvalidDomain
 		}
 	}

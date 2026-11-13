@@ -29,7 +29,33 @@ var ErrFetchLimited = errors.New("too many federation document fetches, try agai
 
 var errNonPublicAddr = errors.New("refusing a non-public address")
 
-var cgnat = netip.MustParsePrefix("100.64.0.0/10")
+// nonPublic are the ranges public refuses on top of what netip calls
+// not global unicast or private. 6to4 and Teredo carry IPv4 addresses
+// that cannot be checked reliably, so they are refused outright.
+var nonPublic = prefixes(
+	"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "255.255.255.255/32",
+	"::/96", "2001:db8::/32", "fec0::/10", "2002::/16", "2001::/32",
+)
+
+// nat64 prefixes carry an IPv4 address in their last 32 bits.
+var nat64 = prefixes("64:ff9b::/96", "64:ff9b:1::/48")
+
+func prefixes(ss ...string) []netip.Prefix {
+	out := make([]netip.Prefix, len(ss))
+	for i, s := range ss {
+		out[i] = netip.MustParsePrefix(s)
+	}
+	return out
+}
+
+func inAny(a netip.Addr, ps []netip.Prefix) bool {
+	for _, p := range ps {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
 
 // Fetcher makes the server's outgoing federation requests. For a
 // domain that is not allowed, it connects only to public addresses.
@@ -81,11 +107,22 @@ func refuseNonPublic(_, address string, _ syscall.RawConn) error {
 	if err != nil {
 		return err
 	}
-	a := ap.Addr().Unmap()
-	if a.IsLoopback() || a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() || cgnat.Contains(a) {
+	if a := ap.Addr(); !public(a) {
 		return fmt.Errorf("%w: %s", errNonPublicAddr, a)
 	}
 	return nil
+}
+
+// public reports whether a is a global unicast address outside every
+// private and special range. A NAT64 address is judged by the IPv4
+// address it carries.
+func public(a netip.Addr) bool {
+	a = a.Unmap()
+	if inAny(a, nat64) {
+		b := a.As16()
+		return public(netip.AddrFrom4([4]byte(b[12:])))
+	}
+	return a.IsGlobalUnicast() && !a.IsPrivate() && !inAny(a, nonPublic)
 }
 
 // Document fetches and checks domain's server document. Domains that
