@@ -19,6 +19,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -71,7 +72,7 @@ var errOperatorUnusable = errors.New(`a key labelled "operator" exists that the 
 // metaOperatorKey is the meta key that records the id of the operator
 // key the UI created. The label alone proves nothing: an admin key made
 // by hand may carry it, and its secret is known.
-const metaOperatorKey = "ui_operator_key_id"
+const metaOperatorKey = fedrooms.OperatorMetaKey
 
 // operatorKeyID returns the id of the operator key the UI created,
 // provided it is still an active admin key.

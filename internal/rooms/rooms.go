@@ -72,6 +72,7 @@ type roomView struct {
 	// Visibility (SPEC-0001 Q6) is always present in API
 	// responses so clients never have to default.
 	Visibility string `json:"visibility"`
+	Home       string `json:"home,omitempty"` // the host of a replica room
 }
 
 type createRequest struct {
@@ -182,7 +183,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		admin = 1
 	}
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, '')
 		 FROM rooms r
 		 WHERE r.archived_at IS NULL
 		   AND (? = 1 OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.key_id = ?))
@@ -202,7 +203,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			desc     sql.NullString
 			archived sql.NullString
 		)
-		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility); err != nil {
+		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
@@ -226,8 +227,8 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 		archived sql.NullString
 	)
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility FROM rooms WHERE id = ?`, id,
-	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility); err != nil {
+		`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility, COALESCE(home_domain, '') FROM rooms WHERE id = ?`, id,
+	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "get query")
 		return
 	}
@@ -280,6 +281,9 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
+	if s.refuseReplica(w, r, id) {
+		return
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	res, err := s.DB.ExecContext(r.Context(),
 		`UPDATE rooms SET archived_at = ? WHERE id = ? AND archived_at IS NULL`,
@@ -313,6 +317,9 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
+	if s.refuseReplica(w, r, id) {
+		return
+	}
 	var req inviteRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
@@ -385,6 +392,9 @@ func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
+	if s.refuseReplica(w, r, id) {
+		return
+	}
 	keyid, err := strconv.ParseInt(chi.URLParam(r, "keyid"), 10, 64)
 	if err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "keyid must be integer")
@@ -444,6 +454,17 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "keyid must be integer")
 		return
 	}
+	// This server's own bot may leave a replica room; nothing else changes it.
+	var local bool
+	if err := s.DB.QueryRowContext(r.Context(),
+		`SELECT remote_domain IS NULL FROM api_keys WHERE id = ?`, keyid,
+	).Scan(&local); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "key lookup")
+		return
+	}
+	if !local && s.refuseReplica(w, r, id) {
+		return
+	}
 	res, err := s.DB.ExecContext(r.Context(),
 		`DELETE FROM room_members WHERE room_id = ? AND key_id = ?`,
 		id, keyid,
@@ -464,6 +485,25 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 	_ = audit.Write(r.Context(), s.DB, caller, "room.remove", "member", strconv.FormatInt(keyid, 10), id, "ok",
 		`{"room_id":`+strconvQuote(id)+`}`)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// refuseReplica answers 403 replica_room and returns true when roomID
+// is a replica: its host owns the members, rights and archive state.
+// A room that does not exist is left to the handler's 404.
+func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID string) bool {
+	var home sql.NullString
+	err := s.DB.QueryRowContext(r.Context(), `SELECT home_domain FROM rooms WHERE id = ?`, roomID).Scan(&home)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return false
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
+		return true
+	case home.Valid:
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted by "+home.String+"; change it there")
+		return true
+	}
+	return false
 }
 
 func callerKeyID(r *http.Request) int64 {

@@ -491,10 +491,10 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
 		return
 	}
-	var archived sql.NullString
+	var archived, home sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT archived_at FROM rooms WHERE id = ?`, roomID,
-	).Scan(&archived); err != nil {
+		`SELECT archived_at, home_domain FROM rooms WHERE id = ?`, roomID,
+	).Scan(&archived, &home); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
 			return
@@ -504,6 +504,10 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	}
 	if archived.Valid {
 		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
+		return
+	}
+	if home.Valid {
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted by "+home.String+"; change it there")
 		return
 	}
 

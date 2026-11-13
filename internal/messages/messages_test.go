@@ -653,3 +653,24 @@ func (b *capBroker) Publish(_ string, payload []byte) int {
 	b.payloads = append(b.payloads, string(payload))
 	return 1
 }
+
+func TestMessages_DeleteOnReplicaIs403(t *testing.T) {
+	_, db, owner, roomID := setupAs(t)
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, ?, 'x', 'text/plain')`,
+		roomID, owner, storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE rooms SET home_domain = 'a.example' WHERE id = ?`, roomID); err != nil {
+		t.Fatal(err)
+	}
+	admin := newServer(t, db, seedKey(t, db, "admin"), auth.ScopeAdmin)
+	rec := httptest.NewRecorder()
+	admin.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/rooms/"+roomID+"/messages/1", nil))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"replica_room"`) {
+		t.Errorf("delete on a replica: %d %s, want 403 replica_room", rec.Code, rec.Body.String())
+	}
+	var deleted sql.NullString
+	if err := db.QueryRow(`SELECT deleted_at FROM messages WHERE id = 1`).Scan(&deleted); err != nil || deleted.Valid {
+		t.Errorf("message deleted: %v %v", deleted, err)
+	}
+}

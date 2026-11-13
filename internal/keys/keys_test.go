@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -371,5 +373,75 @@ func TestKeys_HandleInWhoamiAndList(t *testing.T) {
 	var adm struct{ Keys []struct{ Admin bool } }
 	if err := json.Unmarshal([]byte(get("/keys")), &adm); err != nil || len(adm.Keys) != 2 || !adm.Keys[0].Admin || adm.Keys[1].Admin {
 		t.Errorf("admin flags: %+v %v", adm, err)
+	}
+}
+
+// standIn creates the stand-in key for address through fedrooms.
+func standIn(t *testing.T, db *sql.DB, address string) int64 {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	id, err := fedrooms.StandIn(context.Background(), tx, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestKeys_StandInNeverAuthenticates(t *testing.T) {
+	db := setupDB(t)
+	ctx := context.Background()
+	v := auth.NewVerifier(NewService(db), 1)
+	token, phc, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Give the stand-in a real token's prefix and hash: still refused.
+	id := standIn(t, db, "b1@b.example")
+	if _, err := db.Exec(`UPDATE api_keys SET hash = ?, prefix = ? WHERE id = ?`, phc, token[3:11], id); err != nil {
+		t.Fatal(err)
+	}
+	if got, _, err := v.Verify(ctx, "Bearer "+token); !errors.Is(err, auth.ErrInvalid) {
+		t.Errorf("stand-in authenticated: key %d err %v", got, err)
+	}
+	// A local key with the same prefix authenticates as itself.
+	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES ('local', ?, ?, '2026-01-01T00:00:00Z')`, phc, token[3:11])
+	if err != nil {
+		t.Fatal(err)
+	}
+	local, _ := res.LastInsertId()
+	if got, _, err := v.Verify(ctx, "Bearer "+token); err != nil || got != local {
+		t.Errorf("local key: %d %v, want %d", got, err, local)
+	}
+}
+
+func TestKeys_ListMarksStandInsRemote(t *testing.T) {
+	r, db := newTestServer(t)
+	if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES ('root', 'x', 'prefix01', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	standIn(t, db, "b1@b.example")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/keys", nil))
+	var list struct {
+		Keys []struct {
+			Label  string
+			Remote *string
+		}
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Keys) != 2 {
+		t.Fatalf("list: %d %s", rec.Code, rec.Body)
+	}
+	if k := list.Keys[0]; k.Label != "root" || k.Remote != nil {
+		t.Errorf("local key marked remote: %s", rec.Body)
+	}
+	if k := list.Keys[1]; k.Label != "b1@b.example" || k.Remote == nil || *k.Remote != "b.example" {
+		t.Errorf("stand-in not marked remote: %s", rec.Body)
 	}
 }
