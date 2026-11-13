@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-13
+
 ### Added
 
 - `POST /ui/auth/confirm/begin` and `finish`: the web UI confirms each
