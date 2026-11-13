@@ -28,9 +28,11 @@ conclave.example.com {
     # The server enforces 256 KiB per message; this is the proxy
     # boundary so it can reject oversized uploads without buffering.
     handle {
+        request_body {
+            max_size 1MB
+        }
         reverse_proxy 127.0.0.1:7432 {
             transport http {
-                max_request_body 1MB
                 dial_timeout     5s
                 response_header_timeout 30s
             }
