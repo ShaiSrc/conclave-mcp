@@ -104,6 +104,11 @@ is open. A logged-in session alone only reads.
   you started, make no changes while an agent drives the browser, and
   check the audit log afterwards: every change by `operator` is one you
   confirmed.
+- The riskiest prompt is a passkey: a program that drives the browser
+  while you confirm anything there could register a passkey of its own
+  (a virtual authenticator) and then confirm whatever it likes. Check
+  the Passkeys page and the `ui.passkey.add` entries in the audit log;
+  remove a passkey you do not know.
 
 ## Operator messages
 

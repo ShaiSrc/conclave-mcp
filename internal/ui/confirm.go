@@ -217,7 +217,8 @@ func (s *Service) createAgent(w http.ResponseWriter, r *http.Request) {
 		} `json:"error"`
 	}
 	_ = json.Unmarshal(invite.Body.Bytes(), &failed)
-	if rev := s.record(r, http.MethodDelete, fmt.Sprintf("/v1/keys/%d", created.ID), nil); rev.Code/100 != 2 {
+	// The revoke runs even if the client has gone meanwhile.
+	if rev := s.record(r.WithContext(context.WithoutCancel(r.Context())), http.MethodDelete, fmt.Sprintf("/v1/keys/%d", created.ID), nil); rev.Code/100 != 2 {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error",
 			fmt.Sprintf("invite failed (%s); revoking key %d failed too: revoke it on the Keys page", failed.Error.Message, created.ID))
 		return

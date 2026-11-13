@@ -28,8 +28,12 @@ Not stopped, as for operator messages: while an agent drives the
 browser and the operator confirms a change there, the agent can swap
 the request between what the page shows and what `begin` stores, or
 start a prompt of its own. The Touch ID prompt does not say what it
-confirms. The docs say: confirm only prompts you started, make no
-changes while an agent drives the browser, and check the audit log.
+confirms. The worst case is a passkey: it can turn any confirmation into
+"add a passkey", or finish the operator's own registration with a
+virtual authenticator, and that passkey then confirms whatever it
+likes. The docs say: confirm only prompts you started, make no changes
+while an agent drives the browser, and check the Passkeys page and the
+audit log (`ui.passkey.add`) afterwards.
 
 ## Decisions
 

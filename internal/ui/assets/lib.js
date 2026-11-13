@@ -63,7 +63,8 @@ export async function api(method, path, body) {
     res = await fetch(path, opts);
     // The rate limit (burst 30, then 10 a second) can refuse a page that
     // reads many rooms: wait as the server says and try again, 3 times.
-    if (res.status !== 429 || tries === 3) break;
+    // Only /v1: a /ui/auth finish uses its ceremony up, so a retry fails.
+    if (res.status !== 429 || tries === 3 || !path.startsWith('/v1/')) break;
     await new Promise(r => setTimeout(r, 1000 * (Number(res.headers.get('Retry-After')) || 1)));
   }
   const text = await res.text();
