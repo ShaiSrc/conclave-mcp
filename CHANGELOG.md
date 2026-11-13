@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-13
+
 ### Added
 
 - Operator messages: the web UI can send a message to a room, each one
@@ -19,6 +21,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 - A UI session can no longer post to `POST /v1/rooms/{id}/messages`: it
   gets 403 `forbidden`. Messages from the UI need the passkey confirmation.
+
+### Fixed
+
+- The room name in the `inbox`, `thread` and hook headers is printed on
+  one line, so a line break in it cannot start a line of its own.
 
 ## [0.6.0] — 2026-11-12
 
