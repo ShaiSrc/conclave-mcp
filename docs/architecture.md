@@ -186,7 +186,7 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/keys` | Create an API key (`trust_origin` defaults to `external`). | admin |
 | `DELETE` | `/v1/keys/{id}` | Revoke an API key. | admin |
 | `GET` | `/v1/whoami` | The caller's own key. | any key |
-| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room. A replica room has `home`; `kind` is `room` or `direct` (`?kind=` filters). | any key |
+| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room, and archived ones with `?include_archived=1`. A replica room has `home`; `kind` is `room` or `direct` (`?kind=` filters); a direct room has `last_message_at`. | any key |
 | `POST` | `/v1/rooms` | Create a room. | admin |
 | `GET` | `/v1/rooms/{id}` | Room details and `my_rights`. | member, admin |
 | `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. | admin |

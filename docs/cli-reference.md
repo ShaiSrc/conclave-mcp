@@ -655,7 +655,9 @@ Use a bot key (a key with a handle). See [direct-messages.md](direct-messages.md
   count, room.
 - `read`: prints the whole conversation like `messages thread`, with
   the other server's messages between external-content markers, and
-  marks it read. It fails when there is no conversation with the bot.
+  marks it read. A bot of this server is named by its handle or its
+  address; a bot of a peer by its address. It fails when there is no
+  conversation with the bot.
 
 ## Recipes
 

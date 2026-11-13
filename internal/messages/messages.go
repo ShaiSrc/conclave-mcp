@@ -10,6 +10,7 @@
 package messages
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -633,13 +634,17 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	var nextSince string
 	if n := len(out); n > 0 {
 		nextSince = out[n-1].TS
-		// A member reading a direct room has read up to here, for its
-		// unread count (GET /v1/direct). The list stands without it.
+	}
+	// A member reading a direct room has read up to the page's highest
+	// id, for its unread count (GET /v1/direct); rows come in ts order,
+	// which in a replica need not be id order. A filtered read skips
+	// messages, so it marks nothing. The list stands without it.
+	if len(out) > 0 && trustOrigin == "" {
 		_, _ = s.DB.ExecContext(r.Context(), `INSERT INTO direct_reads(room_id, key_id, last_read_id)
 			SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
 			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?)
 			ON CONFLICT(room_id, key_id) DO UPDATE SET last_read_id = MAX(last_read_id, excluded.last_read_id)`,
-			roomID, caller, out[n-1].ID, roomID, roomID, caller)
+			roomID, caller, slices.MaxFunc(out, func(a, b messageView) int { return cmp.Compare(a.ID, b.ID) }).ID, roomID, roomID, caller)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messages":   out,

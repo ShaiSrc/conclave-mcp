@@ -452,38 +452,50 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	})
 }
 
+// Bounds of what one Stop reads of direct conversations.
+const (
+	directConvs = 5  // conversations with unread messages
+	directMsgs  = 10 // unread messages of each
+)
+
 // directNews renders the unread messages of the agent's direct
-// conversations ("" if none). Reading a direct room marks it read on
-// the server, so the Stop hook shows each message once. Best effort.
-// ponytail: reads whole rooms; add a since filter if conversations grow long.
+// conversations that hold an actionable one ("" if none), as the room
+// path does: up to directMsgs after the last one read, of up to
+// directConvs conversations, saying how many are left. Reading a direct
+// room marks what it read on the server, so each message is shown once,
+// and the next Stop goes on after it. Best effort.
 func (h *Hook) directNews(ctx context.Context, st *agent.State) string {
 	convs, err := agent.ListDirect(ctx, h.C)
 	if err != nil || agent.EnsureSelf(ctx, h.C, st) != nil {
 		return ""
 	}
 	var b strings.Builder
+	read, left := 0, 0
 	for _, cv := range convs {
-		if cv.Unread <= 0 {
+		switch {
+		case cv.Unread <= 0:
+			continue
+		case read == directConvs:
+			left++
 			continue
 		}
-		all, err := agent.ListAll(ctx, h.C, cv.RoomID, "")
+		read++
+		page, err := agent.Page(ctx, h.C, cv.RoomID, cv.LastReadAt, directMsgs)
 		if err != nil {
 			continue
 		}
-		var msgs []agent.Msg
-		for _, m := range all {
-			if m.Author != st.SelfID {
-				msgs = append(msgs, m)
-			}
-		}
-		if len(msgs) > cv.Unread {
-			msgs = msgs[len(msgs)-cv.Unread:]
-		}
-		if len(msgs) == 0 {
+		msgs := slices.DeleteFunc(page, func(m agent.Msg) bool { return m.Author == st.SelfID })
+		if !slices.ContainsFunc(msgs, agent.Actionable) {
 			continue
 		}
 		room := agent.LoadRoom(ctx, h.C, cv.RoomID, "direct with "+cv.Address+" (room_id "+cv.RoomID+")")
 		b.WriteString(agent.Format(room, msgs))
+		if more := cv.Unread - len(msgs); more > 0 {
+			fmt.Fprintf(&b, "(%d more unread in this conversation: read them with messages.list on room %s.)\n", more, agent.OneLine(cv.RoomID))
+		}
+	}
+	if b.Len() > 0 && left > 0 {
+		fmt.Fprintf(&b, "(%d more direct conversations with unread messages: see direct.list.)\n", left)
 	}
 	return b.String()
 }

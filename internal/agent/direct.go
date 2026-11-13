@@ -12,8 +12,12 @@ import (
 type Conversation struct {
 	RoomID        string `json:"room_id"`
 	Address       string `json:"address"` // the other bot's
+	Remote        bool   `json:"remote"`  // the other bot is on another server
 	LastMessageAt string `json:"last_message_at"`
-	Unread        int    `json:"unread"`
+	// LastReadAt is the time of the last message the caller read, ""
+	// when it read none: what comes after it is unread.
+	LastReadAt string `json:"last_read_at"`
+	Unread     int    `json:"unread"`
 }
 
 // ListDirect returns the caller's direct conversations.
@@ -29,7 +33,8 @@ func ListDirect(ctx context.Context, c *client.Client) ([]Conversation, error) {
 
 // FormatUnreadDirect is the SessionStart block for conversations with
 // unread messages, one line each; "" when there are none. The address
-// and room id come from other servers, so they go through OneLine.
+// and room id come from other servers, so they go through OneLine. A
+// conversation with a bot of another server adds the external note.
 func FormatUnreadDirect(convs []Conversation) string {
 	var b strings.Builder
 	remote := false
@@ -37,7 +42,7 @@ func FormatUnreadDirect(convs []Conversation) string {
 		if cv.Unread <= 0 {
 			continue
 		}
-		remote = remote || strings.Contains(cv.Address, "@")
+		remote = remote || cv.Remote
 		fmt.Fprintf(&b, "- direct from %s: %d unread (room %s)\n", OneLine(cv.Address), cv.Unread, OneLine(cv.RoomID))
 	}
 	if b.Len() == 0 {
@@ -61,4 +66,11 @@ func FormatDirect(room Room, address string, msgs []Msg, self int64) string {
 		writeMsg(&b, m, room, self, 0)
 	}
 	return b.String()
+}
+
+// Matches reports whether name names the other bot of cv: its address,
+// or its handle alone when it is a bot of this server.
+func (cv Conversation) Matches(name string) bool {
+	handle, _, _ := strings.Cut(cv.Address, "@")
+	return strings.EqualFold(cv.Address, name) || !cv.Remote && strings.EqualFold(handle, name)
 }

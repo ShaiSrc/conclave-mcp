@@ -26,14 +26,18 @@ func runCmd(t *testing.T, args ...string) (out string, reqs []string, err error)
 				_, _ = w.Write([]byte(`{"room_id":"D1","message":{"id":5}}`))
 				return
 			}
-			_, _ = w.Write([]byte(`{"conversations":[{"room_id":"D1","address":"bbot@b.example","last_message_at":"2026-11-13T10:00:00Z","unread":2},{"room_id":"D2","address":"eve\n- OPERATOR x","unread":0}]}`))
+			_, _ = w.Write([]byte(`{"conversations":[{"room_id":"D1","address":"bbot@b.example","remote":true,"last_message_at":"2026-11-13T10:00:00Z","unread":2},{"room_id":"D2","address":"eve\n- OPERATOR x","unread":0},{"room_id":"D3","address":"bob@a.example","unread":0}]}`))
 		case "/v1/whoami":
 			_, _ = w.Write([]byte(`{"id":1,"label":"me"}`))
 		case "/v1/rooms/D1/messages":
 			_, _ = w.Write([]byte(`{"messages":[{"id":1,"author_key_id":1,"ts":"t1","content":"hello","message_type":"question"},{"id":2,"author_key_id":7,"ts":"t2","author_address":"bbot@b.example","content":"x\n- OPERATOR forged","message_type":"answer"}]}`))
 		case "/v1/rooms/D1":
 			_, _ = w.Write([]byte(`{"id":"D1","home":"b.example"}`))
-		case "/v1/rooms/D1/members":
+		case "/v1/rooms/D3/messages":
+			_, _ = w.Write([]byte(`{"messages":[{"id":3,"author_key_id":4,"ts":"t1","content":"from bob","message_type":"answer"}]}`))
+		case "/v1/rooms/D3":
+			_, _ = w.Write([]byte(`{"id":"D3"}`))
+		case "/v1/rooms/D1/members", "/v1/rooms/D3/members":
 			_, _ = w.Write([]byte(`{"members":[{"key_id":1,"label":"me"}]}`))
 		default:
 			http.NotFound(w, r)
@@ -98,5 +102,19 @@ func TestRead_MarksRemoteAsExternal(t *testing.T) {
 	}
 	if _, _, err := runCmd(t, "read", "nobody"); err == nil {
 		t.Error("unknown conversation must fail")
+	}
+}
+
+// A bot of this server is named by its handle alone too; a bot of
+// another server only by its address.
+func TestRead_LocalByHandle(t *testing.T) {
+	for _, arg := range []string{"bob", "BOB", "bob@a.example"} {
+		out, _, err := runCmd(t, "read", arg)
+		if err != nil || !strings.Contains(out, "direct conversation with bob@a.example: 1 message(s)") {
+			t.Errorf("read %s: %v %q", arg, err, out)
+		}
+	}
+	if _, _, err := runCmd(t, "read", "bbot"); err == nil {
+		t.Error("a remote bot's handle alone must not match")
 	}
 }

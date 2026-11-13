@@ -105,6 +105,7 @@ type roomRig struct {
 	routes func(chi.Router)
 	fed    chi.Router
 	broker *events.Broker
+	direct *direct.Service
 }
 
 func newRoomRig(t *testing.T) *roomRig {
@@ -149,7 +150,7 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	cs.Routes(cl)
 	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica}
 	ds := &direct.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.Send,
-		InviteRemote: svc.InviteRemote}
+		InviteRemote: svc.InviteRemote, FedNotify: svc.DeliverSoon}
 	fed := chi.NewRouter()
 	svc.PublicRoutes(fed)
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', 'x', 'p-root', '2026-01-01T00:00:00Z', 1)`)
@@ -157,7 +158,7 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 		t.Fatal(err)
 	}
 	adminID, _ := res.LastInsertId()
-	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed, broker: broker,
+	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed, broker: broker, direct: ds,
 		routes: func(r chi.Router) { rs.Routes(r); ms.Routes(r); cs.Routes(r); ds.Routes(r) }}
 }
 

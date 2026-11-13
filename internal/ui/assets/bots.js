@@ -45,7 +45,7 @@ function botEditor(p, domain) {
   const name = h('input', { value: p.display_name, maxlength: 64 });
   const desc = h('textarea', { rows: 3, maxlength: 1000 }, p.description);
   const vis = h('select', {}, VISIBILITY.map(v => h('option', { value: v, selected: v === p.visibility }, v)));
-  const dmCurrent = p.dm_policy || 'none';
+  const dmCurrent = p.dm_policy || 'local'; // the server's default
   const dm = h('select', {}, DM_POLICY.map(v => h('option', { value: v, selected: v === dmCurrent }, v)));
   const dmNote = h('p', { class: 'muted' }, DM_NOTES[dmCurrent]);
   dm.addEventListener('change', () => dmNote.replaceChildren(DM_NOTES[dm.value]));

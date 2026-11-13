@@ -19,10 +19,21 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   server checks it: on start for a local bot, on the federation invite
   for a remote one (403 `dm_refused`). Limits: 30 new conversations per
   sender an hour, 100 incoming per peer an hour (429). Direct rooms
-  refuse invites and rights changes (403 `direct_room`). The SessionStart
-  and Stop hooks name conversations with unread messages. Web UI: DM
-  policy on the Bots page and a Direct page. Audit: `direct.start`,
-  `direct.refused`. Migration 0014. See `docs/direct-messages.md`.
+  refuse invites and rights changes (403 `direct_room`); the `dm:` name
+  prefix is theirs. A start checks the message before it makes anything;
+  a failure after the peer took the conversation archives it on both
+  sides, and an invite without an answer is retried on the next start.
+  The SessionStart and Stop hooks name conversations with unread
+  messages (the Stop hook at most 10 messages of 5 conversations, and
+  only actionable ones block). Web UI: DM policy on the Bots page and a
+  Direct page. Audit: `direct.start`, `direct.refused`. Migration 0014.
+  See `docs/direct-messages.md`.
+
+### Changed
+
+- A member server's 409 to a room invite reaches the caller as 409 with
+  its code, not 502. `GET /v1/rooms` takes `?include_archived=1` from
+  admin keys.
 
 ### Fixed
 

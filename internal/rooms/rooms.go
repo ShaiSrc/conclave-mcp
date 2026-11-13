@@ -114,6 +114,8 @@ type roomView struct {
 	Visibility string `json:"visibility"`
 	Home       string `json:"home,omitempty"` // the host of a replica room
 	Kind       string `json:"kind"`           // room or direct
+	// LastMessageAt is a direct room's latest message time, in lists.
+	LastMessageAt string `json:"last_message_at,omitempty"`
 }
 
 type createRequest struct {
@@ -138,6 +140,10 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Name) < 1 || len(req.Name) > 128 {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "name must be 1..128 chars")
+		return
+	}
+	if strings.HasPrefix(req.Name, fedrooms.DirectPrefix) {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are direct conversations'")
 		return
 	}
 	if len(req.Description) > 1024 {
@@ -208,8 +214,9 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 }
 
 // list returns the rooms the caller is a member of; an admin key gets
-// every room. Archived rooms are left out; ?visibility= and ?kind=
-// narrow the set.
+// every room. Archived rooms are left out unless an admin key asks for
+// them with ?include_archived=1; ?visibility= and ?kind= narrow the
+// set. A direct room carries its last message time.
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
@@ -226,19 +233,18 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "kind must be room or direct")
 		return
 	}
-	admin := 0
-	if auth.IsAdmin(r.Context()) {
-		admin = 1
-	}
+	admin := auth.IsAdmin(r.Context())
+	archived := admin && r.URL.Query().Get("include_archived") == "1"
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), r.kind
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), r.kind,
+		        CASE WHEN r.kind = 'direct' THEN COALESCE((SELECT MAX(ts) FROM messages WHERE room_id = r.id AND deleted_at IS NULL), '') ELSE '' END
 		 FROM rooms r
-		 WHERE r.archived_at IS NULL
-		   AND (? = 1 OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.key_id = ?))
+		 WHERE (? OR r.archived_at IS NULL)
+		   AND (? OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.key_id = ?))
 		   AND (? = '' OR r.visibility = ?)
 		   AND (? = '' OR r.kind = ?)
 		 ORDER BY r.created_at DESC`,
-		admin, caller, visibilityFilter, visibilityFilter, kind, kind)
+		archived, admin, caller, visibilityFilter, visibilityFilter, kind, kind)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "list query")
 		return
@@ -248,15 +254,16 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	var out []roomView
 	for rows.Next() {
 		var (
-			rv       roomView
-			desc     sql.NullString
-			archived sql.NullString
+			rv         roomView
+			desc       sql.NullString
+			archivedAt sql.NullString
 		)
-		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home, &rv.Kind); err != nil {
+		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archivedAt, &rv.Visibility, &rv.Home, &rv.Kind,
+			&rv.LastMessageAt); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
-		rv.Description, rv.ArchivedAt = desc.String, archived.String
+		rv.Description, rv.ArchivedAt = desc.String, archivedAt.String
 		out = append(out, rv)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"rooms": out})

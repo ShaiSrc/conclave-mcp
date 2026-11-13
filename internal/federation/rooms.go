@@ -150,6 +150,9 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	case err != nil:
 		s.logger.Warn("federation room invite failed", "domain", d, "err", err)
 		refusal = &fedrooms.Error{Status: http.StatusBadGateway, Code: "peer_unreachable", Message: "peer did not answer"}
+	case (status == http.StatusOK || status == http.StatusCreated) && kind == kindDirect && answerKind(out) != kindDirect:
+		// A peer before direct conversations takes it as a room.
+		refusal = &fedrooms.Error{Status: http.StatusForbidden, Code: "dm_refused", Message: "the peer does not support direct conversations"}
 	case status == http.StatusOK || status == http.StatusCreated:
 	case status == http.StatusNotFound:
 		refusal = &fedrooms.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no bot " + h + " on " + d}
@@ -158,6 +161,8 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 		refusal = &fedrooms.Error{Status: status, Code: errCode(out, "dm_refused"), Message: d + " refused the conversation"}
 	case status == http.StatusForbidden:
 		refusal = &fedrooms.Error{Status: http.StatusForbidden, Code: "invite_refused", Message: d + " refused the invite"}
+	case status == http.StatusConflict:
+		refusal = &fedrooms.Error{Status: http.StatusConflict, Code: errCode(out, "conflict"), Message: d + " refused the invite: a conflict there"}
 	default:
 		refusal = &fedrooms.Error{Status: http.StatusBadGateway, Code: "peer_unreachable", Message: fmt.Sprintf("%s answered with status %d", d, status)}
 	}
@@ -177,6 +182,15 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	}
 	_ = json.Unmarshal(out, &answer)
 	return max(answer.Max, 0), nil
+}
+
+// answerKind is the kind an invite's answer names, "" for none.
+func answerKind(out []byte) string {
+	var a struct {
+		Kind string `json:"kind"`
+	}
+	_ = json.Unmarshal(out, &a)
+	return a.Kind
 }
 
 // sendSigned sends a signed room request to path on domain, with body

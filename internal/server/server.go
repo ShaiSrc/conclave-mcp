@@ -244,7 +244,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		// Direct conversations with bots of peers start with a direct
 		// invite; in a replica, the send path forwards to the host.
-		directSvc.InviteRemote = fedSvc.InviteRemote
+		directSvc.InviteRemote, directSvc.FedNotify = fedSvc.InviteRemote, fedSvc.DeliverSoon
 		roomsSvc.FedNotify, messagesSvc.FedNotify = fedSvc.DeliverSoon, fedSvc.DeliverSoon
 		messagesSvc.Forward, claimsSvc.Forward = fedSvc.ForwardMessage, fedSvc.ForwardClaims
 		claimsLocal := chi.NewRouter()

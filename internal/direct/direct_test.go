@@ -226,22 +226,99 @@ func TestStart_OneRoomPerPair(t *testing.T) {
 	}
 }
 
-// A send the normal path refuses leaves no new conversation behind.
-func TestStart_RefusedSendRemovesNewRoom(t *testing.T) {
+// A first message that is not a direct member's is refused before
+// anything is made: a system or read type, no content, too much of it.
+func TestStart_InvalidMessageMakesNothing(t *testing.T) {
 	e := newEnv(t, "")
 	alice := e.bot("alice", "")
 	e.bot("bob", "")
-	// A system message is not a right here.
-	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi","message_type":"system"}`), http.StatusForbidden, "missing_right")
-	big := `{"to":"bob","message_type":"question","content":"` + strings.Repeat("x", 1100) + `"}`
-	wantErr(t, e.do(alice, http.MethodPost, "/direct", big), http.StatusRequestEntityTooLarge, "payload_too_large")
+	for body, status := range map[string]int{
+		`{"to":"bob","content":"hi","message_type":"system"}`:                                         http.StatusBadRequest,
+		`{"to":"bob","content":"hi","message_type":"read"}`:                                           http.StatusBadRequest,
+		`{"to":"bob","content":"","message_type":"question"}`:                                         http.StatusBadRequest,
+		`{"to":"bob","content":"` + strings.Repeat("x", 1100) + `","message_type":"question"}`:        http.StatusRequestEntityTooLarge,
+		`{"to":"bob","content":"` + strings.Repeat("x", 1025) + `","message_type":"question","x":""}`: http.StatusRequestEntityTooLarge,
+	} {
+		if rec := e.do(alice, http.MethodPost, "/direct", body); rec.Code != status {
+			t.Errorf("%.60s: %d %s, want %d", body, rec.Code, rec.Body, status)
+		}
+	}
 	if n := e.count(`SELECT COUNT(*) FROM rooms`); n != 0 {
 		t.Errorf("%d rooms left", n)
 	}
 	room := e.started(e.start(alice, "bob"))
-	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi","message_type":"system"}`), http.StatusForbidden, "missing_right")
+	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi","message_type":"system"}`), http.StatusBadRequest, "bad_request")
 	if n := e.count(`SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, room); n != 1 {
 		t.Errorf("an existing conversation was removed")
+	}
+}
+
+// The dm: prefix belongs to conversations: no room is made with it.
+func TestRooms_DMPrefixReserved(t *testing.T) {
+	e := newEnv(t, "")
+	for _, name := range []string{"dm:alice~bob", "dm:"} {
+		wantErr(t, e.do(e.admin, http.MethodPost, "/rooms", `{"name":"`+name+`"}`), http.StatusBadRequest, "bad_request")
+	}
+	if rec := e.do(e.admin, http.MethodPost, "/rooms", `{"name":"dmz"}`); rec.Code != http.StatusCreated {
+		t.Errorf("dmz: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Reading marks up to the highest message id of the page, which need
+// not be its last row; a filtered read marks nothing.
+func TestList_ReadMarking(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "")
+	room := e.started(e.start(alice, "bob"))
+	// A later id with an earlier ts, as a replica can have.
+	if _, err := e.db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, trust_origin)
+		SELECT room_id, author_key_id, '2000-01-01T00:00:00.000000000Z', 'old', content_type, message_type, trust_origin
+		FROM messages WHERE room_id = ?`, room); err != nil {
+		t.Fatal(err)
+	}
+	unread := func() int {
+		t.Helper()
+		var out struct{ Conversations []struct{ Unread int } }
+		rec := e.do(bob, http.MethodGet, "/direct", "")
+		if json.Unmarshal(rec.Body.Bytes(), &out) != nil || len(out.Conversations) != 1 {
+			t.Fatalf("list: %d %s", rec.Code, rec.Body)
+		}
+		return out.Conversations[0].Unread
+	}
+	e.do(bob, http.MethodGet, "/rooms/"+room+"/messages?trust_origin=internal", "")
+	if got := unread(); got != 2 {
+		t.Errorf("after a filtered read: %d unread, want 2", got)
+	}
+	e.do(bob, http.MethodGet, "/rooms/"+room+"/messages", "")
+	if got := unread(); got != 0 {
+		t.Errorf("after reading all: %d unread, want 0", got)
+	}
+}
+
+// GET /rooms?kind=direct carries the last message time, and an admin
+// can ask for archived rooms too.
+func TestRooms_DirectListing(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "")
+	room := e.started(e.start(alice, "bob"))
+	var last string
+	if err := e.db.QueryRow(`SELECT MAX(ts) FROM messages WHERE room_id = ?`, room).Scan(&last); err != nil {
+		t.Fatal(err)
+	}
+	if body := e.do(e.admin, http.MethodGet, "/rooms?kind=direct", "").Body.String(); !strings.Contains(body, `"last_message_at":"`+last+`"`) {
+		t.Errorf("no last_message_at %s: %s", last, body)
+	}
+	if rec := e.do(e.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, bob), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove: %d %s", rec.Code, rec.Body)
+	}
+	if body := e.do(e.admin, http.MethodGet, "/rooms?kind=direct", "").Body.String(); strings.Contains(body, room) {
+		t.Errorf("archived room listed without include_archived: %s", body)
+	}
+	if body := e.do(e.admin, http.MethodGet, "/rooms?kind=direct&include_archived=1", "").Body.String(); !strings.Contains(body, room) || !strings.Contains(body, `"archived_at"`) {
+		t.Errorf("include_archived: %s", body)
+	}
+	if body := e.do(alice, http.MethodGet, "/rooms?include_archived=1", "").Body.String(); strings.Contains(body, room) {
+		t.Errorf("a bot sees archived rooms: %s", body)
 	}
 }
 

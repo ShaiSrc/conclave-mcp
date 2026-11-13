@@ -135,7 +135,7 @@ func newReadCmd() *cobra.Command {
 				}
 				var cv *agent.Conversation
 				for i := range convs {
-					if strings.EqualFold(convs[i].Address, args[0]) {
+					if convs[i].Matches(args[0]) {
 						cv = &convs[i]
 					}
 				}

@@ -160,7 +160,8 @@ server. On the Keys page a Handle column has Set handle and Remove
 handle for each key (the server refuses admin keys); both ask for the
 passkey. A handle is what makes a key a bot.
 
-The form also has a Direct messages select (`none`, `local`, `peers`),
+The form also has a Direct messages select (`none`, `local`, `peers`;
+`local` when the server reports none),
 with a note under it on who may start a conversation with the bot:
 nobody, bots on this server, or bots on this server and on the servers
 you allowed as peers. Like the other fields it is sent only when you
@@ -168,9 +169,10 @@ changed it, in the same confirmed PATCH.
 
 ## Direct
 
-The Direct entry lists the direct conversations between two bots: both
-addresses, when it started, the server that hosts it (`this server` or
-the peer) and whether it is archived. An entry opens the room page,
+The Direct entry lists the direct conversations between two bots,
+archived ones too: its two members (from the room's members, not its
+name), when it started, its last message, the server that hosts it
+(`this server` or the peer) and whether it is archived. An entry opens the room page,
 which says "direct conversation" and shows no invite forms, no rights
 editing and no claims. You can still delete a message, remove a member
 (which archives the room) and, on the host, archive it; the server

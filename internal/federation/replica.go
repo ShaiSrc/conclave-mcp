@@ -111,13 +111,20 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // rights. It must be a local bot, not revoked and no admin key (404
 // otherwise). The replica is created under the host's room id, of the
 // invite's kind, or updated and made active again; a room of that id
-// that is not the origin's replica of that kind is a 409.
+// that is not the origin's replica of that kind is a 409. A room name
+// starting with dm: is a direct conversation's (400 otherwise). The
+// answer has the kind and max_events_bytes.
 //
 // A direct invite (kind direct) starts a conversation with our bot: it
 // takes one only from an allowed peer (seen ones get 403 dm_refused,
-// before the handle is looked at, so they cannot probe for bots), for a
-// bot whose DM policy is peers (403 dm_refused), and at most
-// DMInvitesPerHour from each peer (429).
+// before the handle is looked at, so they cannot probe for bots), named
+// for our bot and one of the origin's (400 otherwise), for a bot whose
+// DM policy is peers (403 dm_refused), and at most DMInvitesPerHour from
+// each peer (429). The bot gets the direct rights, whatever the host
+// sent, and the origin's bot joins with it. Into a replica with another
+// member, of ours or of the origin, it is a 409; the same invite again
+// changes nothing; an older active replica of the pair from the origin
+// is archived.
 func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	var in struct {
@@ -164,6 +171,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := ulid.ParseStrict(roomID)
 	set, rerr := rights.Parse(in.Rights)
+	if direct {
+		set, rerr = fedrooms.DirectRights, nil
+	}
 	switch {
 	case err != nil || id.String() != roomID:
 		refuse(http.StatusBadRequest, "bad_request", "room id must be a ULID")
@@ -176,6 +186,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	case in.Kind != "room" && !direct:
 		refuse(http.StatusBadRequest, "bad_request", "kind must be room or direct")
+		return
+	case !direct && strings.HasPrefix(in.Name, fedrooms.DirectPrefix):
+		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are direct conversations'")
 		return
 	}
 	var keyID int64
@@ -197,7 +210,15 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
+	var other string // the origin's bot in a direct conversation
 	if direct {
+		var ok bool
+		other, ok = fedrooms.DirectOther(in.Name, h+"@"+s.id.Domain)
+		name, domain, _ := strings.Cut(other, "@")
+		if hn, err := bots.NormalizeHandle(name); !ok || err != nil || hn != name || domain != origin {
+			refuse(http.StatusBadRequest, "bad_request", "a direct conversation's name is dm:<address>~<address>, sorted, of the invited bot and one of the host's")
+			return
+		}
 		if policy != bots.DMPeers {
 			dmRefuse(http.StatusForbidden, "dm_refused", "policy", h+" does not take direct conversations from other servers")
 			return
@@ -251,6 +272,11 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
 		return
 	}
+	if direct {
+		if !s.directPair(w, r, tx, roomID, origin, keyID, other, refuse) {
+			return
+		}
+	}
 	if err := nameReplica(ctx, tx, roomID, in.Name, origin, true); err != nil {
 		if errors.Is(err, errNameTaken) {
 			refuse(http.StatusConflict, "conflict", "no free name for the room here")
@@ -276,8 +302,50 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		s.auditRoom(ctx, "direct.start", origin, roomID, "ok", string(detail))
 	}
 	// max_events_bytes is what this server reads a push up to: the host
-	// packs its pushes within it.
-	writeJSON(w, http.StatusCreated, map[string]any{"room_id": roomID, "max_events_bytes": s.eventsLimit()})
+	// packs its pushes within it. kind tells a host that it was taken as
+	// a direct conversation.
+	writeJSON(w, http.StatusCreated, map[string]any{"room_id": roomID, "max_events_bytes": s.eventsLimit(), "kind": in.Kind})
+}
+
+// directPair adds other, the origin's bot, to direct replica roomID of
+// our bot keyID, and archives an older active replica of the pair from
+// the origin, before the replica is named: it held the name. A replica
+// with another member, of ours or of the origin, is a 409: a host
+// cannot put a second bot of ours into a conversation. On an error it
+// answers and returns false.
+func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, origin string, keyID int64, other string,
+	refuse func(int, string, string)) bool {
+	ctx := r.Context()
+	key, err := fedrooms.StandIn(ctx, tx, other)
+	if errors.Is(err, fedrooms.ErrStandInLimit) {
+		refuse(http.StatusConflict, "limit", err.Error())
+		return false
+	}
+	var taken bool
+	if err == nil {
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id NOT IN (?, ?))`,
+			roomID, keyID, key).Scan(&taken)
+	}
+	if taken {
+		refuse(http.StatusConflict, "conflict", "the conversation has another member")
+		return false
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)
+			ON CONFLICT(room_id, key_id) DO NOTHING`, roomID, key, storage.FormatTS(time.Now()), fedrooms.DirectRights.Storage())
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = ? WHERE kind = 'direct' AND home_domain = ? AND id != ?
+			AND archived_at IS NULL
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id AND key_id = ?)
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id AND key_id = ?)`,
+			storage.FormatTS(time.Now()), origin, roomID, keyID, key)
+	}
+	if err != nil {
+		s.fail(w, r, err)
+		return false
+	}
+	return true
 }
 
 // DMInvitesPerHour is how many direct invites a server takes from one
@@ -465,8 +533,10 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 // applyMember adds a member to the replica or sets its rights. A member
 // of this server must be one of its bots; a direct conversation takes
 // ours by invite only, which checks their DM policy, so here it only
-// sets the rights of one it has. When it is the first bot of ours in an
-// archived replica (invited again), the replica is active again.
+// sets the rights of one it has, and it has one bot of the host, which
+// joined with the invite: another is refused. When it is the first bot
+// of ours in an archived replica (invited again), the replica is active
+// again.
 func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MemberPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -479,6 +549,17 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 	key, local, err := s.memberKey(ctx, tx, p.Address, true)
 	if err != nil {
 		return err
+	}
+	if !local {
+		var second bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
+			AND EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
+			WHERE m.room_id = ? AND k.remote_domain IS NOT NULL AND m.key_id != ?)`, roomID, roomID, key).Scan(&second); err != nil {
+			return err
+		}
+		if second {
+			return refused("member event: a direct conversation has one bot of the host, not %s too", p.Address)
+		}
 	}
 	var bot, ours, uninvited bool
 	if local {
