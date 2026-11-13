@@ -12,6 +12,8 @@ import (
 	"os"
 	"strconv"
 	"time"
+
+	"github.com/hermes/conclave-mcp/internal/federation"
 )
 
 // Config is the validated runtime configuration for a single
@@ -34,6 +36,15 @@ type Config struct {
 
 	// Logging
 	LogLevel string // debug|info|warn|error, default info
+
+	// Federation (docs/superpowers/specs/2026-11-13-federation-foundation-design.md).
+	// An empty FederationDomain turns federation off and the other
+	// fields are then ignored.
+	FederationDomain       string // canonical form (federation.NormalizeDomain)
+	FederationHost         string // federation listener host, default 127.0.0.1
+	FederationPort         int    // federation listener port, default 7433
+	FederationMode         string // allowlist|open, default allowlist
+	FederationInsecureHTTP bool   // contact peers over http://, for tests and local networks
 }
 
 // Load builds a Config from defaults, then overlays environment
@@ -76,6 +87,9 @@ func defaults() *Config {
 		ListLimitMessages:   50,
 		ListLimitAudit:      100,
 		LogLevel:            "info",
+		FederationHost:      "127.0.0.1",
+		FederationPort:      7433,
+		FederationMode:      "allowlist",
 	}
 }
 
@@ -133,6 +147,29 @@ func applyEnv(c *Config) error {
 	if v, ok := lookup("CONCLAVE_LOG_LEVEL"); ok {
 		c.LogLevel = v
 	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_DOMAIN"); ok {
+		c.FederationDomain = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_HOST"); ok {
+		c.FederationHost = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_PORT"); ok {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("CONCLAVE_FEDERATION_PORT: %w", err)
+		}
+		c.FederationPort = n
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_MODE"); ok {
+		c.FederationMode = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_INSECURE_HTTP"); ok {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("CONCLAVE_FEDERATION_INSECURE_HTTP: %w", err)
+		}
+		c.FederationInsecureHTTP = b
+	}
 	return nil
 }
 
@@ -144,6 +181,7 @@ func applyFlags(c *Config, args []string) error {
 	host := fs.String("host", c.Host, "bind host (CONCLAVE_HOST)")
 	port := fs.Int("port", c.Port, "bind port (CONCLAVE_PORT)")
 	dbPath := fs.String("db", c.DBPath, "SQLite file path (CONCLAVE_DB_PATH)")
+	fedDomain := fs.String("federation-domain", c.FederationDomain, "federation domain; empty turns federation off (CONCLAVE_FEDERATION_DOMAIN)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -151,6 +189,7 @@ func applyFlags(c *Config, args []string) error {
 	c.Host = *host
 	c.Port = *port
 	c.DBPath = *dbPath
+	c.FederationDomain = *fedDomain
 	return nil
 }
 
@@ -161,6 +200,11 @@ var (
 	ErrInvalidRateLimit       = errors.New("rate limit per min must be > 0")
 	ErrRetentionTooShort      = errors.New("audit retention must be >= 720h (30d)")
 	ErrInvalidLogLevel        = errors.New("log level must be one of: debug, info, warn, error")
+
+	ErrInvalidFederationDomain = errors.New("federation domain must be lowercase letters, digits, dots and hyphens with an optional :port, at most 253 characters")
+	ErrInvalidFederationMode   = errors.New("federation mode must be one of: allowlist, open")
+	ErrInvalidFederationPort   = errors.New("federation port must be 1..65535")
+	ErrFederationListener      = errors.New("federation listener must differ from the main listener")
 )
 
 // parseRetention accepts Go duration strings plus shorthand d (days)
@@ -199,6 +243,31 @@ func (c *Config) validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("%q: %w", c.LogLevel, ErrInvalidLogLevel)
+	}
+	return c.validateFederation()
+}
+
+// validateFederation checks the federation settings when a domain is
+// set, and stores the domain in canonical form.
+func (c *Config) validateFederation() error {
+	if c.FederationDomain == "" {
+		return nil
+	}
+	d, err := federation.NormalizeDomain(c.FederationDomain)
+	if err != nil {
+		return fmt.Errorf("%q: %w", c.FederationDomain, ErrInvalidFederationDomain)
+	}
+	c.FederationDomain = d
+	switch c.FederationMode {
+	case "allowlist", "open":
+	default:
+		return fmt.Errorf("%q: %w", c.FederationMode, ErrInvalidFederationMode)
+	}
+	if c.FederationPort < 1 || c.FederationPort > 65535 {
+		return fmt.Errorf("federation port %d: %w", c.FederationPort, ErrInvalidFederationPort)
+	}
+	if c.FederationHost == c.Host && c.FederationPort == c.Port {
+		return fmt.Errorf("%s:%d: %w", c.Host, c.Port, ErrFederationListener)
 	}
 	return nil
 }

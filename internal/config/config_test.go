@@ -13,7 +13,9 @@ func TestLoad_Defaults(t *testing.T) {
 		"CONCLAVE_HOST", "CONCLAVE_PORT", "CONCLAVE_DB_PATH",
 		"CONCLAVE_MAX_MESSAGE_BYTES", "MAX_CONCURRENT_VERIFY",
 		"RATE_LIMIT_PER_MIN", "CONCLAVE_AUDIT_RETENTION",
-		"CONCLAVE_LOG_LEVEL",
+		"CONCLAVE_LOG_LEVEL", "CONCLAVE_FEDERATION_DOMAIN",
+		"CONCLAVE_FEDERATION_HOST", "CONCLAVE_FEDERATION_PORT",
+		"CONCLAVE_FEDERATION_MODE", "CONCLAVE_FEDERATION_INSECURE_HTTP",
 	} {
 		t.Setenv(k, "")
 	}
@@ -49,6 +51,50 @@ func TestLoad_Defaults(t *testing.T) {
 	}
 	if c.LogLevel != "info" {
 		t.Errorf("LogLevel: got %q, want info", c.LogLevel)
+	}
+	if c.FederationDomain != "" || c.FederationHost != "127.0.0.1" || c.FederationPort != 7433 ||
+		c.FederationMode != "allowlist" || c.FederationInsecureHTTP {
+		t.Errorf("federation defaults: got domain=%q host=%q port=%d mode=%q insecure=%v",
+			c.FederationDomain, c.FederationHost, c.FederationPort, c.FederationMode, c.FederationInsecureHTTP)
+	}
+}
+
+func TestLoad_FederationEnv(t *testing.T) {
+	t.Setenv("CONCLAVE_FEDERATION_DOMAIN", "Conclave.Example.org")
+	t.Setenv("CONCLAVE_FEDERATION_HOST", "0.0.0.0")
+	t.Setenv("CONCLAVE_FEDERATION_PORT", "8433")
+	t.Setenv("CONCLAVE_FEDERATION_MODE", "open")
+	t.Setenv("CONCLAVE_FEDERATION_INSECURE_HTTP", "1")
+
+	c, err := Load([]string{})
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.FederationDomain != "conclave.example.org" {
+		t.Errorf("FederationDomain: got %q, want it lowercased", c.FederationDomain)
+	}
+	if c.FederationHost != "0.0.0.0" || c.FederationPort != 8433 || c.FederationMode != "open" || !c.FederationInsecureHTTP {
+		t.Errorf("got host=%q port=%d mode=%q insecure=%v",
+			c.FederationHost, c.FederationPort, c.FederationMode, c.FederationInsecureHTTP)
+	}
+
+	c, err = Load([]string{"--federation-domain", "b.example:7433"})
+	if err != nil {
+		t.Fatalf("Load with flag: %v", err)
+	}
+	if c.FederationDomain != "b.example:7433" {
+		t.Errorf("FederationDomain: got %q, want the flag to win over env", c.FederationDomain)
+	}
+}
+
+// Without a federation domain the federation settings are not checked:
+// federation off changes nothing.
+func TestValidate_FederationOff(t *testing.T) {
+	c := defaults()
+	c.FederationMode = "bogus"
+	c.FederationPort = c.Port
+	if err := c.validate(); err != nil {
+		t.Errorf("validate with federation off: %v", err)
 	}
 }
 
@@ -142,6 +188,35 @@ func TestLoad_ValidationErrors(t *testing.T) {
 			mutate:  func(c *Config) { c.LogLevel = "verbose" },
 			wantErr: ErrInvalidLogLevel,
 		},
+		{
+			name:    "invalid federation domain",
+			mutate:  func(c *Config) { c.FederationDomain = "bad..example" },
+			wantErr: ErrInvalidFederationDomain,
+		},
+		{
+			name: "invalid federation mode",
+			mutate: func(c *Config) {
+				c.FederationDomain = "a.example"
+				c.FederationMode = "closed"
+			},
+			wantErr: ErrInvalidFederationMode,
+		},
+		{
+			name: "federation port zero",
+			mutate: func(c *Config) {
+				c.FederationDomain = "a.example"
+				c.FederationPort = 0
+			},
+			wantErr: ErrInvalidFederationPort,
+		},
+		{
+			name: "federation listener equals main listener",
+			mutate: func(c *Config) {
+				c.FederationDomain = "a.example"
+				c.FederationPort = c.Port
+			},
+			wantErr: ErrFederationListener,
+		},
 	}
 
 	for _, tt := range tests {
@@ -170,6 +245,8 @@ func TestLoad_EnvParseErrors(t *testing.T) {
 		{"bad concurrent", "MAX_CONCURRENT_VERIFY", "many"},
 		{"bad rate", "RATE_LIMIT_PER_MIN", "fast"},
 		{"bad retention", "CONCLAVE_AUDIT_RETENTION", "forever"},
+		{"bad federation port", "CONCLAVE_FEDERATION_PORT", "x"},
+		{"bad federation insecure http", "CONCLAVE_FEDERATION_INSECURE_HTTP", "yes"},
 	}
 
 	for _, tt := range tests {
