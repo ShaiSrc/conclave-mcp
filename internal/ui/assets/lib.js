@@ -81,11 +81,27 @@ export async function api(method, path, body) {
 // WAITING is shown while a passkey prompt is open.
 export const WAITING = 'Waiting for your passkey…';
 
+// Every passkey ceremony (login, registration, confirmation, message)
+// keeps its state under one cookie, so a second begin would replace the
+// ceremony of a prompt still open. oneAtATime runs fn once every earlier
+// one has finished, failed or not.
+let last = Promise.resolve();
+export function oneAtATime(fn) {
+  const run = last.then(fn);
+  last = run.catch(() => {});
+  return run;
+}
+
 // confirmed makes a change as the operator. A session alone can only
 // read: the server keeps the request (method, path, body), the passkey
 // confirms it, and the server runs exactly that request and answers its
 // response (POST /ui/auth/confirm/begin and finish).
-export async function confirmed(method, path, body) {
+export function confirmed(method, path, body) {
+  return oneAtATime(() => confirmNow(method, path, body));
+}
+
+// confirmNow is confirmed for a caller that already holds oneAtATime.
+export async function confirmNow(method, path, body) {
   const options = await api('POST', '/ui/auth/confirm/begin', { method, path, body });
   const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
   try {

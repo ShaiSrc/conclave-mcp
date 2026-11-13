@@ -1,6 +1,6 @@
 // Rooms: the list, and one room with its messages (live), open
 // requests, claims and members. Every change is confirmed with a passkey.
-import { h, api, confirmed, WAITING, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, action } from './lib.js';
+import { h, api, confirmed, oneAtATime, WAITING, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, action } from './lib.js';
 
 const PAGE = 500; // the server's largest message page
 const LIST_PAGES = 4; // the rooms list reads at most this many pages per room
@@ -161,9 +161,11 @@ export async function roomPage(view, id) {
         if (!text.value.trim()) throw new Error('Write a message first.');
         const body = { room_id: id, content: text.value, message_type: type.value };
         if (target) body.reply_to = target;
-        const options = await api('POST', '/ui/auth/message/begin', body);
-        const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
-        await api('POST', '/ui/auth/message/finish', cred.toJSON());
+        await oneAtATime(async () => {
+          const options = await api('POST', '/ui/auth/message/begin', body);
+          const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
+          await api('POST', '/ui/auth/message/finish', cred.toJSON());
+        });
         // The live stream shows the message; adding it here would move the
         // catch-up cursor past messages not yet fetched. Clear only what
         // was sent, not edits made while the passkey prompt was open.

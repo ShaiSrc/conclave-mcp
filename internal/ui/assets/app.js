@@ -1,5 +1,5 @@
 // The page: routing, the header, passkey login and setup, passkeys.
-import { h, api, confirmed, WAITING, setSession, errorBox, confirmButton, table, when, action } from './lib.js';
+import { h, api, confirmed, confirmNow, oneAtATime, WAITING, setSession, errorBox, confirmButton, table, when, action } from './lib.js';
 import { roomsPage, roomPage } from './rooms.js';
 import { keysPage, auditPage } from './keys.js';
 
@@ -10,12 +10,12 @@ const nav = document.getElementById('nav');
 // the first passkey (which logs this tab in), else as the logged-in
 // operator, confirmed first with a passkey already registered (a session
 // alone cannot add one).
-async function registerPasskey(name, setupToken = '') {
+const registerPasskey = (name, setupToken = '') => oneAtATime(async () => {
   let options;
   try {
     options = setupToken
       ? await api('POST', '/ui/auth/register/begin', { name, setup_token: setupToken })
-      : await confirmed('POST', '/ui/auth/register/begin', { name });
+      : await confirmNow('POST', '/ui/auth/register/begin', { name });
   } catch (err) {
     // an expired or used token is of no use: drop it from the address bar
     if (setupToken && err.status >= 400 && err.status < 500) history.replaceState(null, '', '#/');
@@ -24,13 +24,13 @@ async function registerPasskey(name, setupToken = '') {
   const cred = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) });
   const res = await api('POST', '/ui/auth/register/finish', cred.toJSON());
   if (res.session) setSession(res.session);
-}
+});
 
-async function login() {
+const login = () => oneAtATime(async () => {
   const options = await api('POST', '/ui/auth/login/begin');
   const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
   setSession((await api('POST', '/ui/auth/login/finish', cred.toJSON())).session);
-}
+});
 
 // logout ends the session on the server; the tab forgets its token
 // even if that fails.
