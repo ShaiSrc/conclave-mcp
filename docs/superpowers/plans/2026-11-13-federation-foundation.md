@@ -227,10 +227,10 @@ Use the timestamp format the other migrations use (see `0007_fixed_width_ts.sql`
 - Start servers A, B and C in process on free ports, using the existing e2e helpers to start a server with config. Domains are `127.0.0.1:<fedport>`, with insecure HTTP on.
 - A and B are in allowlist mode. A looks up B, adds B with B's fingerprint, and B does the same for A. Ping A→B and B→A both succeed.
 - C pings A: C is not allowed on A, so it gets 403 `peer_not_allowed`.
-- Restart A in open mode (or start a fourth server D in open mode). C pings D: it succeeds, and D lists C as `seen`.
+- Open mode is not tested here: every e2e server listens on 127.0.0.1, and the fetch client refuses loopback for origins that are not allowed (as the spec says). The in-package tests in `internal/federation` cover open mode with a test dialer.
 - A blocks B; B pings A and gets 403.
 
-**docs/federation.md:** what federation does in 0.8, turning it on (env vars), the reverse proxy, exchanging fingerprints, the modes, the signature format (exact signing string), the verification order, error codes, audit actions, and the limits. It is the start of the protocol document that 0.14.0 freezes.
+**docs/federation.md:** state that the reverse proxy must forward the `Host` header and the request URI unchanged (the signature covers both). Then: what federation does in 0.8, turning it on (env vars), the reverse proxy, exchanging fingerprints, the modes, the signature format (exact signing string), the verification order, error codes, audit actions, and the limits. It is the start of the protocol document that 0.14.0 freezes.
 
 - [ ] Write the e2e test and see it pass
 - [ ] Write the docs
