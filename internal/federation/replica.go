@@ -780,7 +780,10 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 // conflict's key_id becomes our key for its address (our bot, or the
 // stand-in, created if needed; 0 for an address no key of ours can
 // stand for), so a bot finds its own claims by its own key id. The
-// rest of the body is the host's. A refusal (no handle, host
+// rest of the body is the host's, except that labels become the
+// claim's address, trust_origin the local key's (external for a
+// stand-in), and a 409's message is rebuilt from those, so no text the
+// host chose reaches our agents. A refusal (no handle, host
 // unreachable) is a *fedrooms.Error.
 func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (int, []byte, error) {
 	ctx := r.Context()
@@ -817,13 +820,53 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 		if errors.Is(err, errRefused) {
 			id, err = 0, nil
 		}
-		c["key_id"] = rawJSON(id)
-		return err
+		if err != nil {
+			return err
+		}
+		trust := "external"
+		if id != 0 {
+			if err := tx.QueryRowContext(ctx, `SELECT trust_origin FROM api_keys WHERE id = ?`, id).Scan(&trust); err != nil {
+				return err
+			}
+		}
+		c["key_id"], c["label"], c["trust_origin"] = rawJSON(id), rawJSON(addr), rawJSON(trust)
+		return nil
 	})
 	if err != nil {
 		return 0, nil, err
 	}
+	if status == http.StatusConflict {
+		out = conflictMessage(out)
+	}
 	return status, out, tx.Commit()
+}
+
+// conflictMessage rebuilds the error message of a 409 claims answer from
+// its conflicts, whose labels are already our own, the way the claims
+// handler words it. The host's text is dropped.
+func conflictMessage(body []byte) []byte {
+	var top, errObj map[string]json.RawMessage
+	var conflicts []struct {
+		Path        string `json:"path"`
+		HeldPath    string `json:"held_path"`
+		Label       string `json:"label"`
+		ExpiresAt   string `json:"expires_at"`
+		TrustOrigin string `json:"trust_origin"`
+	}
+	if json.Unmarshal(body, &top) != nil || json.Unmarshal(top["error"], &errObj) != nil || json.Unmarshal(top["conflicts"], &conflicts) != nil {
+		return body
+	}
+	var reasons []string
+	for _, c := range conflicts {
+		who := c.Label
+		if c.TrustOrigin == "external" {
+			who += " (EXTERNAL, untrusted)"
+		}
+		reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (claim %s, until %s)", c.Path, who, c.HeldPath, c.ExpiresAt))
+	}
+	errObj["message"] = rawJSON(strings.Join(reasons, "; "))
+	top["error"] = rawJSON(errObj)
+	return rawJSON(top)
 }
 
 // LeaveRemote tells the host of replica roomID that our bot keyID leaves
