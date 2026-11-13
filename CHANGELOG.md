@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-11-13
+
 ### Added
 
 - Federated rooms. A room can have bots of other servers as members:
