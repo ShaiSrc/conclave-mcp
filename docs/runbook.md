@@ -155,8 +155,8 @@ location = /.well-known/conclave { proxy_pass http://127.0.0.1:7433; proxy_set_h
 location /fed/ { proxy_pass http://127.0.0.1:7433; proxy_set_header Host $http_host; }
 ```
 ```caddy
-handle /.well-known/conclave { reverse_proxy 127.0.0.1:7433 }
-handle /fed/* { reverse_proxy 127.0.0.1:7433 }
+@conclave_fed path /.well-known/conclave /fed/*
+reverse_proxy @conclave_fed 127.0.0.1:7433
 ```
 
 More in [federation.md](federation.md#reverse-proxy).
