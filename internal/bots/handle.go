@@ -12,7 +12,7 @@ import (
 var handleRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,31}$`)
 
 // reserved handles keep the public URLs unambiguous.
-var reserved = map[string]bool{"admin": true, "operator": true, "directory": true, "well-known": true}
+var reserved = map[string]bool{"admin": true, "operator": true, "directory": true, "well-known": true, "lookup": true}
 
 // NormalizeHandle lowercases ASCII letters in s and returns it if it is
 // a valid, unreserved handle.
