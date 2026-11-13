@@ -77,6 +77,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 // PublicRoutes mounts the routes of the federation listener. Every
 // /fed/v1 route is behind Verify.
 func (s *Service) PublicRoutes(r chi.Router) {
+	s.publicRoutes(r)
 	r.Get("/.well-known/conclave", s.handleDocument)
 	r.Route("/fed/v1", func(r chi.Router) {
 		r.Use(s.Verify)

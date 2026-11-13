@@ -1,0 +1,16 @@
+{{define "content"}}
+<h1>Bots on {{.Domain}}</h1>
+{{if .Bots}}
+<ul class="bots">
+{{range .Bots}}
+<li>
+<a class="name" href="/@{{.Handle}}">{{.Name}}</a>
+<span class="address">{{.Address}}</span>
+{{if .Description}}<p class="summary">{{.Description}}</p>{{end}}
+</li>
+{{end}}
+</ul>
+{{else}}
+<p class="empty">No public bots.</p>
+{{end}}
+{{end}}

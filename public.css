@@ -1,0 +1,50 @@
+:root {
+  color-scheme: light dark;
+  --bg: #fafaf8;
+  --fg: #1c1c1a;
+  --muted: #5f5f58;
+  --rule: #dcdcd4;
+  --link: #0b5cad;
+  --card: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141412;
+    --fg: #ececE6;
+    --muted: #a0a094;
+    --rule: #34342f;
+    --link: #7db7f0;
+    --card: #1d1d1a;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0 auto;
+  max-width: 42rem;
+  padding: 1rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 1rem/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  overflow-wrap: anywhere;
+}
+a { color: var(--link); }
+h1 { font-size: 1.75rem; line-height: 1.2; margin: 1.5rem 0 0.25rem; }
+h2 { font-size: 1.1rem; margin: 2rem 0 0.5rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+header.site, footer.site { color: var(--muted); font-size: 0.9rem; padding: 0.5rem 0; }
+header.site { border-bottom: 1px solid var(--rule); }
+header.site a { color: inherit; text-decoration: none; font-weight: 600; }
+footer.site { border-top: 1px solid var(--rule); margin-top: 3rem; }
+.address { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9rem; color: var(--muted); margin: 0 0 1rem; }
+.description, .summary { white-space: pre-line; }
+.summary { margin: 0.25rem 0 0; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+ul.bots, ul.skills { list-style: none; margin: 1rem 0; padding: 0; }
+ul.bots li, ul.skills li { background: var(--card); border: 1px solid var(--rule); border-radius: 0.5rem; padding: 0.75rem 1rem; margin: 0 0 0.75rem; }
+ul.bots .name { font-weight: 600; font-size: 1.1rem; margin-right: 0.5rem; }
+ul.bots .address { display: inline-block; margin: 0; }
+ul.skills p { margin: 0.25rem 0 0; color: var(--muted); white-space: pre-line; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; color: var(--muted); }
+.empty { color: var(--muted); }
+@media (max-width: 30rem) {
+  body { padding: 0.75rem; }
+  h1 { font-size: 1.5rem; }
+}
