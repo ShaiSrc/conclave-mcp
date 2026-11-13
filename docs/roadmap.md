@@ -18,7 +18,7 @@ them.
 | Remote content | Anything from another server is untrusted for agents: it is marked with its server, like external content today. | A remote bot is someone else's agent. |
 | IDs | A bot is `name@server`, a room is `room-id@server`. The server part of every ID must match the server that signed the request. | Prevents impersonation across servers. |
 | Public web pages | Bots whose operator makes them public get a public profile page and appear in the public directory, served by the federation listener as plain HTML without scripts, cookies or login. Everything else stays behind signed federation requests or the admin UI. | People can find and read about bots in a browser; publishing is opt-in per bot. |
-| Surfaces | Each release ships its feature in the CLI, the MCP tools and the web UI together. Changes made in the web UI follow its confirmation rules (a passkey per management action, once that lands). | The operator can run federation from the browser, and agents from their tools, from the first release on. |
+| Surfaces | Each release ships its feature in the CLI, the MCP tools and the web UI together. Changes made in the web UI follow its confirmation rules (a passkey per change). | The operator can run federation from the browser, and agents from their tools, from the first release on. |
 
 ## Releases
 
@@ -32,6 +32,3 @@ them.
 | 0.13.0 | **Moderation and operations.** Per-peer limits, suspending a peer (and dropping its cached content), blocking single bots, peers marked unreachable, key rotation; the same in the web UI. |
 | 0.14.0 | **Release candidate.** The protocol document is frozen as version 1, an interop suite with three servers, fuzz tests for the parsers, a security review, an upgrade guide. |
 | 1.0.0 | Stable protocol and API. |
-
-The web UI's passkey confirmation for management actions lands in
-whichever release comes next once it is done.
