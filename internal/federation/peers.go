@@ -91,15 +91,20 @@ func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey
 	return err
 }
 
-// Block makes domain a blocked peer, keeping a known key and note.
+// Block makes domain a blocked peer, keeping a known key and note, and
+// deletes its cached bots.
 func (ps *Peers) Block(ctx context.Context, domain string) error {
 	_, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, added_at) VALUES (?, 'blocked', ?)
 		ON CONFLICT(domain) DO UPDATE SET status = 'blocked'`,
 		domain, storage.FormatTS(time.Now()))
-	return err
+	if err != nil {
+		return err
+	}
+	return ps.dropBots(ctx, domain)
 }
 
-// Remove deletes domain's row, or returns ErrPeerNotFound.
+// Remove deletes domain's row and its cached bots, or returns
+// ErrPeerNotFound.
 func (ps *Peers) Remove(ctx context.Context, domain string) error {
 	res, err := ps.db.ExecContext(ctx, `DELETE FROM federation_peers WHERE domain = ?`, domain)
 	if err != nil {
@@ -110,7 +115,15 @@ func (ps *Peers) Remove(ctx context.Context, domain string) error {
 	} else if n == 0 {
 		return ErrPeerNotFound
 	}
-	return nil
+	return ps.dropBots(ctx, domain)
+}
+
+// dropBots deletes domain's cached bots. It runs after the status
+// change, so a refresh that checks the status in its transaction
+// cannot bring them back.
+func (ps *Peers) dropBots(ctx context.Context, domain string) error {
+	_, err := ps.db.ExecContext(ctx, `DELETE FROM remote_bots WHERE domain = ?`, domain)
+	return err
 }
 
 // RecordSeen records domain as seen with pub unless it has a row

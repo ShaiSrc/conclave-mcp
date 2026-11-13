@@ -15,6 +15,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"golang.org/x/time/rate"
+
+	"github.com/hermes/conclave-mcp/internal/bots"
 )
 
 // Options configure a Service.
@@ -27,7 +29,7 @@ type Options struct {
 
 // Service is the federation side of a server. It holds the database,
 // the server's identity (and with it the domain), the federation
-// settings, the peer store and the outgoing client.
+// settings, the peer store, the outgoing client and the local bots.
 type Service struct {
 	db           *sql.DB
 	id           *Identity
@@ -37,6 +39,8 @@ type Service struct {
 	peers        *Peers
 	fetch        *Fetcher
 	lookups      *rate.Limiter // operator lookups and adds
+	botStore     *bots.Store
+	refresh      chan string // peers whose directory Run fetches next
 
 	mu       sync.Mutex
 	limiters map[string]*rate.Limiter // per verified peer
@@ -61,6 +65,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	}
 	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
 		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{},
+		botStore: bots.NewStore(db), refresh: make(chan string, 16),
 		lookups: rate.NewLimiter(rate.Every(time.Minute/lookupsPerMinute), lookupBurst)}
 	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {
 		p, err := s.peers.Get(context.Background(), domain)
@@ -76,6 +81,8 @@ func (s *Service) PublicRoutes(r chi.Router) {
 	r.Route("/fed/v1", func(r chi.Router) {
 		r.Use(s.Verify)
 		r.Post("/ping", s.handlePing)
+		r.Get("/bots/{name}", s.handleFedBot)
+		r.Get("/directory", s.handleFedDirectory)
 	})
 }
 

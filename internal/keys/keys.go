@@ -89,20 +89,21 @@ func (s *Service) Routes(r chi.Router) {
 }
 
 // whoami returns the caller's own key: {id, label, trust_origin,
-// admin}. Agents use it to skip their own messages.
+// admin, handle}; handle is empty for a key without one. Agents use it
+// to skip their own messages.
 func (s *Service) whoami(w http.ResponseWriter, r *http.Request) {
 	c, _ := auth.FromContext(r.Context())
-	var label, trust string
+	var label, trust, handle string
 	err := s.DB.QueryRowContext(r.Context(),
-		`SELECT label, trust_origin FROM api_keys WHERE id = ?`, c.KeyID,
-	).Scan(&label, &trust)
+		`SELECT label, trust_origin, COALESCE(handle, '') FROM api_keys WHERE id = ?`, c.KeyID,
+	).Scan(&label, &trust, &handle)
 	if err != nil {
 		writeJSONError(w, r, http.StatusNotFound, "not_found", "key not found")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": c.KeyID, "label": label, "trust_origin": trust,
-		"admin": auth.IsAdmin(r.Context()),
+		"admin": auth.IsAdmin(r.Context()), "handle": handle,
 	})
 }
 
@@ -128,6 +129,7 @@ type keyView struct {
 	LastUsedAt  string `json:"last_used_at,omitempty"`
 	RevokedAt   string `json:"revoked_at,omitempty"`
 	TrustOrigin string `json:"trust_origin"`
+	Handle      string `json:"handle"` // the bot handle, empty if none
 }
 
 // createKeyResponse is what POST /v1/keys returns. Note: "key" is
@@ -218,7 +220,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin
+		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin, COALESCE(handle, '')
 		 FROM api_keys
 		 ORDER BY id`)
 	if err != nil {
@@ -236,7 +238,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			revoked   sql.NullString
 			trustOrig string
 		)
-		if err := rows.Scan(&k.ID, &k.Label, &prefix, &k.CreatedAt, &lastUsed, &revoked, &trustOrig); err != nil {
+		if err := rows.Scan(&k.ID, &k.Label, &prefix, &k.CreatedAt, &lastUsed, &revoked, &trustOrig, &k.Handle); err != nil {
 			writeJSONError(w, r, http.StatusInternalServerError, "internal_error", "scan failed")
 			return
 		}

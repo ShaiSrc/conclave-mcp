@@ -183,15 +183,24 @@ func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin 
 
 var skillIDRE = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
 
+// Profile limits, in characters.
+const (
+	maxDisplayName      = 64
+	maxDescription      = 1000
+	maxSkills           = 20
+	maxSkillName        = 64
+	maxSkillDescription = 300
+)
+
 func check(p Profile) error {
 	long := func(s string, n int) bool { return utf8.RuneCountInString(s) > n }
 	switch {
-	case long(p.DisplayName, 64):
-		return fmt.Errorf("%w: display_name is longer than 64 characters", ErrInvalid)
-	case long(p.Description, 1000):
-		return fmt.Errorf("%w: description is longer than 1000 characters", ErrInvalid)
-	case len(p.Skills) > 20:
-		return fmt.Errorf("%w: more than 20 skills", ErrInvalid)
+	case long(p.DisplayName, maxDisplayName):
+		return fmt.Errorf("%w: display_name is longer than %d characters", ErrInvalid, maxDisplayName)
+	case long(p.Description, maxDescription):
+		return fmt.Errorf("%w: description is longer than %d characters", ErrInvalid, maxDescription)
+	case len(p.Skills) > maxSkills:
+		return fmt.Errorf("%w: more than %d skills", ErrInvalid, maxSkills)
 	case !slices.Contains([]string{Private, Peers, Public}, p.Visibility):
 		return fmt.Errorf("%w: visibility must be private, peers or public", ErrInvalid)
 	}
@@ -199,13 +208,49 @@ func check(p Profile) error {
 		switch {
 		case !skillIDRE.MatchString(sk.ID):
 			return fmt.Errorf("%w: skill id %q must be 1 to 32 of a-z, 0-9, '_', '.', '-'", ErrInvalid, sk.ID)
-		case long(sk.Name, 64):
-			return fmt.Errorf("%w: skill %s: name is longer than 64 characters", ErrInvalid, sk.ID)
-		case long(sk.Description, 300):
-			return fmt.Errorf("%w: skill %s: description is longer than 300 characters", ErrInvalid, sk.ID)
+		case long(sk.Name, maxSkillName):
+			return fmt.Errorf("%w: skill %s: name is longer than %d characters", ErrInvalid, sk.ID, maxSkillName)
+		case long(sk.Description, maxSkillDescription):
+			return fmt.Errorf("%w: skill %s: description is longer than %d characters", ErrInvalid, sk.ID, maxSkillDescription)
 		}
 	}
 	return nil
+}
+
+// CleanRemote cleans a profile received from a peer like a saved one,
+// but truncates it to the limits instead of refusing it. Skills with an
+// invalid id, and those over the limit, are dropped; a visibility other
+// than public reads as peers. ok is false for an invalid handle, a
+// handle naming a server included: the caller drops the entry.
+func CleanRemote(p Profile) (_ Profile, ok bool) {
+	h, err := NormalizeHandle(p.Handle)
+	if err != nil {
+		return Profile{}, false
+	}
+	out := Profile{Handle: h, DisplayName: truncate(Clean(p.DisplayName, false), maxDisplayName),
+		Description: truncate(Clean(p.Description, true), maxDescription),
+		Skills:      []Skill{}, Visibility: Peers, UpdatedAt: p.UpdatedAt}
+	if p.Visibility == Public {
+		out.Visibility = Public
+	}
+	for _, sk := range p.Skills {
+		if len(out.Skills) == maxSkills {
+			break
+		}
+		if id := Clean(sk.ID, false); skillIDRE.MatchString(id) {
+			out.Skills = append(out.Skills, Skill{ID: id, Name: truncate(Clean(sk.Name, false), maxSkillName),
+				Description: truncate(Clean(sk.Description, true), maxSkillDescription)})
+		}
+	}
+	return out, true
+}
+
+// truncate cuts s to n characters.
+func truncate(s string, n int) string {
+	if utf8.RuneCountInString(s) <= n {
+		return s
+	}
+	return string([]rune(s)[:n])
 }
 
 // SetHandle gives the active non-admin key keyID the handle, which must

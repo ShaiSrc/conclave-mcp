@@ -340,10 +340,14 @@ func (s *Service) pruneNonces(ctx context.Context, now time.Time) error {
 	return err
 }
 
-// Run deletes expired nonces every minute until ctx is done.
+// Run deletes expired nonces every minute and refreshes the cached
+// directories of the allowed peers every 15 minutes, and of a peer
+// right after it is added, until ctx is done.
 func (s *Service) Run(ctx context.Context) {
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
+	dir := time.NewTicker(directoryEvery)
+	defer dir.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -352,6 +356,10 @@ func (s *Service) Run(ctx context.Context) {
 			if err := s.pruneNonces(ctx, now); err != nil {
 				s.logger.Warn("federation nonce pruning failed", "err", err)
 			}
+		case <-dir.C:
+			s.refreshDirectories(ctx)
+		case domain := <-s.refresh:
+			s.refreshLogged(ctx, domain)
 		}
 	}
 }

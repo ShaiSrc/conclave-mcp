@@ -244,6 +244,8 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		auditSvc.Routes(r)
 		claimsSvc.Routes(r)
 		botsStore.Routes(r)
+		// GET /v1/bots/lookup and /v1/directory, with federation off too.
+		federation.BotRoutes(r, botsStore, fedSvc)
 		if fedSvc != nil {
 			fedSvc.AdminRoutes(r)
 		} else {

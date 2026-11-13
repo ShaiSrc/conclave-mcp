@@ -471,3 +471,39 @@ func TestServer_FederationSlowBody(t *testing.T) {
 		t.Errorf("Start returned: %v", err)
 	}
 }
+
+// The bot lookup and the directory are on /v1 with federation on and
+// off, and /bots/lookup is not taken for a handle.
+func TestServer_BotLookupAndDirectory(t *testing.T) {
+	for _, c := range []struct{ domain, otherCode string }{{"", "federation_disabled"}, {"conclave.example.org", "peer_not_allowed"}} {
+		s, err := New(Config{Host: "127.0.0.1", Port: 7432, FederationDomain: c.domain, FederationHost: "127.0.0.1", FederationPort: 7433},
+			Deps{DB: uiDB(t)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		get := func(h http.Handler, path string) *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, uiRequest("GET", path, "localhost:7432"))
+			return rec
+		}
+		if rec := get(s.Handler(), "/v1/directory"); rec.Code != 200 || strings.TrimSpace(rec.Body.String()) != `{"bots":[]}` {
+			t.Errorf("%q: directory: %d %s", c.domain, rec.Code, rec.Body)
+		}
+		for path, code := range map[string]string{
+			"/v1/bots/lookup?handle=nobody":         `"code":"not_found"`,
+			"/v1/bots/lookup?handle=x@peer.example": `"code":"` + c.otherCode + `"`,
+			"/v1/bots/lookup?handle=bad%20name":     `"code":"bad_request"`,
+		} {
+			if rec := get(s.Handler(), path); !strings.Contains(rec.Body.String(), code) {
+				t.Errorf("%q: %s: %d %s, want %s", c.domain, path, rec.Code, rec.Body, code)
+			}
+		}
+		if s.fed != nil {
+			for _, path := range []string{"/fed/v1/directory", "/fed/v1/bots/nobody"} {
+				if rec := get(s.fed.Handler, path); rec.Code != http.StatusUnauthorized {
+					t.Errorf("unsigned %s on the federation listener: %d, want 401", path, rec.Code)
+				}
+			}
+		}
+	}
+}

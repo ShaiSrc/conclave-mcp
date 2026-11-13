@@ -195,6 +195,7 @@ func (s *Service) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 	}
 	detail, _ := json.Marshal(map[string]string{"fingerprint": in.Fingerprint})
 	s.audit(r.Context(), "federation.peer.add", domain, "ok", string(detail))
+	s.refreshSoon(domain)
 	p, err := s.peers.Get(r.Context(), domain)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
