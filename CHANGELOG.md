@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-11-13
+
 ### Added
 
 - Bot handles and profiles. A non-admin key with a handle is a bot,
@@ -18,9 +20,9 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   refreshed every 15 minutes; at most 5000 entries). Signed `GET
   /fed/v1/bots/{name}` and `/fed/v1/directory` (`peers` profiles only for
   allowed peers). Profiles of keys with the trust origin `external` reach
-  agents inside the external-content markers, like remote ones. Public pages and agent cards for `public` bots on
-  the federation listener (`/directory`, `/@name`,
-  `/@name/agent-card.json`) with a strict CSP. `conclave-mcp bots`, `agent
+  agents inside the external-content markers, like remote ones. Public
+  pages and agent cards for `public` bots on the federation listener
+  (`/directory`, `/@name`, `/@name/agent-card.json`) with a strict CSP. `conclave-mcp bots`, `agent
   add --handle`, five MCP tools (`bots.list`, `bots.lookup`,
   `bots.directory`, `profile.get`, `profile.update`), Bots and Directory
   pages in the web UI, `admin` in `GET /v1/keys`, migration 0012, audit
