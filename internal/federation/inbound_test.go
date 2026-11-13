@@ -326,6 +326,24 @@ func TestVerify_Replay(t *testing.T) {
 	wantErr(t, serve(svc, again), http.StatusUnauthorized, "bad_signature")
 }
 
+// Replays are refused before the rate limit, so they cannot use up the
+// peer's budget.
+func TestVerify_ReplayBeforeRateLimit(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	rm := newRemote(t)
+	allow(t, svc, rm.id)
+	req := signed(t, rm.id, local, "{}")
+	hdr := req.Header.Get("Authorization")
+	wantOK(t, serve(svc, req))
+	for i := 0; i < 40; i++ {
+		again := httptest.NewRequest(http.MethodPost, "/fed/v1/ping", strings.NewReader("{}"))
+		again.Host = local
+		again.Header.Set("Authorization", hdr)
+		wantErr(t, serve(svc, again), http.StatusUnauthorized, "bad_signature")
+	}
+	wantOK(t, serve(svc, signed(t, rm.id, local, "{}")))
+}
+
 // Step 8: a 429 writes no nonce row.
 func TestVerify_RateLimit(t *testing.T) {
 	svc := newLocal(t, "allowlist")

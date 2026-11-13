@@ -167,7 +167,9 @@ The server checks in this order and stops at the first failure.
 6. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
 7. Read the body, at most 64 KiB (413 `too_large`), and verify the
    signature. Otherwise 401 `bad_signature`.
-8. Per-peer rate limit: 429 `rate_limited` with `Retry-After`.
+8. A replay of a stored nonce: 401 `bad_signature`, checked first so
+   replays do not use up the peer's budget. Then the per-peer rate
+   limit: 429 `rate_limited` with `Retry-After`.
 9. Store the nonce for (origin, nonce). A duplicate: 401 `bad_signature`.
 10. Record an unknown open-mode peer as `seen` with its key. If a row for
     it appeared meanwhile (a concurrent first request, an operator), that

@@ -316,6 +316,16 @@ func TestServer_IPv6ListenerAddrs(t *testing.T) {
 	if s.http.Addr != "[::1]:7432" || s.fed.Addr != "[::1]:7433" {
 		t.Errorf("addrs: %q, %q", s.http.Addr, s.fed.Addr)
 	}
+	s, err = New(Config{
+		Host: "[::1]", Port: 7432,
+		FederationDomain: "conclave.example.org", FederationHost: "[::1]", FederationPort: 7433,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.http.Addr != "[::1]:7432" || s.fed.Addr != "[::1]:7433" {
+		t.Errorf("bracketed hosts: %q, %q", s.http.Addr, s.fed.Addr)
+	}
 }
 
 // Without a domain there is no second listener and no key.

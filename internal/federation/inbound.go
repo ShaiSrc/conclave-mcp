@@ -114,8 +114,19 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "signature does not verify")
 			return
 		}
-		// 8. Per-peer rate limit, on verified requests only. It comes
-		// before the nonce so a refused request writes no row.
+		// 8. Per-peer rate limit, on verified requests only. A replay of
+		// a stored nonce is refused first, so replays cannot use up the
+		// peer's budget; the limit comes before the INSERT so a refused
+		// request writes no row.
+		var used int
+		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM federation_nonces WHERE origin = ? AND nonce = ?`, origin, p.Nonce).Scan(&used); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if used > 0 {
+			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "nonce already used")
+			return
+		}
 		if lim := s.limiter(origin); !lim.Allow() {
 			rsv := lim.Reserve()
 			delay := rsv.Delay()

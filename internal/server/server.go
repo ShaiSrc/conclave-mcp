@@ -106,7 +106,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 	}
 	s.router = s.buildRouter(deps, uiSvc, fedSvc)
 	s.http = &http.Server{
-		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+		Addr:              net.JoinHostPort(strings.Trim(cfg.Host, "[]"), strconv.Itoa(cfg.Port)),
 		Handler:           s.router,
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
@@ -127,7 +127,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		// timeouts (a document fetch of up to 5 s comes before the body
 		// is read) and a small header cap.
 		s.fed = &http.Server{
-			Addr:              net.JoinHostPort(cfg.FederationHost, strconv.Itoa(cfg.FederationPort)),
+			Addr:              net.JoinHostPort(strings.Trim(cfg.FederationHost, "[]"), strconv.Itoa(cfg.FederationPort)),
 			Handler:           fr,
 			ReadHeaderTimeout: cfg.ReadHeader,
 			ReadTimeout:       10 * time.Second,
