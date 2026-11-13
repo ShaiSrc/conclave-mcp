@@ -23,7 +23,7 @@ func TestNormalizeHandle(t *testing.T) {
 		"", "-a", ".a", "_a", "a b", " a", "a\n", "a@b", "a/b", "a:b",
 		strings.Repeat("x", 33),
 		"é", "\uFF41", "\u212Aey", // the Kelvin sign lowercases to an ASCII k
-		"admin", "operator", "directory", "well-known", "lookup", "ADMIN", "Well-Known",
+		"admin", "operator", "directory", "well-known", "lookup", "key-5", "KEY-12", "ADMIN", "Well-Known",
 	} {
 		if got, err := NormalizeHandle(in); err == nil {
 			t.Errorf("NormalizeHandle(%q) = %q, want an error", in, got)

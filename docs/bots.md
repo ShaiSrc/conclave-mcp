@@ -17,7 +17,8 @@ upgrade.
 A handle is 1 to 32 characters of `a-z`, `0-9`, `_`, `.`, `-`, starting
 with a letter or digit. Capital ASCII letters are lowercased. These
 handles are reserved: `admin`, `operator`, `directory`, `well-known`,
-`lookup`. A handle is unique, and stays taken after its key is revoked.
+`lookup`, and `key-` followed by digits (keys without a handle appear in
+federated rooms as `key-<id>@server`). A handle is unique, and stays taken after its key is revoked.
 
 Give a key a handle:
 

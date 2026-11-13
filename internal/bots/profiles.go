@@ -275,11 +275,11 @@ func truncate(s string, n int) string {
 	return string([]rune(s)[:n])
 }
 
-// SetHandle gives the active non-admin key keyID the handle, which must
-// be normalized. A handle in use, even by a revoked key, is ErrTaken.
+// SetHandle gives the active non-admin local key keyID the handle, which
+// must be normalized; stand-ins of remote bots are not found. A handle in use, even by a revoked key, is ErrTaken.
 func (s *Store) SetHandle(ctx context.Context, keyID int64, handle string) error {
 	var admin bool
-	err := s.db.QueryRowContext(ctx, `SELECT is_admin FROM api_keys WHERE id = ? AND revoked_at IS NULL`, keyID).Scan(&admin)
+	err := s.db.QueryRowContext(ctx, `SELECT is_admin FROM api_keys WHERE id = ? AND revoked_at IS NULL AND remote_domain IS NULL`, keyID).Scan(&admin)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("%w (no active key %d)", ErrNotFound, keyID)

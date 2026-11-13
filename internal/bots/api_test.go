@@ -412,3 +412,18 @@ func TestAudit_Rows(t *testing.T) {
 		t.Errorf("audit:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(wantRows, "\n"))
 	}
 }
+
+// A stand-in of a remote bot never gets a local handle: it would appear
+// as one of this server's bots.
+func TestSetHandle_RefusesStandIn(t *testing.T) {
+	s, db := testStore(t)
+	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, trust_origin, remote_domain)
+		VALUES ('bob@b.example', '', '', '2026-01-01T00:00:00Z', 'external', 'b.example')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	if err := s.SetHandle(context.Background(), id, "bob"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("SetHandle on a stand-in: %v, want ErrNotFound", err)
+	}
+}
