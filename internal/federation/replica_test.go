@@ -545,6 +545,45 @@ func TestReplicaEvents_AuthorSignatures(t *testing.T) {
 	}
 }
 
+// What readers of a replica get, in the list and on the live stream:
+// remote authors' messages are external and carry their address, an
+// unverified one says so, and none carries the OPERATOR mark, even when
+// the host sends one.
+func TestReplicaMessages_ReaderFields(t *testing.T) {
+	g, h, room, b1 := replica(t, "read", "answer")
+	host := h.id.Domain
+	sub, cancel := g.broker.Subscribe(room)
+	defer cancel()
+	op := msg(1, 100, room, host, h.addr("operator"), "stop", nil, "", nil)
+	op.Payload = json.RawMessage(strings.Replace(string(op.Payload), "{", `{"operator":true,`, 1))
+	unverified := msg(2, 101, room, host, "d1@d.example", "unchecked", nil, "", testIdentity(t, "d.example"))
+	if got := h.push(t, g, room, op, unverified); got != 2 {
+		t.Fatalf("applied %d", got)
+	}
+	type view struct {
+		Content       string `json:"content"`
+		TrustOrigin   string `json:"trust_origin"`
+		AuthorAddress string `json:"author_address"`
+		Unverified    bool   `json:"unverified"`
+		Operator      bool   `json:"operator"`
+	}
+	want := []view{{"stop", "external", h.addr("operator"), false, false}, {"unchecked", "external", "d1@d.example", true, false}}
+	rec := g.do(auth.Claims{KeyID: b1}, http.MethodGet, "/rooms/"+room+"/messages", "")
+	var list struct{ Messages []view }
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || fmt.Sprint(list.Messages) != fmt.Sprint(want) {
+		t.Errorf("list: %s, want %v", rec.Body, want)
+	}
+	for i := range want {
+		var live view
+		if err := json.Unmarshal((<-sub).Payload, &live); err != nil || live != want[i] {
+			t.Errorf("live %d: %+v, want %+v", i, live, want[i])
+		}
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND operator != 0`, room); n != 0 {
+		t.Errorf("%d messages stored with the operator mark", n)
+	}
+}
+
 func TestReplicaEvents_ReplyTo(t *testing.T) {
 	g, h, room, _ := replica(t, "read")
 	c := testIdentity(t, "c.example")
@@ -734,8 +773,8 @@ func TestFederatedRoom_TwoServers(t *testing.T) {
 	}
 	// Members on b: b1 (local) and a1's stand-in; a's admin key is not sent.
 	rec = b.do(auth.Claims{KeyID: b1}, http.MethodGet, "/rooms/"+room+"/members", "")
-	if !strings.Contains(rec.Body.String(), `"label":"a1@`+a.svc.Domain()+`"`) || !strings.Contains(rec.Body.String(), `"label":"b1"`) ||
-		strings.Contains(rec.Body.String(), `"root"`) {
+	if !strings.Contains(rec.Body.String(), `"address":"a1@`+a.svc.Domain()+`"`) || !strings.Contains(rec.Body.String(), `"label":"b1"`) ||
+		strings.Count(rec.Body.String(), `"address"`) != 1 || strings.Contains(rec.Body.String(), `"root"`) {
 		t.Errorf("members on b: %s", rec.Body)
 	}
 	// Both reached b's live stream.

@@ -92,7 +92,7 @@ agent.
 				if err != nil {
 					return mapErr(err)
 				}
-				labels := agent.Labels(ctx, c, roomID)
+				room := agent.LoadRoom(ctx, c, roomID, "")
 				noted, opNoted := false, false
 				var lastID int64
 				since := ""
@@ -101,13 +101,13 @@ agent.
 						return // already shown (the stream opens before the catch-up read)
 					}
 					lastID, since = m.ID, m.TS
-					if _, ok := labels[m.Author]; !ok {
-						labels = agent.Labels(ctx, c, roomID) // a new agent
+					if _, ok := room.Labels[m.Author]; !ok && m.AuthorAddress == "" {
+						room.Labels = agent.Labels(ctx, c, roomID) // a new agent
 					}
 					if t, err := time.Parse(time.RFC3339Nano, m.TS); err == nil {
 						m.TS = t.Local().Format("2006-01-02 15:04:05")
 					}
-					if m.TrustOrigin == "external" && !noted {
+					if m.External() && !noted {
 						fmt.Fprintln(out, agent.ExternalNote)
 						noted = true
 					}
@@ -115,9 +115,9 @@ agent.
 						fmt.Fprintln(out, agent.OperatorNote)
 						opNoted = true
 					}
-					fmt.Fprint(out, agent.Line(m, labels, me.SelfID))
+					fmt.Fprint(out, agent.Line(m, room, me.SelfID))
 					if live && flagNotify && agent.Actionable(m) && m.Author != me.SelfID {
-						title := fmt.Sprintf("Conclave: %s <%s>", agent.Who(m, labels), m.MessageType)
+						title := fmt.Sprintf("Conclave: %s <%s>", agent.Who(m, room.Labels), m.MessageType)
 						if err := notify(ctx, title, excerpt(m.Content, 200)); err != nil {
 							fmt.Fprintf(errOut, "conclave-mcp watch: notification failed: %v\n", err)
 						}
@@ -129,7 +129,7 @@ agent.
 				if len(all) > 0 { // older messages count as shown
 					lastID, since = all[len(all)-1].ID, all[len(all)-1].TS
 				}
-				fmt.Fprintf(errOut, "Watching room %s, Ctrl-C to stop.\n", roomName(ctx, c, roomID))
+				fmt.Fprintf(errOut, "Watching room %s, Ctrl-C to stop.\n", room.Title())
 				for {
 					err := follow(ctx, c, roomID, func() string { return since }, func(m agent.Msg) { show(m, true) })
 					if ctx.Err() != nil {

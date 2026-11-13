@@ -40,12 +40,12 @@ func Thread(msgs []Msg, id int64) []Msg {
 
 // FormatThread renders a thread for an agent, with full content and
 // the reader's own messages marked "(you)".
-func FormatThread(room string, msgs []Msg, labels map[int64]string, self int64) string {
+func FormatThread(room Room, msgs []Msg, self int64) string {
 	var b strings.Builder
 	writeNote(&b, msgs)
-	fmt.Fprintf(&b, "Conclave room %s, thread #%d: %d message(s). %s\n", OneLine(room), msgs[0].ID, len(msgs), dataSentence(msgs))
+	fmt.Fprintf(&b, "Conclave room %s, thread #%d: %d message(s). %s\n", room.Title(), msgs[0].ID, len(msgs), dataSentence(msgs))
 	for _, m := range msgs {
-		writeMsg(&b, m, labels, self, 0)
+		writeMsg(&b, m, room, self, 0)
 	}
 	return b.String()
 }
@@ -74,8 +74,8 @@ func Unanswered(msgs []Msg) []Msg {
 
 // Line renders one message like the inbox does, with full content and
 // the reader's own messages marked "(you)".
-func Line(m Msg, labels map[int64]string, self int64) string {
+func Line(m Msg, room Room, self int64) string {
 	var b strings.Builder
-	writeMsg(&b, m, labels, self, 0)
+	writeMsg(&b, m, room, self, 0)
 	return b.String()
 }

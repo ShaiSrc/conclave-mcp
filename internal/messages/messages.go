@@ -123,6 +123,12 @@ type messageView struct {
 	// Operator is set by the server for messages the operator sent from
 	// the web UI with a passkey; no request field can set it.
 	Operator bool `json:"operator,omitempty"`
+	// AuthorAddress is the address (name@domain) of an author on
+	// another server, its stand-in key's label.
+	AuthorAddress string `json:"author_address,omitempty"`
+	// Unverified marks a message of a replica room whose author
+	// signature could not be checked: its server's key is unknown here.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 // allowedMessageTypes is the set of intent tags from
@@ -335,9 +341,10 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		Content:     req.Content,
 		// Size is computed at response time (SPEC-0002
 		// §3.5.1: derived from len(content), not stored).
-		Size:        len(req.Content),
-		TrustOrigin: callerTrustOrigin,
-		Operator:    operator,
+		Size:          len(req.Content),
+		TrustOrigin:   callerTrustOrigin,
+		Operator:      operator,
+		AuthorAddress: mem.Address,
 	}
 	if req.MessageType != "" {
 		mv.MessageType = req.MessageType
@@ -384,7 +391,8 @@ func (s *Service) forward(w http.ResponseWriter, r *http.Request, roomID string,
 }
 
 // viewColumns are the columns scanView reads.
-const viewColumns = `id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator`
+const viewColumns = `id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator,
+	unverified, COALESCE((SELECT k.label FROM api_keys k WHERE k.id = author_key_id AND k.remote_domain IS NOT NULL), '')`
 
 // scanView reads a message's viewColumns.
 func scanView(row interface{ Scan(...any) error }) (messageView, error) {
@@ -393,7 +401,7 @@ func scanView(row interface{ Scan(...any) error }) (messageView, error) {
 		mtype, meta, deletedAt sql.NullString
 	)
 	if err := row.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &mv.ContentType, &mv.Content, &mtype, &meta, &deletedAt,
-		&mv.TrustOrigin, &mv.Operator); err != nil {
+		&mv.TrustOrigin, &mv.Operator, &mv.Unverified, &mv.AuthorAddress); err != nil {
 		return mv, err
 	}
 	// Size is computed at response time (SPEC-0002 §3.5.1: derived
@@ -446,8 +454,9 @@ func (s *Service) StoreReplica(ctx context.Context, roomID string, m fedrooms.Re
 	if err == nil || !errors.Is(err, sql.ErrNoRows) {
 		return id, err
 	}
-	var trust string
-	if err := s.DB.QueryRowContext(ctx, `SELECT trust_origin FROM api_keys WHERE id = ?`, m.Author).Scan(&trust); err != nil {
+	var trust, address string
+	if err := s.DB.QueryRowContext(ctx, `SELECT trust_origin, CASE WHEN remote_domain IS NULL THEN '' ELSE label END
+		FROM api_keys WHERE id = ?`, m.Author).Scan(&trust, &address); err != nil {
 		return 0, err
 	}
 	var metadata sql.NullString
@@ -471,7 +480,8 @@ func (s *Service) StoreReplica(ctx context.Context, roomID string, m fedrooms.Re
 	}
 	if s.Broker != nil {
 		mv := messageView{ID: id, RoomID: roomID, AuthorKeyID: m.Author, TS: now, ContentType: m.ContentType,
-			Size: len(m.Content), Content: m.Content, MessageType: m.MessageType, Metadata: m.Metadata, TrustOrigin: trust}
+			Size: len(m.Content), Content: m.Content, MessageType: m.MessageType, Metadata: m.Metadata, TrustOrigin: trust,
+			AuthorAddress: address, Unverified: m.Unverified}
 		if payload, err := json.Marshal(mv); err == nil {
 			s.Broker.Publish(roomID, payload)
 		}

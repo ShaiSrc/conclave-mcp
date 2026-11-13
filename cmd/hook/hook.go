@@ -162,7 +162,7 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 		}
 		return err
 	}
-	fmt.Fprint(w, agent.Format(h.roomLabel(repo, &st), news, agent.Labels(ctx, h.C, st.RoomID))+
+	fmt.Fprint(w, agent.Format(h.room(ctx, repo, &st), news)+
 		"Handle what is addressed to you: answer with messages.send and reply_to = the message's #id.\n")
 	return ErrWake
 }
@@ -279,8 +279,10 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 	return err
 }
 
-func (h *Hook) roomLabel(repo agent.Repo, st *agent.State) string {
-	return repo.RoomName() + " (room_id " + st.RoomID + ")"
+// room loads the repository's room for agent output, named with its
+// room_id.
+func (h *Hook) room(ctx context.Context, repo agent.Repo, st *agent.State) agent.Room {
+	return agent.LoadRoom(ctx, h.C, st.RoomID, repo.RoomName()+" (room_id "+st.RoomID+")")
 }
 
 // sessionStart always tells the agent who it is, which room to use
@@ -312,8 +314,9 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	if agent.HasOperator(msgs) {
 		b.WriteString(agent.OperatorNote + "\n")
 	}
-	fmt.Fprintf(&b, "Conclave: you are %s in room %s (room_id %s); use this room_id with the conclave tools.\n",
-		agent.OneLine(me.Label), agent.OneLine(repo.RoomName()), st.RoomID)
+	room := h.room(ctx, repo, st)
+	fmt.Fprintf(&b, "Conclave: you are %s in room %s; use this room_id with the conclave tools.\n",
+		agent.OneLine(me.Label), room.Title())
 	if len(held.Claims) == 0 {
 		b.WriteString("No active claims.\n")
 	} else {
@@ -333,7 +336,7 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 		}
 	}
 	if len(msgs) > 0 {
-		b.WriteString(agent.FormatBody(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)))
+		b.WriteString(agent.FormatBody(room, msgs))
 	}
 	return json.NewEncoder(out).Encode(agent.ContextOutput("SessionStart", b.String()))
 }
@@ -344,8 +347,7 @@ func (h *Hook) inbox(ctx context.Context, event string, repo agent.Repo, st *age
 	if err != nil || len(msgs) == 0 {
 		return err
 	}
-	return json.NewEncoder(out).Encode(agent.ContextOutput(event,
-		agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID))))
+	return json.NewEncoder(out).Encode(agent.ContextOutput(event, agent.Format(h.room(ctx, repo, st), msgs)))
 }
 
 // heartbeat keeps this agent's claims alive while it works; best
@@ -430,7 +432,7 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	*st = next
 	return json.NewEncoder(out).Encode(map[string]any{
 		"decision": "block",
-		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)) +
+		"reason": agent.Format(h.room(ctx, repo, st), msgs) +
 			"Before you stop: answer what is addressed to you in the Conclave room (messages.send with reply_to = the message's #id), or say briefly why no answer is needed. Then stop.",
 	})
 }

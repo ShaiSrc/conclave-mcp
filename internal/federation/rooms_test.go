@@ -502,10 +502,21 @@ func fedRoom(t *testing.T, rights string) (*roomRig, *memberServer, string, int6
 
 func TestRoomMessage_FromMember(t *testing.T) {
 	g, m, room, c1 := fedRoom(t, "read,answer")
+	sub, cancel := g.broker.Subscribe(room)
+	defer cancel()
 	path := "/fed/v1/rooms/" + room + "/messages"
 	rec := g.fedDo(m.req(t, http.MethodPost, path, m.proposal(room, m.addr("c1"), "answer", "hello", nil, nil)))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("proposal: %d %s", rec.Code, rec.Body)
+	}
+	// Local readers get it as external, with the author's address, live
+	// and listed.
+	want := `"trust_origin":"external","author_address":"` + m.addr("c1") + `"`
+	if live := string((<-sub).Payload); !strings.Contains(live, want) || strings.Contains(live, "operator") {
+		t.Errorf("live: %s", live)
+	}
+	if rec := g.do(g.admin, http.MethodGet, "/rooms/"+room+"/messages", ""); !strings.Contains(rec.Body.String(), want) {
+		t.Errorf("list: %s", rec.Body)
 	}
 	var ev fedrooms.Event
 	var p fedrooms.MessagePayload

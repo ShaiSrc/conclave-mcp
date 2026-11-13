@@ -365,3 +365,56 @@ func TestGet_ShowsEmptyMyRights(t *testing.T) {
 		t.Errorf("my_rights = %#v, want empty list; out=%s", got["my_rights"], buf.String())
 	}
 }
+
+func TestList_ShowsHome(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"rooms":[{"id":"r1","name":"local"},{"id":"r2","name":"proj","home":"a.example"}]}`)
+	}))
+	defer srv.Close()
+	out, _, err := runSub(t, srv.URL, newListCmd, nil)
+	lines := strings.Split(out, "\n")
+	if err != nil || !strings.HasSuffix(lines[0], "HOME") || !strings.HasSuffix(strings.TrimSpace(lines[1]), "-") ||
+		!strings.HasSuffix(strings.TrimSpace(lines[2]), "a.example") {
+		t.Errorf("table: %q %v", out, err)
+	}
+	out, _, err = runSub(t, srv.URL, newListCmd, map[string]string{"format": "json"})
+	if err != nil || !strings.Contains(out, `"home": "a.example"`) {
+		t.Errorf("json: %q %v", out, err)
+	}
+}
+
+func TestInvite_ByAddress(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/rooms/r1/members" {
+			t.Errorf("%s %s", r.Method, r.URL.Path)
+		}
+		got = nil
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprint(w, `{"key_id":12,"address":"b1@b.example","rights":["read","answer"]}`)
+	}))
+	defer srv.Close()
+	out, errOut, err := runSub(t, srv.URL, newInviteCmd, map[string]string{"rights": "read,answer"}, "r1", "b1@b.example")
+	if err != nil || got["address"] != "b1@b.example" || fmt.Sprint(got["rights"]) != "[read answer]" || got["key_id"] != nil ||
+		got["allow_multi_room"] != nil {
+		t.Fatalf("body %v err %v", got, err)
+	}
+	if out != "invited b1@b.example (key 12) to room r1 with rights read,answer\n" || errOut != "" {
+		t.Errorf("out=%q stderr=%q", out, errOut)
+	}
+}
+
+func TestMembers_ShowsAddresses(t *testing.T) {
+	const room = "01M72DWQRAZXY3X8HWGJ0QZGNW"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"members":[{"key_id":1,"label":"agent-a","trust_origin":"internal"},`+
+			`{"key_id":2,"label":"b1@b.example","address":"b1@b.example","trust_origin":"external"},`+
+			`{"key_id":3,"label":"x@y.example","trust_origin":"internal"}]}`)
+	}))
+	defer srv.Close()
+	out, _, err := runSub(t, srv.URL, newMembersCmd, nil, room)
+	if err != nil || !strings.Contains(out, "b1@b.example (remote)") || strings.Contains(out, "x@y.example (remote)") {
+		t.Errorf("members: %q %v", out, err)
+	}
+}

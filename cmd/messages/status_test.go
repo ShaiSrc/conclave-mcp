@@ -110,3 +110,53 @@ func TestShort(t *testing.T) {
 		}
 	}
 }
+
+// A room hosted on another server: the host is named, and remote
+// authors are marked [EXT] by their address, members or not.
+func TestStatus_ReplicaRoom(t *testing.T) {
+	fixed := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	oldNow := now
+	now = func() time.Time { return fixed }
+	t.Cleanup(func() { now = oldNow })
+	ts := fixed.Add(-time.Hour).Format(time.RFC3339Nano)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/rooms/" + threadRoom + "/members":
+			fmt.Fprint(w, `{"members":[{"key_id":1,"label":"b1"},{"key_id":3,"label":"a1@a.example","address":"a1@a.example"}]}`)
+		case "/v1/rooms/" + threadRoom:
+			fmt.Fprint(w, `{"id":"`+threadRoom+`","name":"proj","home":"a.example"}`)
+		case "/v1/rooms/" + threadRoom + "/claims":
+			fmt.Fprint(w, `{"claims":[]}`)
+		case "/v1/rooms/" + threadRoom + "/messages":
+			fmt.Fprintf(w, `{"messages":[
+				{"id":1,"author_key_id":3,"ts":%q,"message_type":"question","content":"from a","trust_origin":"external","author_address":"a1@a.example"},
+				{"id":2,"author_key_id":4,"ts":%q,"message_type":"status_update","content":"hi","trust_origin":"external","author_address":"operator@a.example"},
+				{"id":3,"author_key_id":1,"ts":%q,"message_type":"status_update","content":"mine","trust_origin":"internal"}]}`, ts, ts, ts)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	oldOC := openClient
+	openClient = func(_ context.Context, _ *cobra.Command) (*client.Client, error) {
+		return client.New(client.Options{Server: srv.URL, Token: "stub"})
+	}
+	t.Cleanup(func() { openClient = oldOC })
+	var out bytes.Buffer
+	cmd := NewStatusCmd()
+	cmd.SetOut(&out)
+	cmd.SetContext(context.Background())
+	if err := cmd.RunE(cmd, []string{threadRoom}); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{"Room proj (" + threadRoom + ") on " + srv.URL + ", hosted by a.example\n", "[EXT] #1", "a1@a.example",
+		"[EXT] operator@a.example", "  b1"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "[EXT] b1") || strings.Contains(got, "key 4") {
+		t.Errorf("wrongly marked or unnamed:\n%s", got)
+	}
+}

@@ -238,7 +238,7 @@ var (
 )
 
 var tools = []tool{
-	{"rooms.list", "List the rooms the caller is a member of (an admin key sees every room).",
+	{"rooms.list", "List the rooms the caller is a member of (an admin key sees every room). A room hosted on another Conclave server has that server in home.",
 		map[string]any{"visibility": enum("Filter by visibility.", "public", "private")}, nil},
 	{"rooms.create", "Create a new room. Admin only.",
 		map[string]any{"name": str("Room name, 1..128 chars."), "description": str("Optional, <= 1024 chars."),
@@ -251,7 +251,7 @@ var tools = []tool{
 		[]string{"room_id", "key_id"}},
 	{"rooms.remove", "Remove an API key from a room. Admin only.",
 		map[string]any{"room_id": roomIDProp, "key_id": keyIDProp}, []string{"room_id", "key_id"}},
-	{"rooms.members", "List a room's members: key_id, label, trust_origin (admin keys also see rights). Use it to find another agent's key_id. Needs the read right.",
+	{"rooms.members", "List a room's members: key_id, label, trust_origin (admin keys also see rights); a bot of another Conclave server also has its address. Use it to find another agent's key_id. Needs the read right.",
 		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
 	{"messages.send", "Send a message to a room. The server stamps author_key_id and the author's trust_origin; the sender cannot override them.",
 		map[string]any{"room_id": roomIDProp, "content": str("Message body, <= 256 KiB."),
@@ -260,10 +260,10 @@ var tools = []tool{
 			"metadata":     map[string]any{"type": "object", "description": "Free-form JSON, e.g. {\"files\": [\"src/auth/\"]}."},
 			"reply_to":     num("Id of the message this answers (same room). Stored as metadata.reply_to.")},
 		[]string{"room_id", "content"}},
-	{"messages.list", "List messages in a room, oldest first, paginated by since. " + agent.ExternalNote + " " + agent.OperatorFieldNote,
+	{"messages.list", "List messages in a room, oldest first, paginated by since. " + agent.ExternalNote + " " + agent.OperatorFieldNote + " " + agent.RemoteFieldNote,
 		map[string]any{"room_id": roomIDProp, "since": sinceProp, "limit": num("Max messages, default 50, max 500."), "trust_origin": trustOriginProp},
 		[]string{"room_id"}},
-	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With since: returns at once if anything newer than since exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as since. " + agent.ExternalNote + " " + agent.OperatorFieldNote,
+	{"messages.subscribe", "Wait for the next messages from OTHER members of a room (your own are skipped). With since: returns at once if anything newer than since exists, otherwise blocks until the first new message or until wait seconds pass (timed_out=true). Loop by passing next_since back as since. " + agent.ExternalNote + " " + agent.OperatorFieldNote + " " + agent.RemoteFieldNote,
 		map[string]any{"room_id": roomIDProp, "since": sinceProp, "wait": num("Seconds to block, default 60, max 300.")},
 		[]string{"room_id"}},
 	{"messages.delete", "Soft-delete a message. Admin only.",

@@ -52,7 +52,7 @@ func NewStatusCmd() *cobra.Command {
 				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + roomID + "/claims", Out: &held}); err != nil {
 					return mapErr(err)
 				}
-				return renderStatus(out, c.BaseURL, roomName(ctx, c, roomID), roomID, msgs, agent.Labels(ctx, c, roomID), held.Claims, flagSince)
+				return renderStatus(out, c.BaseURL, agent.LoadRoom(ctx, c, roomID, ""), roomID, msgs, held.Claims, flagSince)
 			})
 		},
 	}
@@ -61,9 +61,13 @@ func NewStatusCmd() *cobra.Command {
 }
 
 // renderStatus writes the three status sections to out.
-func renderStatus(out io.Writer, server, name, roomID string, msgs []agent.Msg, labels map[int64]string, held []claims.Claim, since time.Duration) error {
-	n := now()
-	fmt.Fprintf(out, "Room %s (%s) on %s\n\n", name, roomID, server)
+func renderStatus(out io.Writer, server string, room agent.Room, roomID string, msgs []agent.Msg, held []claims.Claim, since time.Duration) error {
+	n, labels := now(), room.Labels
+	fmt.Fprintf(out, "Room %s (%s) on %s", agent.OneLine(room.Name), roomID, server)
+	if room.Home != "" {
+		fmt.Fprintf(out, ", hosted by %s", agent.OneLine(room.Home))
+	}
+	fmt.Fprint(out, "\n\n")
 
 	cutoff := n.Add(-since)
 	var open []agent.Msg
@@ -121,17 +125,6 @@ func renderStatus(out io.Writer, server, name, roomID string, msgs []agent.Msg, 
 	return w.Flush()
 }
 
-// roomName is the room's name, or its id if the lookup fails.
-func roomName(ctx context.Context, c *client.Client, roomID string) string {
-	var room struct {
-		Name string `json:"name"`
-	}
-	if _, err := c.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + roomID, Out: &room}); err != nil || room.Name == "" {
-		return roomID
-	}
-	return room.Name
-}
-
 // short renders d as "24h" or "90m" when it is whole.
 func short(d time.Duration) string {
 	switch {
@@ -168,7 +161,7 @@ func ext(m agent.Msg) string {
 	if m.Operator {
 		return "[OPERATOR] "
 	}
-	if m.TrustOrigin == "external" {
+	if m.External() {
 		return "[EXT] "
 	}
 	return ""

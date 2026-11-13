@@ -466,6 +466,12 @@ func TestToolDescriptions_AdminOnlyAndExternalNote(t *testing.T) {
 		if !strings.Contains(desc[n], agent.OperatorFieldNote) {
 			t.Errorf("%s: description must carry the operator field note", n)
 		}
+		if !strings.Contains(desc[n], agent.RemoteFieldNote) || !strings.Contains(desc[n], "other Conclave servers") {
+			t.Errorf("%s: description must explain remote authors", n)
+		}
+	}
+	if !strings.Contains(desc["rooms.list"], "home") {
+		t.Errorf("rooms.list must explain home: %q", desc["rooms.list"])
 	}
 	if !strings.Contains(desc["keys.list"], "rooms.members") {
 		t.Errorf("keys.list must point to rooms.members: %q", desc["keys.list"])
@@ -548,6 +554,21 @@ func TestBotsTools(t *testing.T) {
 			if !strings.Contains(tl.desc, agent.ExternalProfileNote) {
 				t.Errorf("%s lacks the external note", tl.name)
 			}
+		}
+	}
+}
+
+// Remote authors' fields reach the agent as the server sends them, in
+// the backlog and live.
+func TestSubscribe_KeepsRemoteFields(t *testing.T) {
+	remote := func(id int) string {
+		return fmt.Sprintf(`{"id":%d,"author_key_id":7,"ts":"t%d","content":"x","trust_origin":"external","author_address":"c1@c.example","unverified":true}`, id, id)
+	}
+	for name, api := range map[string]*httptest.Server{"backlog": fakeRoom([]string{remote(5)}), "live": fakeRoom(nil, remote(5))} {
+		events, _, _ := subscribeResult(t, NewServer(api.URL, "tk_test"), `{"room_id":"R","since":"t4","wait":30}`)
+		api.Close()
+		if len(events) != 1 || events[0]["unverified"] != true || events[0]["author_address"] != "c1@c.example" {
+			t.Errorf("%s: %v", name, events)
 		}
 	}
 }

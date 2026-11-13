@@ -400,8 +400,12 @@ func renderMessageList(format string, msgs []agent.Msg, labels map[int64]string,
 			if r := agent.ReplyTo(m); r > 0 {
 				re = fmt.Sprintf("#%d", r)
 			}
+			trust := m.TrustOrigin
+			if m.Unverified {
+				trust += ",unverified"
+			}
 			fmt.Fprintf(w, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-				m.ID, m.TS, agent.Who(m, labels), typ, re, m.TrustOrigin, excerpt(m.Content, 50))
+				m.ID, m.TS, agent.Who(m, labels), typ, re, trust, excerpt(m.Content, 50))
 		}
 		return w.Flush()
 	default:

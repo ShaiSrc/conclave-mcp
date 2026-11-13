@@ -271,6 +271,7 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 
 // members lists a room's members to keys holding read and to admin
 // keys; only admin keys also see admin keys and each member's rights.
+// A bot of another server also has its address.
 func (s *Service) members(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	mem, ok := rights.Require(w, r, s.DB, id, rights.Read)
@@ -278,7 +279,7 @@ func (s *Service) members(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT m.key_id, k.label, k.trust_origin, m.rights
+		`SELECT m.key_id, k.label, k.trust_origin, m.rights, k.remote_domain IS NOT NULL
 		 FROM room_members m JOIN api_keys k ON k.id = m.key_id
 		 WHERE m.room_id = ? AND (? OR k.is_admin = 0) ORDER BY m.key_id`, id, mem.Admin)
 	if err != nil {
@@ -291,12 +292,16 @@ func (s *Service) members(w http.ResponseWriter, r *http.Request) {
 		var (
 			keyID                int64
 			label, trust, stored string
+			remote               bool
 		)
-		if err := rows.Scan(&keyID, &label, &trust, &stored); err != nil {
+		if err := rows.Scan(&keyID, &label, &trust, &stored, &remote); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
 		m := map[string]any{"key_id": keyID, "label": label, "trust_origin": trust}
+		if remote { // a bot of another server: its stand-in's label is its address
+			m["address"] = label
+		}
 		if mem.Admin {
 			m["rights"] = rights.FromStorage(stored)
 		}
