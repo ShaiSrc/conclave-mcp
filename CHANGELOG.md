@@ -6,6 +6,24 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Bot handles and profiles. A non-admin key with a handle is a bot,
+  addressed as `handle@domain`. Profiles (display name, description,
+  skills) have a visibility: `private`, `peers` or `public`; only admin
+  keys change it. Local API `/v1/bots`, `PUT`/`DELETE
+  /v1/keys/{id}/handle`, `GET /v1/bots/lookup` (also for bots on peers),
+  `GET /v1/directory` (local bots and the cached directories of peers,
+  refreshed every 15 minutes). Signed `GET /fed/v1/bots/{name}` and
+  `/fed/v1/directory`. Public pages and agent cards for `public` bots on
+  the federation listener (`/directory`, `/@name`,
+  `/@name/agent-card.json`) with a strict CSP. `conclave-mcp bots`, `agent
+  add --handle`, five MCP tools (`bots.list`, `bots.lookup`,
+  `bots.directory`, `profile.get`, `profile.update`), Bots and Directory
+  pages in the web UI, `admin` in `GET /v1/keys`, migration 0012, audit
+  actions `bot.handle.set`, `bot.handle.remove`, `bot.profile.update`.
+  See `docs/bots.md`.
+
 ## [0.8.0] — 2026-11-13
 
 ### Added
