@@ -19,8 +19,9 @@ import (
 
 // TestE2E_WebUI: the real binary serves /ui, ui setup prints a working
 // setup URL, a passkey registered with a software authenticator gets a
-// session token, the token in X-Conclave-UI reaches an admin endpoint as
-// the operator key, and forged requests (no header, the token only as a
+// session token, the token in X-Conclave-UI reads admin endpoints as
+// the operator key and changes them only through a passkey
+// confirmation, and forged requests (no header, the token only as a
 // cookie, another Origin or Host) are refused.
 func TestE2E_WebUI(t *testing.T) {
 	env, admin := bootstrapKeyFor(t)
@@ -169,8 +170,22 @@ func TestE2E_WebUI(t *testing.T) {
 	if resp, body := do("GET", "/v1/keys", "", nil); resp.StatusCode != 200 {
 		t.Errorf("keys with the session token: %d %s", resp.StatusCode, body)
 	}
-	if resp, body := do("POST", "/v1/rooms", `{"name":"e2e-ui-room"}`, nil); resp.StatusCode != 201 {
-		t.Errorf("create a room with the session token: %d %s", resp.StatusCode, body)
+	// A session alone only reads; a change needs a passkey confirmation
+	// of exactly that request.
+	const needsConfirm = "changes made with a UI session need a passkey confirmation: make them in the web UI"
+	if resp, body := do("POST", "/v1/rooms", `{"name":"e2e-ui-room"}`, nil); resp.StatusCode != 403 || !strings.Contains(body, needsConfirm) {
+		t.Errorf("create a room with the session token alone: %d %s, want 403", resp.StatusCode, body)
+	}
+	resp, body = do("POST", "/ui/auth/confirm/begin", `{"method":"POST","path":"/v1/rooms","body":{"name":"e2e-ui-room"}}`, nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("confirm begin: %d %s", resp.StatusCode, body)
+	}
+	change, err := virtualwebauthn.ParseAssertionOptions(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := do("POST", "/ui/auth/confirm/finish", virtualwebauthn.CreateAssertionResponse(rp, pk, cred, *change), nil); resp.StatusCode != 201 || !strings.Contains(body, `"name":"e2e-ui-room"`) {
+		t.Errorf("create a room, confirmed: %d %s, want 201", resp.StatusCode, body)
 	}
 
 	// Forged requests fail the checks; each is refused for its own
@@ -231,7 +246,7 @@ func TestE2E_WebUI(t *testing.T) {
 		t.Fatalf("agent question: %d %s", q.Status, q.Body)
 	}
 	msgsPath := "/v1/rooms/" + opRoom.ID + "/messages"
-	if resp, b := do("POST", msgsPath, `{"content":"sneaky"}`, nil); resp.StatusCode != 403 || !strings.Contains(b, "operator messages need a passkey confirmation: send them from the web UI") {
+	if resp, b := do("POST", msgsPath, `{"content":"sneaky"}`, nil); resp.StatusCode != 403 || !strings.Contains(b, needsConfirm) {
 		t.Errorf("session POST of a message: %d %s, want 403 with the passkey message", resp.StatusCode, b)
 	}
 	begin := `{"room_id":"` + opRoom.ID + `","content":"yes, deploy","message_type":"answer","reply_to":` + strconv.FormatInt(question.ID, 10) + `}`

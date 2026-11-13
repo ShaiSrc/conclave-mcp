@@ -1,6 +1,6 @@
 // Rooms: the list, and one room with its messages (live), open
-// requests, claims and members.
-import { h, api, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, action } from './lib.js';
+// requests, claims and members. Every change is confirmed with a passkey.
+import { h, api, confirmed, oneAtATime, WAITING, authHeaders, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, action } from './lib.js';
 
 const PAGE = 500; // the server's largest message page
 const LIST_PAGES = 4; // the rooms list reads at most this many pages per room
@@ -73,9 +73,9 @@ export async function roomsPage(view) {
     h('form', {
       onsubmit: async e => {
         e.preventDefault();
-        msg.replaceChildren();
+        msg.replaceChildren(WAITING);
         try {
-          const room = await api('POST', '/v1/rooms', { name: name.value });
+          const room = await confirmed('POST', '/v1/rooms', { name: name.value });
           location.hash = '#/rooms/' + encodeURIComponent(room.id);
         } catch (err) {
           if (err.status === 401) rerender();
@@ -130,7 +130,7 @@ export async function roomPage(view, id) {
         replyTo(m) ? h('span', {}, `re #${replyTo(m)}`) : '',
         room.archived_at ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
         confirmButton('Delete', 'Delete this message?', async () => {
-          await api('DELETE', `${base}/messages/${m.id}`);
+          await confirmed('DELETE', `${base}/messages/${m.id}`);
           msgs.delete(m.id);
           draw();
         })),
@@ -161,15 +161,17 @@ export async function roomPage(view, id) {
         if (!text.value.trim()) throw new Error('Write a message first.');
         const body = { room_id: id, content: text.value, message_type: type.value };
         if (target) body.reply_to = target;
-        const options = await api('POST', '/ui/auth/message/begin', body);
-        const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
-        await api('POST', '/ui/auth/message/finish', cred.toJSON());
+        await oneAtATime(async () => {
+          const options = await api('POST', '/ui/auth/message/begin', body);
+          const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
+          await api('POST', '/ui/auth/message/finish', cred.toJSON());
+        });
         // The live stream shows the message; adding it here would move the
         // catch-up cursor past messages not yet fetched. Clear only what
         // was sent, not edits made while the passkey prompt was open.
         if (text.value === body.content) text.value = '';
         if (target === (body.reply_to || 0)) reply(0);
-      }, 'Waiting for your passkey…', false), // 401 here may be a rejected passkey: show it, keep the text
+      }, WAITING, false), // 401 here may be a rejected passkey: show it, keep the text
     }, 'Send — confirm with passkey'),
     h('p', { class: 'muted' }, 'Each message needs your passkey. Only confirm a prompt you started here.'),
     sendMsg);
@@ -210,7 +212,7 @@ export async function roomPage(view, id) {
     h('h2', {}, 'Active claims'), claimsTable(held.claims || []),
     h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys),
     room.archived_at ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
-      await api('POST', base + '/archive');
+      await confirmed('POST', base + '/archive');
       location.hash = '#/';
     })));
   return room.archived_at ? null : follow(base, id, msgs, draw, live);
@@ -233,8 +235,9 @@ function membersSection(base, members, keys) {
         const rights = picker.value();
         if (!rights.length && !confirm(`Save no rights for ${m.label}? This removes all its rights in this room.`)) return;
         save.disabled = true; // one save at a time, so an older one cannot land last
+        msg.replaceChildren(WAITING);
         try {
-          const saved = await api('PATCH', `${base}/members/${m.key_id}`, { rights });
+          const saved = await confirmed('PATCH', `${base}/members/${m.key_id}`, { rights });
           if (Array.isArray(saved && saved.rights)) picker.set(saved.rights);
           msg.replaceChildren('Saved.');
         } catch (err) {
@@ -249,7 +252,7 @@ function membersSection(base, members, keys) {
       h('td', {}, m.label), h('td', {}, m.trust_origin, ' ', extMark(m.trust_origin)),
       h('td', {}, picker.el, ' ', save, ' ', msg),
       h('td', {}, confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
-        await api('DELETE', `${base}/members/${m.key_id}`);
+        await confirmed('DELETE', `${base}/members/${m.key_id}`);
         rerender();
       })));
   });
@@ -265,9 +268,9 @@ function membersSection(base, members, keys) {
       ? h('form', {
         onsubmit: async e => {
           e.preventDefault();
-          msg.replaceChildren();
+          msg.replaceChildren(WAITING);
           try {
-            await api('POST', `${base}/invite`, { key_id: Number(key.value), rights: picker.value(), allow_multi_room: multi.checked });
+            await confirmed('POST', `${base}/invite`, { key_id: Number(key.value), rights: picker.value(), allow_multi_room: multi.checked });
             rerender();
           } catch (err) {
             if (err.status === 401) rerender();

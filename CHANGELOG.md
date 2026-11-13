@@ -6,6 +6,26 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `POST /ui/auth/confirm/begin` and `finish`: the web UI confirms each
+  change with its own passkey assertion (user verification required).
+  The server stores the request at begin and runs exactly that request
+  after the assertion, in the session that began it. Refusals are
+  audited as `ui.confirm`.
+- `POST /ui/agents`: creates an agent (a key and its invitation) with one
+  confirmation, and revokes the key if the invite fails.
+
+### Changed
+
+- A UI session only reads: anything but GET under `/v1` gets 403
+  `forbidden` ("changes made with a UI session need a passkey
+  confirmation: make them in the web UI"). The web UI asks for the
+  passkey on every change: rooms, keys, agents, members and rights,
+  archiving, deleting messages.
+- Adding a passkey from a logged-in session first needs a confirmation
+  with a passkey already registered; removing one needs a confirmation.
+
 ## [0.7.0] — 2026-11-13
 
 ### Added

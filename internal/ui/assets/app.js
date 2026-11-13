@@ -1,5 +1,5 @@
 // The page: routing, the header, passkey login and setup, passkeys.
-import { h, api, setSession, errorBox, confirmButton, table, when, action } from './lib.js';
+import { h, api, confirmed, confirmNow, oneAtATime, WAITING, setSession, errorBox, confirmButton, table, when, action } from './lib.js';
 import { roomsPage, roomPage } from './rooms.js';
 import { keysPage, auditPage } from './keys.js';
 
@@ -8,11 +8,14 @@ const nav = document.getElementById('nav');
 
 // registerPasskey runs a registration ceremony: with a setup token for
 // the first passkey (which logs this tab in), else as the logged-in
-// operator.
-async function registerPasskey(name, setupToken = '') {
+// operator, confirmed first with a passkey already registered (a session
+// alone cannot add one).
+const registerPasskey = (name, setupToken = '') => oneAtATime(async () => {
   let options;
   try {
-    options = await api('POST', '/ui/auth/register/begin', { name, setup_token: setupToken });
+    options = setupToken
+      ? await api('POST', '/ui/auth/register/begin', { name, setup_token: setupToken })
+      : await confirmNow('POST', '/ui/auth/register/begin', { name });
   } catch (err) {
     // an expired or used token is of no use: drop it from the address bar
     if (setupToken && err.status >= 400 && err.status < 500) history.replaceState(null, '', '#/');
@@ -21,21 +24,19 @@ async function registerPasskey(name, setupToken = '') {
   const cred = await navigator.credentials.create({ publicKey: PublicKeyCredential.parseCreationOptionsFromJSON(options) });
   const res = await api('POST', '/ui/auth/register/finish', cred.toJSON());
   if (res.session) setSession(res.session);
-}
+});
 
-async function login() {
+const login = () => oneAtATime(async () => {
   const options = await api('POST', '/ui/auth/login/begin');
   const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
   setSession((await api('POST', '/ui/auth/login/finish', cred.toJSON())).session);
-}
+});
 
 // logout ends the session on the server; the tab forgets its token
 // even if that fails.
 async function logout() {
   try { await api('POST', '/ui/auth/logout'); } finally { setSession(''); }
 }
-
-const WAITING = 'Waiting for your passkey…';
 
 function loginPage(view, state) {
   if (state.setup_needed) {
@@ -76,7 +77,7 @@ async function passkeysPage(view) {
       h('td', {}, c.name), h('td', {}, when(c.created_at)), h('td', {}, when(c.last_used_at)),
       h('td', {}, credentials.length > 1
         ? confirmButton('Remove', 'Remove this passkey?', async () => {
-          await api('DELETE', '/ui/auth/credentials/' + encodeURIComponent(c.id));
+          await confirmed('DELETE', '/ui/auth/credentials/' + encodeURIComponent(c.id));
           await render();
         })
         : h('span', { class: 'muted' }, 'the last passkey cannot be removed'))))),

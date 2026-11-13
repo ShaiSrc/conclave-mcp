@@ -35,6 +35,7 @@ func newTestUI(t *testing.T, extra ...func(s *Service, r chi.Router)) (*Service,
 	s.now = c.now
 	r := chi.NewRouter()
 	s.Routes(r)
+	s.Router = r
 	for _, f := range extra {
 		f(s, r)
 	}
@@ -221,6 +222,33 @@ func (p *passkey) confirm(b *browser, body any) (int, []byte) {
 		return status, resp
 	}
 	return p.finishAssertion(b, "message", opts)
+}
+
+// confirmChange runs a change through a passkey confirmation (begin
+// with method, path and body, assertion, finish) and returns the last
+// response.
+func (p *passkey) confirmChange(b *browser, method, path string, body any) (int, []byte) {
+	b.t.Helper()
+	opts, status, resp := p.beginAssertion(b, "confirm", map[string]any{"method": method, "path": path, "body": body})
+	if opts == nil {
+		return status, resp
+	}
+	return p.finishAssertion(b, "confirm", opts)
+}
+
+// add registers p from b's session, the registration confirmed with
+// by, a passkey already registered. It returns the last response.
+func (p *passkey) add(b *browser, by *passkey) (int, []byte) {
+	b.t.Helper()
+	status, body := by.confirmChange(b, "POST", "/ui/auth/register/begin", map[string]string{"name": "test key"})
+	if status != http.StatusOK {
+		return status, body
+	}
+	opts, err := virtualwebauthn.ParseAttestationOptions(string(body))
+	if err != nil {
+		b.t.Fatalf("creation options: %v\n%s", err, body)
+	}
+	return p.finishRegistration(b, opts)
 }
 
 // loggedIn sets the UI up with a setup token and returns the logged-in

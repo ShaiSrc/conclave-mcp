@@ -18,8 +18,10 @@ import (
 // Authorization header that carries X-Conclave-UI acts as the operator
 // key if that header holds a session token (else 401), the request has a
 // UI Host (else 403), the UI Origin unless it is a GET (else 403) and
-// the session is live (else 401). Every other request goes to bearer
-// unchanged; a session cookie counts for nothing.
+// the session is live (else 401). A session alone only reads: anything
+// but a GET needs a passkey confirmation (else 403), which only
+// confirmFinish can mark. Every other request goes to bearer unchanged;
+// a session cookie counts for nothing.
 func (s *Service) Auth(bearer func(http.Handler) http.Handler) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		viaBearer := bearer(next)
@@ -57,6 +59,10 @@ func (s *Service) Auth(bearer func(http.Handler) http.Handler) func(http.Handler
 			}
 			if err != nil {
 				writeErr(w, r, http.StatusInternalServerError, "internal_error", "operator key lookup")
+				return
+			}
+			if r.Method != http.MethodGet && !confirmed(r) {
+				writeErr(w, r, http.StatusForbidden, "forbidden", needsConfirm)
 				return
 			}
 			ctx := context.WithValue(r.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: id, Scopes: []string{auth.ScopeAdmin, auth.ScopeUI}})

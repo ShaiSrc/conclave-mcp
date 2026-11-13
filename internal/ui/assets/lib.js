@@ -63,7 +63,8 @@ export async function api(method, path, body) {
     res = await fetch(path, opts);
     // The rate limit (burst 30, then 10 a second) can refuse a page that
     // reads many rooms: wait as the server says and try again, 3 times.
-    if (res.status !== 429 || tries === 3) break;
+    // Only /v1: a /ui/auth finish uses its ceremony up, so a retry fails.
+    if (res.status !== 429 || tries === 3 || !path.startsWith('/v1/')) break;
     await new Promise(r => setTimeout(r, 1000 * (Number(res.headers.get('Retry-After')) || 1)));
   }
   const text = await res.text();
@@ -75,6 +76,42 @@ export async function api(method, path, body) {
       e.message || (data ? '' : text.trim().slice(0, 200)) || res.statusText || 'request failed');
   }
   return data;
+}
+
+// WAITING is shown while a passkey prompt is open.
+export const WAITING = 'Waiting for your passkey…';
+
+// Every passkey ceremony (login, registration, confirmation, message)
+// keeps its state under one cookie, so a second begin would replace the
+// ceremony of a prompt still open. oneAtATime runs fn once every earlier
+// one has finished, failed or not.
+let last = Promise.resolve();
+export function oneAtATime(fn) {
+  const run = last.then(fn);
+  last = run.catch(() => {});
+  return run;
+}
+
+// confirmed makes a change as the operator. A session alone can only
+// read: the server keeps the request (method, path, body), the passkey
+// confirms it, and the server runs exactly that request and answers its
+// response (POST /ui/auth/confirm/begin and finish).
+export function confirmed(method, path, body) {
+  return oneAtATime(() => confirmNow(method, path, body));
+}
+
+// confirmNow is confirmed for a caller that already holds oneAtATime.
+export async function confirmNow(method, path, body) {
+  const options = await api('POST', '/ui/auth/confirm/begin', { method, path, body });
+  const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
+  try {
+    return await api('POST', '/ui/auth/confirm/finish', cred.toJSON());
+  } catch (err) {
+    // A 401 here may be a refused passkey: only a dead session shows the
+    // login page, anything else shows the error.
+    if (err.status === 401 && (await api('GET', '/ui/auth/state')).logged_in) throw new Error(err.message);
+    throw err;
+  }
 }
 
 // mapLimit runs fn on every item, at most limit at a time, and returns
@@ -102,7 +139,8 @@ export function when(ts) {
   return ts ? new Date(ts).toLocaleString() : '';
 }
 
-// confirmButton is a button that asks in the page before action runs.
+// confirmButton is a button that asks in the page before action runs;
+// while it runs (a passkey prompt) it shows WAITING.
 export function confirmButton(label, question, action) {
   const wrap = h('span', { class: 'confirm' });
   const reset = () => wrap.replaceChildren(h('button', { class: 'danger', onclick: ask }, label));
@@ -112,6 +150,7 @@ export function confirmButton(label, question, action) {
       h('button', { onclick: reset }, 'No'));
   }
   async function run() {
+    wrap.replaceChildren(WAITING);
     try { await action(); } catch (err) {
       if (err.status === 401) rerender(); // the session ended: show the login page
       else wrap.replaceChildren(errorBox(err));

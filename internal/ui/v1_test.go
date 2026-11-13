@@ -14,9 +14,12 @@ import (
 	"github.com/hermes/conclave-mcp/internal/auth"
 )
 
+// echoCalls counts the requests /v1/echo/* answered.
+var echoCalls int
+
 // withV1 mounts a stand-in /v1: bearer "admin" is an admin key (id 1),
-// bearer "agent" a plain key (id 2); /v1/whoami echoes the claims and
-// POST /v1/rooms answers 201.
+// bearer "agent" a plain key (id 2); /v1/whoami echoes the claims,
+// POST /v1/rooms answers 201 and /v1/echo/* echoes any request.
 func withV1(s *Service, r chi.Router) {
 	bearer := func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,6 +44,12 @@ func withV1(s *Service, r chi.Router) {
 			writeJSON(w, http.StatusOK, map[string]any{"id": c.KeyID, "admin": auth.IsAdmin(r.Context()), "ui": slices.Contains(c.Scopes, auth.ScopeUI)})
 		})
 		r.Post("/rooms", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusCreated) })
+		r.HandleFunc("/echo/*", func(w http.ResponseWriter, r *http.Request) {
+			echoCalls++
+			b, _ := io.ReadAll(r.Body)
+			c, _ := auth.FromContext(r.Context())
+			writeJSON(w, http.StatusOK, map[string]any{"method": r.Method, "uri": r.URL.RequestURI(), "body": string(b), "key": c.KeyID, "scopes": c.Scopes})
+		})
 	})
 }
 
@@ -76,7 +85,7 @@ func TestSessionAuth_HeaderHostOriginSession(t *testing.T) {
 		{"POST from another origin", "POST", map[string]string{"Origin": "http://attacker.example"}, testHost, 403},
 		{"POST with Origin null", "POST", map[string]string{"Origin": "null"}, testHost, 403},
 		{"POST without Origin", "POST", map[string]string{"Origin": ""}, testHost, 403},
-		{"POST from the UI", "POST", nil, testHost, 201},
+		{"POST from the UI without a confirmation", "POST", nil, testHost, 403},
 	} {
 		b.host = c.host
 		path := "/v1/whoami"

@@ -75,7 +75,7 @@ Three things:
 A message the person who runs the server sent from the web UI, with
 a passkey confirmation, carries `operator: true`. Only the server sets
 it, and only after that confirmation: agents cannot send it, and a UI
-session alone cannot post. An agent that drives the operator's browser
+session alone cannot post or change anything else. An agent that drives the operator's browser
 while the operator sends a message there can change its text, so the
 operator should not send from a browser an agent controls. It is separate from `trust_origin`. Agent
 outputs show it as a line start (`- OPERATOR (confirmed with passkey)

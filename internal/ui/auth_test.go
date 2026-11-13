@@ -104,8 +104,11 @@ func TestRegisterGate(t *testing.T) {
 		t.Errorf("token after setup: %d %s, want 403", status, body)
 	}
 	// The logged-in operator adds one without a token.
-	if status, body := newPasskey(testOrigin).register(b1, ""); status != http.StatusCreated {
-		t.Errorf("second passkey from a session: %d %s", status, body)
+	if status, body := newPasskey(testOrigin).register(b1, ""); status != http.StatusForbidden || !strings.Contains(string(body), needsConfirm) {
+		t.Errorf("second passkey from a session without a confirmation: %d %s, want 403", status, body)
+	}
+	if status, body := newPasskey(testOrigin).add(b1, p1); status != http.StatusCreated {
+		t.Errorf("second passkey from a session, confirmed: %d %s", status, body)
 	}
 	if n, _ := s.credentialCount(ctx); n != 2 {
 		t.Errorf("%d passkeys, want 2", n)
@@ -135,16 +138,20 @@ func TestPasskeys_ListAndRemoveNotTheLast(t *testing.T) {
 	if len(first) != 1 {
 		t.Fatalf("passkeys %v, want 1", first)
 	}
-	if status, _ := b.do("DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusConflict {
+	if status, _ := pk.confirmChange(b, "DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusConflict {
 		t.Errorf("remove the last passkey: %d, want 409", status)
 	}
-	if status, body := newPasskey(testOrigin).register(b, ""); status != http.StatusCreated {
+	pk2 := newPasskey(testOrigin)
+	if status, body := pk2.add(b, pk); status != http.StatusCreated {
 		t.Fatalf("second passkey: %d %s", status, body)
 	}
-	if status, _ := b.do("DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusNoContent {
+	if status, body := b.do("DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusForbidden || !strings.Contains(string(body), needsConfirm) {
+		t.Errorf("remove without a confirmation: %d %s, want 403", status, body)
+	}
+	if status, _ := pk2.confirmChange(b, "DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusNoContent {
 		t.Errorf("remove the first of two: %d, want 204", status)
 	}
-	if status, _ := b.do("DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusNotFound {
+	if status, _ := pk2.confirmChange(b, "DELETE", "/ui/auth/credentials/"+first[0], nil); status != http.StatusNotFound {
 		t.Errorf("remove it again: %d, want 404", status)
 	}
 	if ids := list(); len(ids) != 1 || ids[0] == first[0] {
@@ -352,7 +359,7 @@ func TestPasskeys_RemoveEndsOtherSessions(t *testing.T) {
 	s, _, base := newTestUI(t)
 	b1, pk1 := loggedIn(t, s, base)
 	pk2 := newPasskey(testOrigin)
-	if st, body := pk2.register(b1, ""); st != http.StatusCreated {
+	if st, body := pk2.add(b1, pk1); st != http.StatusCreated {
 		t.Fatalf("second passkey: %d %s", st, body)
 	}
 	b2 := newBrowser(t, base)
@@ -368,7 +375,7 @@ func TestPasskeys_RemoveEndsOtherSessions(t *testing.T) {
 	if json.Unmarshal(body, &l) != nil || len(l.Credentials) != 2 {
 		t.Fatalf("list: %s", body)
 	}
-	if st, _ := b1.do("DELETE", "/ui/auth/credentials/"+l.Credentials[0].ID, nil); st != http.StatusNoContent {
+	if st, _ := pk2.confirmChange(b1, "DELETE", "/ui/auth/credentials/"+l.Credentials[0].ID, nil); st != http.StatusNoContent {
 		t.Fatalf("remove: %d", st)
 	}
 	if !state(t, b1).LoggedIn {
