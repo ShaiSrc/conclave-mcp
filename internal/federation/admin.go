@@ -21,7 +21,8 @@ const (
 	lookupBurst      = 10
 )
 
-// AdminRoutes mounts the operator endpoints under /v1/federation. The
+// AdminRoutes mounts the operator endpoints under /v1/federation, and
+// GET /v1/rooms/{id}/delivery. The
 // caller mounts them behind authentication; every handler also needs
 // an admin key.
 func (s *Service) AdminRoutes(r chi.Router) {
@@ -35,6 +36,52 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Delete("/peers/{domain}", s.handleRemovePeer)
 		r.Post("/peers/{domain}/ping", s.handlePingPeer)
 	})
+	r.With(adminOnly).Get("/rooms/{id}/delivery", s.handleRoomDelivery)
+}
+
+// handleRoomDelivery lists, per member server, how far the events of a
+// room hosted here have been delivered. A replica room, a missing room
+// and a room that has never had a member server answer 404.
+func (s *Service) handleRoomDelivery(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	rows, err := s.db.QueryContext(r.Context(), `SELECT d.peer, d.acked_seq,
+		COALESCE((SELECT MAX(e.seq) FROM fed_events e WHERE e.room_id = d.room_id), 0),
+		d.attempts, d.next_try_at, d.last_error, d.paused
+		FROM fed_delivery d JOIN rooms r ON r.id = d.room_id
+		WHERE d.room_id = ? AND r.home_domain IS NULL ORDER BY d.peer`, id)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+		return
+	}
+	defer func() { _ = rows.Close() }()
+	type row struct {
+		Peer      string  `json:"peer"`
+		AckedSeq  int64   `json:"acked_seq"`
+		LastSeq   int64   `json:"last_seq"`
+		Attempts  int     `json:"attempts"`
+		NextTryAt *string `json:"next_try_at"`
+		LastError string  `json:"last_error"`
+		Paused    bool    `json:"paused"`
+	}
+	out := []row{}
+	for rows.Next() {
+		var d row
+		if err := rows.Scan(&d.Peer, &d.AckedSeq, &d.LastSeq, &d.Attempts, &d.NextTryAt, &d.LastError, &d.Paused); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+			return
+		}
+		out = append(out, d)
+	}
+	if rows.Err() != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+		return
+	}
+	if len(out) == 0 {
+		writeErr(w, r, http.StatusNotFound, "not_found", "no federated delivery for this room")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"delivery": out})
 }
 
 // DisabledRoutes answers 404 federation_disabled on /v1/federation and below.
