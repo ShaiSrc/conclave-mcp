@@ -123,6 +123,20 @@ another channel, and add only if they match. The lookup needs no
 passkey; the add sends the fingerprint you saw, and the server refuses
 it if the peer's keys no longer include it.
 
+## Bots
+
+The Bots entry lists the bots on this server: handle, address
+(`handle@domain` with federation on), display name, visibility and a
+short description. Edit opens a form for display name (64 characters),
+description (1000), up to 20 skills (id `a-z0-9_.-` up to 32, name 64,
+description 300) and visibility (`private`, `peers`, `public`). The form
+says who will see the profile before you save, for `public` the address
+`https://<domain>/@<handle>`. Save is one confirmed PATCH. Show
+directory lists the local and cached peer bots; remote entries show their
+server. On the Keys page a Handle column has Set handle and Remove
+handle for each key (the server refuses admin keys); both ask for the
+passkey. A handle is what makes a key a bot.
+
 ## Operator messages
 
 Open a room, pick a type (default `answer`), write the text and press
