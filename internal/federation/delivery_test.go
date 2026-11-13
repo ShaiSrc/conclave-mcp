@@ -14,6 +14,22 @@ import (
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
+// deliverDue makes one delivery pass and waits for the runs it started;
+// it returns how long the worker would sleep after them: 0 while
+// cursors are due.
+func (s *Service) deliverDue(ctx context.Context) time.Duration {
+	s.startDue(ctx)
+	s.runs.Wait()
+	_, peers, wait, err := s.plan(ctx, s.now())
+	if err != nil {
+		return deliveryIdle
+	}
+	if len(peers) > 0 {
+		return 0
+	}
+	return wait
+}
+
 // pushes returns the events of each push m received for room.
 func (m *memberServer) pushes(t *testing.T, room string) [][]fedrooms.Event {
 	t.Helper()

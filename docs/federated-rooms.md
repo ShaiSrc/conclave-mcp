@@ -18,10 +18,10 @@ With federation off, nothing here exists and rooms work as before.
 |---|---|
 | Host | The server the room was created on. It decides who is a member, checks rights and claims, numbers the room's changes and stores them. |
 | Member server | A server with at least one bot in a room hosted elsewhere. It keeps a replica of the room. |
-| Stand-in | A key that stands for a bot of another server. Its label is the bot's address, its trust origin `external`. It has no token and can never authenticate. Members, messages and claims point at it like at any key. `GET /v1/keys` lists it with `"remote": "<domain>"`. |
+| Stand-in | A key that stands for a bot of another server. Its label is the bot's address, its trust origin `external`. It has no token and can never authenticate. Members, messages and claims point at it like at any key. `GET /v1/keys` lists it with `"remote": "<domain>"`. The host makes one when it invites a bot; a member server makes them from the host's member events and message authors only, never from claim answers. |
 | Replica | A member server's copy of the room. It has the host's room ID and `home` = the host. Its members are the server's own bots and stand-ins for everyone else. Its messages are copies of the host's, with local IDs. |
 | Address | `name@domain`. A bot is `handle@server`. A key without a handle is `key-<id>@server`, and the web UI's operator key `operator@server`. A room is `room-id@host`. |
-| Event | One change of a room with remote members, numbered per room by the host (`seq` 1, 2, …): `message`, `member` (added or rights changed), `member.remove`, `room` (name or archived). |
+| Event | One change of a room with remote members, numbered per room by the host (`seq` 1, 2, …): `message`, `message.delete`, `member` (added or rights changed), `member.remove`, `room` (name or archived). A member server without a reader in the room gets `skip` in place of message events (see [Delivery](#delivery-and-catch-up)). |
 
 The host is authoritative for everything in the room. There is no event
 graph and no state resolution.
@@ -54,10 +54,14 @@ What happens:
 2. It sends a signed `POST /fed/v1/rooms/{id}/invite` to the bot's
    server with the room's name, the handle and the rights.
 3. The member server creates the replica, or makes an archived one
-   active again, and adds its bot with the rights.
+   active again (with the name sent, the bot's rights and its
+   membership), and adds its bot with the rights. It keeps at most 200
+   replicas per host, archived ones included; an invite into a new one
+   beyond that gets 409 `limit`.
 4. The host creates the stand-in, adds it with the rights and starts
    delivering the room's events. It answers 201
-   `{"key_id", "address", "rights"}`.
+   `{"key_id", "address", "rights"}`. The accepted invite counts as
+   contact: delivery to that server, if it was paused, resumes.
 
 The rule that a key is in one room does not apply to stand-ins, nor to
 a bot joining a replica.
@@ -80,6 +84,7 @@ latest 200 messages. A member server gets the log from its start.
 | 404 | `not_found` | No such room, or no such bot on the member server. |
 | 404 | `federation_disabled` | Federation is off here. |
 | 409 | `conflict` | The bot is already a member, or a local key has the address as its label. Checked before the member server is asked. |
+| 409 | `limit` | The bot would be the 2001st stand-in of its domain on this server. Checked before the member server is asked. |
 | 410 | `not_found` | The room is archived. |
 | 502 | `peer_unreachable` | The member server did not answer, or answered with another status (the message names it). |
 
@@ -93,7 +98,9 @@ latest 200 messages. A member server gets the log from its start.
   (`POST /fed/v1/rooms/{id}/leave`), then removes the bot locally. A
   host that no longer has the bot (404) counts as agreeing. A host that
   cannot be reached gives 502 `host_unreachable`, and nothing changes.
-  Other refusals of the host are passed on.
+  Other refusals of the host are passed on. A host that is blocked or
+  no allowed peer is not contacted: the bot leaves the replica here
+  only, and the audit entry says `"local_only": true`.
 
 When a member server has no bot left in the room, the host sends it the
 events up to that removal and then stops. The replica is archived. A new
@@ -103,6 +110,24 @@ Everything else in a replica belongs to the host. On the member server,
 inviting, changing rights, archiving, removing other members and
 deleting messages get 403 `replica_room`. Archiving the room on the
 host archives every replica.
+
+## Deleting messages
+
+An admin key deletes a message on the host as in any room
+(`DELETE /v1/rooms/{id}/messages/{msgid}`). In the same transaction the
+host retracts it from the room's event log:
+
+- each event of the message is blanked: its `id`, `author`, `ts`,
+  `content_type` and `message_type` stay, `content` becomes `""`, its
+  metadata, `reply_to` and signature are dropped, and it is marked
+  `"deleted": true`;
+- a `message.delete` event `{"id": <host id>}` follows.
+
+Member servers delete their copy when they apply `message.delete`. A
+member server that gets the blanked event (one invited after the
+delete, or catching up) skips it: it stores nothing. So no member
+server gets the content after the delete. The snapshot of a room's
+first remote member leaves deleted messages out.
 
 ## What agents see
 
@@ -222,6 +247,11 @@ signed), within 64 KiB plus the message cap. The member server applies
 them in order, skips the ones it has, and answers the last seq it
 applied. The host stores that as the cursor.
 
+- Member servers are served at once, at most 8 at a time, each in a
+  run of its own: its rooms one after the other, within 60 seconds per
+  pass. What is left after that waits for the next pass. A new pass
+  skips a member server whose run is still going, so a slow server
+  delays only itself.
 - A push has a 30-second deadline. A failure backs off with jitter:
   after the n-th failure in a row, the wait is between half and all of
   2^(n−1) seconds, at most an hour.
@@ -229,8 +259,20 @@ applied. The host stores that as the cursor.
   rooms in the same pass.
 - After 7 days without success the cursor is paused, audited as
   `federation.delivery.paused` and shown as `unreachable`. The next
-  contact with that server (a verified request from it, or a push it
-  takes) resumes all its paused cursors. No operator step is needed.
+  contact with that server (a verified request from it, a push it
+  takes, or an invite it accepts) resumes all its paused cursors. No
+  operator step is needed.
+- A push answered after its member server was blocked or removed
+  changes nothing: the cursor stays paused.
+
+Message events go only to member servers that have a bot with the
+`read` right in the room, checked when the event is sent. Any other
+member server gets `{"seq": N, "type": "skip"}` in their place, so its
+seqs stay contiguous and gaps can still be found; it applies a skip as
+nothing. A bot given `read` later gets the messages sent after that,
+not the ones its server got as skips. Member events and room events go
+to every member server: a replica needs the members and the room's
+name to show it. Pulls follow the same rule.
 
 Catch-up:
 
@@ -238,12 +280,16 @@ Catch-up:
   comes before it and pulls the rest (`GET /fed/v1/rooms/{id}/events?since=N`,
   signed, 100 events per page).
 - At start and every 5 minutes it pulls for each active replica whose
-  host is an allowed peer. A member server that was down catches up
-  when it starts again.
+  host is an allowed peer: the hosts at once, at most 8 at a time, each
+  within 60 seconds. A member server that was down catches up when it
+  starts again.
 
 An event that cannot be applied as sent (malformed, an unknown local
-author, a wrong author signature) is skipped but counts as applied, so
-it cannot stall the room. It is logged and audited.
+author, a wrong author signature, a new stand-in over the limit, a
+message over this server's message cap) is skipped but counts as
+applied, so it cannot stall the room. A push or pull writes one log
+line and one audit entry for all the events it skipped, with their
+count and the first 5 reasons.
 
 The host's delivery state, for admin keys:
 `GET /v1/rooms/{id}/delivery` returns `{"delivery": [...]}`, one entry
@@ -275,9 +321,11 @@ from the host's; no text the host chose reaches the agents as it is:
   dropped. A `note` is kept on one line, at most 200 characters.
 - Each claim's and conflict's `key_id` is the member server's own key
   for the holder's address: its bot, when that bot is a member of the
-  room, or the stand-in of a bot elsewhere. Any other address of the
-  member server (`operator@`, `key-<id>@`, a bot that is no member) is
-  dropped. A bot finds its own claims by its own key ID.
+  room, or the stand-in of a bot elsewhere, which it has from the
+  host's member events. Any other address (`operator@`, `key-<id>@` or
+  a bot that is no member, of the member server; an address it has no
+  stand-in for) is dropped: a claim answer makes no stand-ins. A bot
+  finds its own claims by its own key ID.
 - `label` is the holder's address, and `trust_origin` is `external` for
   every forwarded claim, the bot's own included.
 - A 409's message is rebuilt from the conflicts kept, like a local
@@ -297,10 +345,21 @@ that is no claims answer, gives 502 `host_unreachable`.
 |---|---|
 | History | The snapshot holds the latest 200 messages. Older messages stay on the host. |
 | Events per push or pull | 100, within 64 KiB plus the message cap. A single larger event goes alone. |
-| Push and pull deadline | 30 seconds each. |
+| Timeouts | 30 seconds for each room request: invite, push, pull, a forwarded post or claims request, leave. 5 seconds for document fetches, pings and bot lookups. Connecting and the TLS handshake take at most 5 seconds for every request. |
 | Retry | 1 second, doubling, at most 1 hour, with jitter. Paused after 7 days. |
 | Catch-up | At start and every 5 minutes. |
+| Member servers or hosts served at once | 8 by delivery and 8 by catch-up, each within 60 seconds per pass. |
 | Requests per peer | The federation rate limit, 120 per minute, burst 30. |
+| Stand-ins | 2000 per address domain on a server. A new one beyond that is refused: 409 `limit` for an invite, a skipped event on a replica. |
+| Replicas | 200 per host on a member server, archived ones included. |
+
+Servers that share a room should have the same message cap
+(`MaxMessageBytes`). The protocol does not carry it. A member server
+with a smaller cap than the host skips each message whose content is
+over its cap (counted in the push's `federation.room.event_refused`
+entry), so its agents do not see it. A push it cannot read at all,
+over 64 KiB plus twice its cap, is refused, and the host retries it
+until the caps match.
 
 The host is a single point. While it cannot be reached, its rooms are
 read-only on member servers: reading the replica works, but messages and
@@ -319,9 +378,14 @@ UI) cuts every room shared with it:
 
 Its federation requests are refused with 403 `peer_not_allowed`. Its
 bots' messages and claims in rooms hosted here therefore fail, and its
-server passes the 403 on to them. The other server is not told; its
+server passes the 403 on to them. A push to it that was under way when
+it was blocked changes nothing when it is answered. Its key no longer
+verifies author signatures here: its bots' messages in rooms of other
+hosts are shown `unverified`. The other server is not told; its
 replicas of our rooms stay as they are. Peering again restores no
-membership: invite the bots again.
+membership: invite the bots again. The invite works (the block removed
+the stand-ins), makes the member server's archived replica active
+again, and resumes delivery to it.
 
 ## Audit actions
 
@@ -332,9 +396,9 @@ membership: invite the bots again.
 | `federation.room.invite` | host | The invite sent to the member server: result `ok` or `error:<code>`, detail `{"address", "rights"}`. |
 | `federation.room.invite` | member | An invite received from a host, accepted (`ok`) or refused (`error:<code>`). Detail `{"handle", "rights"}`. |
 | `federation.room.leave` | host | A member server's bot left. Detail `{"address"}`. |
-| `federation.room.leave` | member | A bot of this server left a replica: `ok` or `error:<code>`. Detail `{"address"}`. |
+| `federation.room.leave` | member | A bot of this server left a replica: `ok` or `error:<code>`. Detail `{"address"}`, plus `"local_only": true` when the host was blocked or no allowed peer and was not told. |
 | `federation.delivery.paused` | host | A cursor paused after 7 days of failures: `error:unreachable`, detail `{"failing_since", "attempts", "last_error"}`. |
-| `federation.room.event_refused` | member | An event was skipped: `error:bad_event`, detail `{"seq", "type", "reason"}`. |
+| `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
 Each `federation.*` entry names the peer domain and the room.
 

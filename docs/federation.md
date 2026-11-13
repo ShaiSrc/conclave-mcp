@@ -236,7 +236,7 @@ Sent by the host to a member server:
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /fed/v1/rooms/{id}/invite` | `{"name", "handle", "rights"}` | 201 `{"room_id"}`. The replica is created or made active, and the bot added with the rights. 404 for a handle that is no local bot (or is revoked or an admin key); 400 for a room ID that is no canonical ULID, a bad name or bad rights; 409 when a local room has that ID and is no replica of the origin, or no name is free. |
+| `POST /fed/v1/rooms/{id}/invite` | `{"name", "handle", "rights"}` | 201 `{"room_id"}`. The replica is created or made active, and the bot added with the rights. 404 for a handle that is no local bot (or is revoked or an admin key); 400 for a room ID that is no canonical ULID, a bad name or bad rights; 409 when a local room has that ID and is no replica of the origin, or no name is free; 409 `limit` for a new replica of a host that has 200 here. |
 | `POST /fed/v1/rooms/{id}/events` | `{"events": [...]}`, at most 100 | 200 `{"applied": seq}`, the last seq applied. Only from the room's host; other origins get 404. |
 
 Sent by a member server to the host. The origin must have a bot in the
@@ -246,19 +246,20 @@ origin (403 `wrong_origin` otherwise):
 | Request | Body | Answer |
 |---|---|---|
 | `POST /fed/v1/rooms/{id}/messages` | `{"author", "content", "content_type", "message_type", "metadata", "reply_to", "sig", "nonce"}`; `reply_to` is the host's ID, `sig` the [author signature](federated-rooms.md#author-signatures) and `nonce` the value it covers | 201 with the message's event; a signature the room holds already gets the stored message's event. The host's send checks run for the author's stand-in, with their codes. 403 `bad_author_signature` for a wrong signature. |
-| `GET /fed/v1/rooms/{id}/events?since=N` | | 200 `{"events": [...]}`: the events after seq N, at most 100, within 64 KiB plus the message cap. |
+| `GET /fed/v1/rooms/{id}/events?since=N` | | 200 `{"events": [...]}`: the events after seq N, at most 100, within 64 KiB plus the message cap; message events are skips unless the origin has a bot with `read` in the room. |
 | `GET /fed/v1/rooms/{id}/claims?author=name@domain` | | The claims answer for the author's stand-in, each claim with the holder's `address`. |
 | `POST /fed/v1/rooms/{id}/claims?author=…`, `.../claims/heartbeat`, `.../claims/release` | As for `/v1` | As for `/v1`, a 409 with its conflicts; each claim and conflict carries the holder's `address`. |
 | `POST /fed/v1/rooms/{id}/leave` | `{"author"}` | 204. 404 if the bot is not a member. |
 
-An event is `{"seq", "type", "payload"}`. Payloads:
+An event is `{"seq", "type", "payload"}`. A `skip` (`{"seq", "type": "skip"}`, no payload) stands for a `message` or `message.delete` event sent to a member server without a bot that has `read` in the room; it is applied as nothing. Payloads:
 
 | Type | Payload |
 |---|---|
 | `room` | `{"name", "archived"}` |
 | `member` | `{"address", "rights"}`: added, or rights changed |
 | `member.remove` | `{"address"}` |
-| `message` | `{"id", "author", "ts", "content_type", "message_type", "content", "metadata", "reply_to", "origin_sig", "nonce"}`: `id` and `reply_to` are the host's IDs, `metadata` is in its wire form, `origin_sig` and `nonce` are empty for the host's own authors. Never an operator mark or a trust origin. |
+| `message` | `{"id", "author", "ts", "content_type", "message_type", "content", "metadata", "reply_to", "origin_sig", "nonce"}`: `id` and `reply_to` are the host's IDs, `metadata` is in its wire form, `origin_sig` and `nonce` are empty for the host's own authors. Never an operator mark or a trust origin. A message the host deleted has `"deleted": true`, empty `content` and no metadata, `reply_to` or signature; replicas skip it. |
+| `message.delete` | `{"id"}`: the host deleted message `id`; replicas delete their copy. |
 
 Payloads keep `<`, `>` and `&` unescaped.
 
@@ -286,7 +287,7 @@ origin and error code per minute.
 | Document fetches for domains that are not allowed | 10 per minute on average, bursts of up to 10, server-wide |
 | Operator lookups and adds | 30 per minute, burst 10, apart from the fetches above |
 | Federation listener | read timeout 10 seconds, write timeout 15 seconds, headers at most 16 KiB |
-| Fetch timeout | 5 seconds, no redirects |
+| Fetch timeout | 5 seconds, no redirects; room requests 30 seconds ([federated-rooms.md](federated-rooms.md#limits)); connecting and the TLS handshake 5 seconds for every request |
 | Nonce storage | until 5 minutes after `ts`; pruned every minute, one minute after expiry |
 
 For domains that are not `allowed`, the fetch client refuses every

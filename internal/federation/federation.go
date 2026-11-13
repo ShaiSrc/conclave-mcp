@@ -44,6 +44,10 @@ type Service struct {
 	refresh      chan string   // peers whose directory the refresh loop fetches next
 	deliver      chan struct{} // wakes the delivery worker
 	applyMu      sync.Mutex    // one batch of replica events at a time
+	runMu        sync.Mutex
+	running      map[string]bool // peers with a delivery run going
+	runs         sync.WaitGroup  // delivery runs
+	slots        chan struct{}   // of delivery runs, maxPeerRuns
 	now          func() time.Time
 	jitter       func() float64 // in [0, 1)
 
@@ -75,6 +79,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
 		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{}, keyLimiters: map[int64]*rate.Limiter{},
 		botStore: bots.NewStore(db), refresh: make(chan string, 16), deliver: make(chan struct{}, 1),
+		running: map[string]bool{}, slots: make(chan struct{}, maxPeerRuns),
 		now: time.Now, jitter: rand.Float64,
 		lookups: rate.NewLimiter(rate.Every(time.Minute/lookupsPerMinute), lookupBurst)}
 	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {

@@ -152,11 +152,12 @@ remote_bots(domain, handle, profile, fetched_at)
   bots (migration 0012): a bot's profile (visibility 'private', 'peers'
   or 'public'), and the cached directories of peers
 
-fed_events(room_id, seq, type, payload, created_at)
+fed_events(room_id, seq, type, payload, message_id, created_at)
 fed_delivery(room_id, peer, acked_seq, attempts, next_try_at, last_error, paused, failing_since)
   federated rooms (migration 0013): the host's event log per room
-  (type 'message', 'member', 'member.remove' or 'room'), and each member
-  server's delivery cursor
+  (type 'message', 'message.delete', 'member', 'member.remove' or
+  'room'; message_id the host's message id of a message event), and
+  each member server's delivery cursor
 ```
 
 Migrations are numbered and run in order. The current set is

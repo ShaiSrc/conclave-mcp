@@ -15,6 +15,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -33,9 +34,11 @@ import (
 // the replica applies in order; it pulls what it missed.
 
 const (
-	catchupEvery = 5 * time.Minute
-	pullTimeout  = 30 * time.Second // per replica and pull
-	maxPullPages = 50               // pages of events read per pull
+	catchupEvery  = 5 * time.Minute
+	pullTimeout   = roomTimeout // per replica and pull
+	maxPullPages  = 50          // pages of events read per pull
+	maxReplicas   = 200         // replica rooms per host, archived ones included
+	maxRefusalLog = 5           // reasons kept in a federation.room.event_refused row
 )
 
 // errRefused marks an event the replica does not apply as sent. It
@@ -49,6 +52,34 @@ func refused(format string, args ...any) error {
 
 // errNameTaken is nameReplica's error when neither name is free.
 var errNameTaken = errors.New("no free name for the replica")
+
+// refusals are the events one push or pull of a host refused, for its
+// one federation.room.event_refused row: their count and the first
+// reasons.
+type refusals struct {
+	n       int
+	reasons []string
+}
+
+func (rf *refusals) add(ev fedrooms.Event, err error) {
+	rf.n++
+	if len(rf.reasons) < maxRefusalLog {
+		rf.reasons = append(rf.reasons, fmt.Sprintf("seq %d %s: %v", ev.Seq, ev.Type, err))
+	}
+}
+
+// auditRefused writes the row of what rf holds for replica roomID of
+// host, and logs it, if it holds anything.
+func (s *Service) auditRefused(ctx context.Context, roomID, host string, rf *refusals) {
+	if rf.n == 0 {
+		return
+	}
+	if s.warnLog.allow(host + " bad_event") {
+		s.logger.Warn("federation room events refused", "room", roomID, "host", host, "count", rf.n, "first", rf.reasons[0])
+	}
+	detail, _ := json.Marshal(map[string]any{"count": rf.n, "reasons": rf.reasons})
+	s.auditRoom(context.WithoutCancel(ctx), "federation.room.event_refused", host, roomID, "error:bad_event", string(detail))
+}
 
 // allowedOrigin answers 403 peer_not_allowed and returns false unless
 // the verified origin is an allowed peer: open mode lets seen peers
@@ -129,9 +160,22 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	var home sql.NullString
 	switch err := tx.QueryRowContext(ctx, `SELECT home_domain FROM rooms WHERE id = ?`, roomID).Scan(&home); {
 	case errors.Is(err, sql.ErrNoRows):
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM rooms WHERE home_domain = ?`, origin).Scan(&n); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if n >= maxReplicas {
+			refuse(http.StatusConflict, "limit", fmt.Sprintf("%s has %d rooms here already", origin, maxReplicas))
+			return
+		}
 		// Created archived, so its name cannot clash until nameReplica
 		// picks one. Its owner is the host's operator.
 		owner, err := fedrooms.StandIn(ctx, tx, "operator@"+origin)
+		if errors.Is(err, fedrooms.ErrStandInLimit) {
+			refuse(http.StatusConflict, "limit", err.Error())
+			return
+		}
 		if err == nil {
 			now := storage.FormatTS(time.Now())
 			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at)
@@ -215,7 +259,9 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", `body must be {"events": [...]}, at most 100`)
 		return
 	}
-	applied, gap, err := s.applyBatch(ctx, roomID, origin, in.Events)
+	rf := &refusals{}
+	defer s.auditRefused(ctx, roomID, origin, rf)
+	applied, gap, err := s.applyBatch(ctx, roomID, origin, in.Events, rf)
 	if err != nil {
 		s.fail(w, r, err)
 		return
@@ -223,7 +269,7 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 	if gap {
 		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
 		defer cancel()
-		if applied, err = s.pull(pctx, roomID, origin); err != nil {
+		if applied, err = s.pull(pctx, roomID, origin, rf); err != nil {
 			s.logger.Warn("federation room pull failed", "room", roomID, "host", origin, "err", err)
 		}
 	}
@@ -232,9 +278,10 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 
 // applyBatch applies evs to replica roomID of host in seq order. Events
 // it has are skipped; at a gap it stops and reports it. A refused event
-// counts as applied. It returns the last seq applied. ponytail: one
-// lock for all replicas; one per room if applying ever gets slow.
-func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fedrooms.Event) (applied int64, gap bool, err error) {
+// counts as applied and goes to rf. It returns the last seq applied.
+// ponytail: one lock for all replicas; one per room if applying ever
+// gets slow.
+func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fedrooms.Event, rf *refusals) (applied int64, gap bool, err error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ? AND home_domain = ?`, roomID, host).
@@ -249,11 +296,7 @@ func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fed
 			return applied, true, nil
 		}
 		if err := s.applyEvent(ctx, roomID, host, ev); errors.Is(err, errRefused) {
-			if s.warnLog.allow(host + " bad_event") {
-				s.logger.Warn("federation room event refused", "room", roomID, "host", host, "seq", ev.Seq, "err", err)
-			}
-			detail, _ := json.Marshal(map[string]any{"seq": ev.Seq, "type": ev.Type, "reason": err.Error()})
-			s.auditRoom(ctx, "federation.room.event_refused", host, roomID, "error:bad_event", string(detail))
+			rf.add(ev, err)
 		} else if err != nil {
 			return applied, false, err
 		}
@@ -267,9 +310,13 @@ func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fed
 
 // applyEvent applies one event of host to replica roomID. Each kind is
 // idempotent, so an event applied again after a crash changes nothing.
-// An event that cannot be applied as sent is errRefused.
+// A skip changes nothing. An event that cannot be applied as sent is
+// errRefused.
 func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedrooms.Event) error {
-	if ev.Type == fedrooms.EventMessage {
+	switch ev.Type {
+	case fedrooms.EventSkip:
+		return nil
+	case fedrooms.EventMessage:
 		return s.applyMessage(ctx, roomID, host, ev.Payload)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -284,6 +331,8 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 		err = s.applyMember(ctx, tx, roomID, host, ev.Payload)
 	case fedrooms.EventMemberRemove:
 		err = s.applyRemove(ctx, tx, roomID, ev.Payload)
+	case fedrooms.EventMessageDelete:
+		err = applyDelete(ctx, tx, roomID, ev.Payload)
 	default:
 		err = refused("unknown event type %q", ev.Type)
 	}
@@ -381,6 +430,18 @@ func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID string, pa
 	return err
 }
 
+// applyDelete deletes our copy of the message the host deleted, if we
+// have it.
+func applyDelete(ctx context.Context, tx *sql.Tx, roomID string, payload json.RawMessage) error {
+	var p fedrooms.DeletePayload
+	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
+		return refused("message.delete event: bad payload")
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE messages SET deleted_at = ? WHERE room_id = ? AND remote_id = ? AND deleted_at IS NULL`,
+		time.Now().UTC().Format(time.RFC3339Nano), roomID, p.ID)
+	return err
+}
+
 // memberKey returns the key that stands for address in a replica, and
 // whether it is a key of this server. An address of this server is our
 // own key: handle@, operator@ (the operator key) or key-<id>@. Any other
@@ -420,11 +481,15 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, cre
 // applyMessage stores a message of the replica. Its author signature is
 // checked first; then its author key is found or created, and reply_to
 // translated to our id. A reply_to we do not have is dropped. A
-// signature stored here with another host id is a replay: refused.
+// signature stored here with another host id is a replay: refused. The
+// event of a message the host deleted is skipped: nothing is stored.
 func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MessagePayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
 		return refused("message event: bad payload")
+	}
+	if p.Deleted {
+		return nil
 	}
 	unverified, err := s.checkAuthor(ctx, roomID, host, p)
 	if err != nil {
@@ -481,8 +546,9 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 // roomID hosted by host. A message of one of the host's keys needs none:
 // the host's request signature covers it. Any other author's server
 // signed it: we check our own with our key and a third server's with
-// its stored key. It reports whether the signature could not be checked
-// (no key known for the author's server); a wrong one is errRefused.
+// its stored key, if it is an allowed or seen peer. It reports whether
+// the signature could not be checked (no key known for the author's
+// server, or that server blocked); a wrong one is errRefused.
 func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedrooms.MessagePayload) (unverified bool, err error) {
 	_, domain, _ := strings.Cut(p.Author, "@")
 	if domain == host {
@@ -496,7 +562,7 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 			return true, nil
 		case err != nil:
 			return false, err
-		case len(peer.PublicKey) != ed25519.PublicKeySize:
+		case peer.Status != statusAllowed && peer.Status != statusSeen, len(peer.PublicKey) != ed25519.PublicKeySize:
 			return true, nil
 		}
 		pub = peer.PublicKey
@@ -533,8 +599,8 @@ func localMetadata(wire json.RawMessage, reply *int64) ([]byte, error) {
 
 // pull fetches and applies the events of replica roomID after the last
 // it applied from its host, page by page, until a page brings nothing
-// new. It returns the last seq applied.
-func (s *Service) pull(ctx context.Context, roomID, host string) (int64, error) {
+// new. Refused events go to rf. It returns the last seq applied.
+func (s *Service) pull(ctx context.Context, roomID, host string, rf *refusals) (int64, error) {
 	var applied int64
 	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&applied); err != nil {
 		return 0, err
@@ -551,7 +617,7 @@ func (s *Service) pull(ctx context.Context, roomID, host string) (int64, error) 
 		if status != http.StatusOK || json.Unmarshal(body, &out) != nil || len(out.Events) > maxRoomEvents {
 			return applied, fmt.Errorf("events of %s: status %d", host, status)
 		}
-		next, _, err := s.applyBatch(ctx, roomID, host, out.Events)
+		next, _, err := s.applyBatch(ctx, roomID, host, out.Events, rf)
 		if err != nil || next == applied {
 			return next, err
 		}
@@ -575,8 +641,10 @@ func (s *Service) catchupLoop(ctx context.Context) {
 	}
 }
 
-// catchUp pulls for each active replica whose host is an allowed peer,
-// within 30 seconds each.
+// catchUp pulls for each active replica whose host is an allowed peer:
+// the hosts at once, at most maxPeerRuns, each within peerBudget, its
+// rooms one after the other and each pull within 30 seconds, so a slow
+// host holds up only its own rooms. It returns when all are done.
 func (s *Service) catchUp(ctx context.Context) {
 	rows, err := s.db.QueryContext(ctx, `SELECT r.id, r.home_domain FROM rooms r JOIN federation_peers p ON p.domain = r.home_domain
 		WHERE p.status = 'allowed' AND r.archived_at IS NULL ORDER BY r.id`)
@@ -586,21 +654,43 @@ func (s *Service) catchUp(ctx context.Context) {
 		}
 		return
 	}
-	var replicas [][2]string
+	byHost := map[string][]string{}
 	for rows.Next() {
 		var id, host string
 		if err := rows.Scan(&id, &host); err == nil {
-			replicas = append(replicas, [2]string{id, host})
+			byHost[host] = append(byHost[host], id)
 		}
 	}
 	_ = rows.Close()
-	for _, rp := range replicas {
-		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
-		if _, err := s.pull(pctx, rp[0], rp[1]); err != nil && ctx.Err() == nil {
-			s.logger.Warn("federation catch-up failed", "room", rp[0], "host", rp[1], "err", err)
-		}
-		cancel()
+	slots := make(chan struct{}, maxPeerRuns)
+	var wg sync.WaitGroup
+	for host, rooms := range byHost {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
+			case <-ctx.Done():
+				return
+			}
+			hctx, cancel := context.WithTimeout(ctx, peerBudget)
+			defer cancel()
+			for _, room := range rooms {
+				if hctx.Err() != nil {
+					return
+				}
+				pctx, cancel := context.WithTimeout(hctx, pullTimeout)
+				rf := &refusals{}
+				if _, err := s.pull(pctx, room, host, rf); err != nil && ctx.Err() == nil {
+					s.logger.Warn("federation catch-up failed", "room", room, "host", host, "err", err)
+				}
+				cancel()
+				s.auditRefused(ctx, room, host, rf)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // dropPeer cuts the rooms shared with domain once it is blocked or
@@ -778,13 +868,15 @@ func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int6
 // the message is stored after them. If they cannot be, it is stored out
 // of order; applying it again in order finds it stored.
 func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fedrooms.Event, remoteID int64) (int64, error) {
-	_, gap, err := s.applyBatch(ctx, roomID, host, []fedrooms.Event{ev})
+	rf := &refusals{}
+	defer s.auditRefused(ctx, roomID, host, rf)
+	_, gap, err := s.applyBatch(ctx, roomID, host, []fedrooms.Event{ev}, rf)
 	if err != nil {
 		return 0, err
 	}
 	if gap {
 		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
-		if _, err := s.pull(pctx, roomID, host); err != nil {
+		if _, err := s.pull(pctx, roomID, host, rf); err != nil {
 			s.logger.Warn("federation room pull failed", "room", roomID, "host", host, "err", err)
 		}
 		cancel()
@@ -857,16 +949,11 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 	if json.Unmarshal(out, &in) != nil {
 		return 0, nil, badAnswer
 	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, nil, err
-	}
-	defer func() { _ = tx.Rollback() }()
 	var answer any
 	switch {
 	case status == http.StatusConflict:
 		conflicts, reasons := []conflictView{}, []string{}
-		err = s.eachHostClaim(ctx, tx, roomID, in.Conflicts, true, func(c hostClaim, key int64) {
+		err = s.eachHostClaim(ctx, roomID, in.Conflicts, true, func(c hostClaim, key int64) {
 			conflicts = append(conflicts, conflictView{Path: c.Path, HeldPath: c.HeldPath, KeyID: key, Label: c.Address,
 				ExpiresAt: c.ExpiresAt, TrustOrigin: "external"})
 			reasons = append(reasons, fmt.Sprintf("%s is claimed by %s (EXTERNAL, untrusted) (claim %s, until %s)",
@@ -877,7 +964,7 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 			"conflicts": conflicts}
 	case sub == "/claims":
 		list := []claims.Claim{}
-		err = s.eachHostClaim(ctx, tx, roomID, in.Claims, false, func(c hostClaim, key int64) {
+		err = s.eachHostClaim(ctx, roomID, in.Claims, false, func(c hostClaim, key int64) {
 			list = append(list, claims.Claim{ID: c.ID, Path: c.Path, KeyID: key, Label: c.Address, Auto: c.Auto, Note: c.Note,
 				ExpiresAt: c.ExpiresAt, TrustOrigin: "external"})
 		})
@@ -901,7 +988,7 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 	if err != nil {
 		return 0, nil, err
 	}
-	return status, rawJSON(answer), tx.Commit()
+	return status, rawJSON(answer), nil
 }
 
 // hostClaim is a claim or conflict of a host's claims answer: the
@@ -931,7 +1018,7 @@ type conflictView struct {
 // eachHostClaim calls f with each claim of list that passes the checks
 // (held_path too for a conflict), cleaned, and its holder's key here.
 // The others are dropped.
-func (s *Service) eachHostClaim(ctx context.Context, tx *sql.Tx, roomID string, list []json.RawMessage, conflict bool,
+func (s *Service) eachHostClaim(ctx context.Context, roomID string, list []json.RawMessage, conflict bool,
 	f func(c hostClaim, key int64)) error {
 	for _, raw := range list {
 		var c hostClaim
@@ -952,7 +1039,7 @@ func (s *Service) eachHostClaim(ctx context.Context, tx *sql.Tx, roomID string, 
 			}
 		}
 		c.Note = oneLine(c.Note, 200)
-		key, err := s.claimHolder(ctx, tx, roomID, c.Address)
+		key, err := s.claimHolder(ctx, roomID, c.Address)
 		if err != nil {
 			return err
 		}
@@ -966,19 +1053,17 @@ func (s *Service) eachHostClaim(ctx context.Context, tx *sql.Tx, roomID string, 
 // claimHolder returns our key for the holder address of a claim in
 // replica roomID, or 0. An address of this server is one of our bots
 // that is a member of the room, never operator@ or key-<id>@; any
-// other is its stand-in, created if needed.
-func (s *Service) claimHolder(ctx context.Context, tx *sql.Tx, roomID, address string) (int64, error) {
+// other is its stand-in, if we have one: claim answers make none, only
+// member events and message authors do.
+func (s *Service) claimHolder(ctx context.Context, roomID, address string) (int64, error) {
 	name, domain, _ := strings.Cut(address, "@")
-	if domain != s.id.Domain {
-		id, err := fedrooms.StandIn(ctx, tx, address)
-		if errors.Is(err, fedrooms.ErrAddress) {
-			return 0, nil
-		}
-		return id, err
+	q, args := `SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, []any{address, domain}
+	if domain == s.id.Domain {
+		q, args = `SELECT k.id FROM api_keys k JOIN room_members m ON m.key_id = k.id AND m.room_id = ?
+			WHERE k.handle = ? AND k.remote_domain IS NULL AND k.is_admin = 0 AND k.revoked_at IS NULL`, []any{roomID, name}
 	}
 	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT k.id FROM api_keys k JOIN room_members m ON m.key_id = k.id AND m.room_id = ?
-		WHERE k.handle = ? AND k.remote_domain IS NULL AND k.is_admin = 0 AND k.revoked_at IS NULL`, roomID, name).Scan(&id)
+	err := s.db.QueryRowContext(ctx, q, args...).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -987,11 +1072,21 @@ func (s *Service) claimHolder(ctx context.Context, tx *sql.Tx, roomID, address s
 
 // LeaveRemote tells the host of replica roomID that our bot keyID leaves
 // the room. A host that no longer has the bot in the room (404) agrees.
-// A refusal is a *fedrooms.Error.
+// A host that is blocked or no allowed peer is not told: the bot leaves
+// here only, which the audit row notes. A refusal is a
+// *fedrooms.Error.
 func (s *Service) LeaveRemote(ctx context.Context, roomID string, keyID int64) error {
 	host, addr, err := s.ourAuthor(ctx, roomID, keyID)
 	if err != nil {
 		return err
+	}
+	switch p, err := s.peers.Get(ctx, host); {
+	case err != nil && !errors.Is(err, ErrPeerNotFound):
+		return err
+	case p.Status != statusAllowed:
+		detail, _ := json.Marshal(map[string]any{"address": addr, "local_only": true})
+		s.auditRoom(ctx, "federation.room.leave", host, roomID, "ok", string(detail))
+		return nil
 	}
 	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/leave",
 		rawJSON(map[string]string{"author": addr}), maxBody)

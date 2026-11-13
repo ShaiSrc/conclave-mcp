@@ -14,10 +14,15 @@ import (
 
 // Event types of a hosted room's log (fed_events).
 const (
-	EventMessage      = "message"
-	EventMember       = "member"        // added, or rights changed
-	EventMemberRemove = "member.remove" // removed or left
-	EventRoom         = "room"          // name, archived
+	EventMessage       = "message"
+	EventMessageDelete = "message.delete" // the host deleted a message
+	EventMember        = "member"         // added, or rights changed
+	EventMemberRemove  = "member.remove"  // removed or left
+	EventRoom          = "room"           // name, archived
+	// EventSkip is never logged: it goes in place of a message or
+	// message.delete event to a peer with no reader in the room, so the
+	// seqs it gets stay contiguous. It has no payload.
+	EventSkip = "skip"
 )
 
 // SnapshotMessages is how many of the latest messages a room's log
@@ -28,7 +33,7 @@ const SnapshotMessages = 200
 type Event struct {
 	Seq     int64           `json:"seq"`
 	Type    string          `json:"type"`
-	Payload json.RawMessage `json:"payload"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // RoomPayload is the payload of a room event.
@@ -48,11 +53,19 @@ type RemovePayload struct {
 	Address string `json:"address"`
 }
 
+// DeletePayload is the payload of a message.delete event: the host's id
+// of the message deleted.
+type DeletePayload struct {
+	ID int64 `json:"id"`
+}
+
 // MessagePayload is the payload of a message event. It never carries
 // the operator mark or the trust origin: those are local. Metadata is
 // in its wire form (SplitMetadata) and ReplyTo is the host's id;
 // OriginSig is the author server's signature and Nonce the random value
-// it covers, both empty for authors on the host.
+// it covers, both empty for authors on the host. Deleted marks the
+// event of a message the host deleted, blanked by LogDelete: its
+// content is empty and it has no metadata, reply_to or signature.
 type MessagePayload struct {
 	ID          int64           `json:"id"`
 	Author      string          `json:"author"`
@@ -64,6 +77,7 @@ type MessagePayload struct {
 	ReplyTo     *int64          `json:"reply_to,omitempty"`
 	OriginSig   string          `json:"origin_sig,omitempty"`
 	Nonce       string          `json:"nonce,omitempty"`
+	Deleted     bool            `json:"deleted,omitempty"`
 }
 
 // ReplicaMessage is a message of a replica room as the replica stores
@@ -192,6 +206,28 @@ func LogMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, dom
 	return logMessage(ctx, tx, roomID, msgID, domain, EventLimit(maxMessageBytes)-eventEnvelope)
 }
 
+// LogDelete retracts message msgID of roomID, deleted in tx: each of
+// its events in the log is blanked (id, author, ts, content type and
+// message type kept, content emptied, metadata, reply_to and signature
+// dropped, marked deleted), and when it had one, a message.delete event
+// follows, so member servers delete their copy and one that joins later
+// never gets the content. It runs whether federation is on or not: a log
+// written before it was turned off keeps no content either.
+func LogDelete(ctx context.Context, tx *sql.Tx, roomID string, msgID int64) error {
+	res, err := tx.ExecContext(ctx, `UPDATE fed_events SET payload = json_object('id', json_extract(payload, '$.id'),
+		'author', json_extract(payload, '$.author'), 'ts', json_extract(payload, '$.ts'),
+		'content_type', json_extract(payload, '$.content_type'), 'message_type', json_extract(payload, '$.message_type'),
+		'content', '', 'deleted', json('true'))
+		WHERE room_id = ? AND message_id = ?`, roomID, msgID)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return err
+	}
+	return appendEvent(ctx, tx, roomID, EventMessageDelete, DeletePayload{ID: msgID})
+}
+
 func logged(ctx context.Context, tx *sql.Tx, roomID, domain string) (bool, error) {
 	if domain == "" {
 		return false, nil
@@ -300,7 +336,7 @@ func logMessage(ctx context.Context, tx *sql.Tx, roomID string, msgID int64, dom
 	if max > 0 && len(b) > max {
 		return ErrEventTooLarge
 	}
-	return insertEvent(ctx, tx, roomID, EventMessage, b)
+	return insertEvent(ctx, tx, roomID, EventMessage, b, msgID)
 }
 
 // appendEvent writes payload as roomID's next event.
@@ -309,15 +345,16 @@ func appendEvent(ctx context.Context, tx *sql.Tx, roomID, typ string, payload an
 	if err != nil {
 		return err
 	}
-	return insertEvent(ctx, tx, roomID, typ, b)
+	return insertEvent(ctx, tx, roomID, typ, b, nil)
 }
 
 // insertEvent writes payload as roomID's next event, numbered
-// MAX(seq)+1 in the same statement.
-func insertEvent(ctx context.Context, tx *sql.Tx, roomID, typ string, payload []byte) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO fed_events(room_id, seq, type, payload, created_at)
-		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ? FROM fed_events WHERE room_id = ?`,
-		roomID, typ, string(payload), storage.FormatTS(time.Now()), roomID)
+// MAX(seq)+1 in the same statement; msgID is the message id of a
+// message event, nil for other types.
+func insertEvent(ctx context.Context, tx *sql.Tx, roomID, typ string, payload []byte, msgID any) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO fed_events(room_id, seq, type, payload, message_id, created_at)
+		SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ? FROM fed_events WHERE room_id = ?`,
+		roomID, typ, string(payload), msgID, storage.FormatTS(time.Now()), roomID)
 	return err
 }
 

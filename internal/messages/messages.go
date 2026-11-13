@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -450,8 +451,12 @@ var contentTypes = map[string]bool{"text/plain": true, "text/markdown": true, "a
 // is left as it is, and its id returned. A message a send would refuse
 // (type, content type, over the cap) is a *fedrooms.Error.
 func (s *Service) StoreReplica(ctx context.Context, roomID string, m fedrooms.ReplicaMessage) (int64, error) {
-	if _, ok := allowedMessageTypes[m.MessageType]; !ok || !contentTypes[m.ContentType] || len(m.Content) > s.MaxMessageBytes {
-		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "bad_request", Message: "message type, content type or size not accepted"}
+	if _, ok := allowedMessageTypes[m.MessageType]; !ok || !contentTypes[m.ContentType] {
+		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "bad_request", Message: "message type or content type not accepted"}
+	}
+	if len(m.Content) > s.MaxMessageBytes {
+		return 0, &fedrooms.Error{Status: http.StatusRequestEntityTooLarge, Code: "payload_too_large",
+			Message: fmt.Sprintf("content of %d bytes is over the message cap of %d", len(m.Content), s.MaxMessageBytes)}
 	}
 	var id int64
 	err := s.DB.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, m.RemoteID).Scan(&id)
@@ -676,9 +681,16 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	// Soft-delete. We use a subquery for the WHERE so we
 	// also confirm the message belongs to this room (defence
 	// in depth: an owner of room A cannot delete a message
-	// in room B by guessing the msgid).
+	// in room B by guessing the msgid). Its events in the room's
+	// federation log are retracted in the same transaction.
+	tx, err := s.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin tx")
+		return
+	}
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.DB.ExecContext(r.Context(),
+	res, err := tx.ExecContext(r.Context(),
 		`UPDATE messages
 		 SET deleted_at = ?
 		 WHERE id = ? AND room_id = ? AND deleted_at IS NULL`,
@@ -692,6 +704,17 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	if n == 0 {
 		writeErr(w, r, http.StatusNotFound, "not_found", "message not found")
 		return
+	}
+	if err := fedrooms.LogDelete(r.Context(), tx, roomID, msgID); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
+		return
+	}
+	if s.FedNotify != nil {
+		s.FedNotify()
 	}
 	_ = audit.Write(r.Context(), s.DB, caller, "message.delete", "message", strconv.FormatInt(msgID, 10), roomID, "ok",
 		`{"room_id":`+strconvQuote(roomID)+`}`)

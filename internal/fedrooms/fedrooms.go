@@ -32,6 +32,14 @@ var addressRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,31}@[a-z0-9.-]{1,253}
 // stand-in.
 var ErrAddress = errors.New("fedrooms: no stand-in for this address")
 
+// MaxStandIns is how many stand-ins one address domain can have on a
+// server: a host cannot fill api_keys with addresses it makes up.
+const MaxStandIns = 2000
+
+// ErrStandInLimit is StandIn's error for a new address of a domain that
+// has MaxStandIns stand-ins already. It is an ErrAddress.
+var ErrStandInLimit = fmt.Errorf("%w: the domain has %d stand-ins", ErrAddress, MaxStandIns)
+
 // ErrInvalidDomain is returned by NormalizeDomain.
 var ErrInvalidDomain = errors.New("invalid federation domain")
 
@@ -78,11 +86,26 @@ func NormalizeDomain(s string) (string, error) {
 // if needed: label = address, remote_domain = its domain, trust origin
 // external, empty hash and prefix. An invalid address (its domain in
 // the canonical form of NormalizeDomain), or one that a local key holds
-// as its label, is ErrAddress, never a stand-in.
+// as its label, is ErrAddress, never a stand-in; a new one of a domain
+// with MaxStandIns stand-ins is ErrStandInLimit.
 func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
 	domain := address[strings.IndexByte(address, '@')+1:]
 	if d, err := NormalizeDomain(domain); !addressRE.MatchString(address) || err != nil || d != domain {
 		return 0, fmt.Errorf("%w: invalid address %q", ErrAddress, address)
+	}
+	var id int64
+	err := tx.QueryRowContext(ctx, `SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, address, domain).Scan(&id)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return id, err
+	}
+	// ponytail: counts by scanning api_keys, only when a stand-in is
+	// made; an index on remote_domain if that ever shows.
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys WHERE remote_domain = ?`, domain).Scan(&n); err != nil {
+		return 0, err
+	}
+	if n >= MaxStandIns {
+		return 0, fmt.Errorf("%w: %q", ErrStandInLimit, address)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO api_keys (label, hash, prefix, created_at, trust_origin, remote_domain)
@@ -90,8 +113,7 @@ func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
 		address, storage.FormatTS(time.Now()), domain); err != nil {
 		return 0, err
 	}
-	var id int64
-	err := tx.QueryRowContext(ctx,
+	err = tx.QueryRowContext(ctx,
 		`SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, address, domain).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, fmt.Errorf("%w: label %q belongs to a local key", ErrAddress, address)

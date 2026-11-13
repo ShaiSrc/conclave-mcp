@@ -156,6 +156,11 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 		return refusal
 	}
 	s.auditRoom(ctx, "federation.room.invite", d, roomID, "ok", string(detail))
+	// Its answer is contact: delivery paused while it was away or
+	// blocked resumes.
+	if err := s.resumeDelivery(ctx, d); err != nil {
+		s.logger.Warn("federation delivery resume failed", "domain", d, "err", err)
+	}
 	return nil
 }
 
@@ -166,10 +171,15 @@ func (s *Service) postSigned(ctx context.Context, domain, path string, body []by
 	return status, err
 }
 
-// sendSigned sends a signed request to path on domain, with body unless
-// it is nil, and returns the status and the answer, read up to limit
-// bytes.
+// sendSigned sends a signed room request to path on domain, with body
+// unless it is nil, within roomTimeout, and returns the status and the
+// answer, read up to limit bytes.
 func (s *Service) sendSigned(ctx context.Context, method, domain, path string, body []byte, limit int) (int, []byte, error) {
+	return s.signed(ctx, s.fetch.roomClient, method, domain, path, body, limit)
+}
+
+// signed sends a signed request with client.
+func (s *Service) signed(ctx context.Context, client *http.Client, method, domain, path string, body []byte, limit int) (int, []byte, error) {
 	req, err := s.fetch.newRequest(ctx, method, domain, path, body)
 	if err != nil {
 		return 0, nil, err
@@ -180,7 +190,7 @@ func (s *Service) sendSigned(ctx context.Context, method, domain, path string, b
 	if err := s.id.SignRequest(req, domain, body); err != nil {
 		return 0, nil, err
 	}
-	return s.fetch.send(req, s.fetch.isAllowed(domain), limit)
+	return s.fetch.send(client, req, s.fetch.isAllowed(domain), limit)
 }
 
 // roomPeer checks a room request of the verified origin and returns the
@@ -341,7 +351,7 @@ func (s *Service) answerMessage(w http.ResponseWriter, r *http.Request, roomID s
 	ev := fedrooms.Event{}
 	var payload string
 	if err := s.db.QueryRowContext(r.Context(), `SELECT seq, type, payload FROM fed_events
-		WHERE room_id = ? AND type = 'message' AND json_extract(payload, '$.id') = ? ORDER BY seq DESC LIMIT 1`,
+		WHERE room_id = ? AND message_id = ? ORDER BY seq DESC LIMIT 1`,
 		roomID, id).Scan(&ev.Seq, &ev.Type, &payload); err != nil {
 		s.fail(w, r, err)
 		return
@@ -451,7 +461,8 @@ func (s *Service) handleRoomLeave(w http.ResponseWriter, r *http.Request) {
 
 // handleRoomEvents answers GET /fed/v1/rooms/{id}/events?since=N: the
 // events of the room's log after seq N, in order, at most 100 and
-// within the events budget, and with <, > and & as stored.
+// within the events budget, and with <, > and & as stored; message
+// events are skips unless the origin has a reader in the room.
 func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	roomID, ok := s.roomPeer(w, r)
 	if !ok {
@@ -466,7 +477,7 @@ func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 		}
 		since = n
 	}
-	out, err := s.loadEvents(r.Context(), roomID, since, math.MaxInt64)
+	out, err := s.loadEvents(r.Context(), roomID, OriginFrom(r.Context()), since, math.MaxInt64)
 	if err != nil {
 		s.fail(w, r, err)
 		return

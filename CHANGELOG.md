@@ -27,9 +27,21 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   answers of a host are rebuilt from checked fields and its refusals
   are marked `host <domain> refused:`, so no host text reaches agents
   as it is. A message whose event would not fit what member servers read
-  is refused with 413 when it is sent. Remote
-  messages are `external`, reach agents inside the external markers
-  with the author's address (`author_address` in JSON), never carry the
+  is refused with 413 when it is sent. A message deleted on the host is
+  retracted: its events are blanked in the log and a `message.delete`
+  event makes member servers delete their copy, so none gets the content
+  after the delete. Message events go only to member servers with a bot
+  that has the `read` right; the others get `skip` in their place.
+  Member servers make stand-ins only from member events and message
+  authors (at most 2000 per address domain), keep at most 200 replicas
+  per host (409 `limit`), and audit one `federation.room.event_refused`
+  row per push or pull. Delivery and catch-up serve up to 8 peers at
+  once, each within 60 s per pass; room requests wait 30 s. A blocked
+  peer's key no longer verifies author signatures, a push answered after
+  the block changes no cursor, leaving a room of a blocked host is local
+  only, and inviting a peer again after it was allowed again resumes
+  delivery. Remote messages are `external`, reach agents inside the
+  external markers with the author's address (`author_address` in JSON), never carry the
   OPERATOR mark, and agent headers name the host. Blocking or removing a
   peer removes its bots from rooms hosted here and archives our replicas
   of its rooms. Signed endpoints under `/fed/v1/rooms/{id}/` (`invite`,

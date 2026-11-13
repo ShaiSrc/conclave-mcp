@@ -25,6 +25,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -445,15 +446,17 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		return
 	}
 	var (
-		name          string
-		archived      sql.NullString
-		member, taken bool
+		name                string
+		archived            sql.NullString
+		member, taken, full bool
 	)
+	_, domain, _ := strings.Cut(address, "@")
 	err := s.DB.QueryRowContext(r.Context(),
 		`SELECT r.name, r.archived_at, EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
 		   WHERE m.room_id = r.id AND k.label = ? AND k.remote_domain IS NOT NULL),
-		   EXISTS (SELECT 1 FROM api_keys WHERE label = ? AND remote_domain IS NULL)
-		 FROM rooms r WHERE r.id = ?`, address, address, roomID).Scan(&name, &archived, &member, &taken)
+		   EXISTS (SELECT 1 FROM api_keys WHERE label = ? AND remote_domain IS NULL),
+		   NOT EXISTS (SELECT 1 FROM api_keys WHERE label = ?) AND (SELECT COUNT(*) FROM api_keys WHERE remote_domain = ?) >= ?
+		 FROM rooms r WHERE r.id = ?`, address, address, address, domain, fedrooms.MaxStandIns, roomID).Scan(&name, &archived, &member, &taken, &full)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
@@ -469,6 +472,9 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		return
 	case taken: // a stand-in's label is its address; a local key holds this one
 		writeErr(w, r, http.StatusConflict, "conflict", "a local key is labelled with this address")
+		return
+	case full:
+		writeErr(w, r, http.StatusConflict, "limit", fmt.Sprintf("%s has %d stand-ins here already", domain, fedrooms.MaxStandIns))
 		return
 	}
 	if err := s.InviteRemote(r.Context(), roomID, name, address, set); err != nil {
@@ -497,7 +503,10 @@ func (s *Service) addMember(w http.ResponseWriter, r *http.Request, roomID strin
 	}
 	defer tx.Rollback()
 	if address != "" {
-		if keyID, err = fedrooms.StandIn(ctx, tx, address); err != nil {
+		if keyID, err = fedrooms.StandIn(ctx, tx, address); errors.Is(err, fedrooms.ErrStandInLimit) {
+			writeErr(w, r, http.StatusConflict, "limit", err.Error())
+			return 0, false
+		} else if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "stand-in key")
 			return 0, false
 		}

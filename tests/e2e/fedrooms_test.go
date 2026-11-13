@@ -47,8 +47,9 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 }
 
 // Host A, member servers B and C: invites, messages both ways, a thread
-// across the three servers, a claim conflict across servers, B down and
-// catching up, removal of C's bot, and A blocking B.
+// across the three servers, a delete on A reaching B and C, a claim
+// conflict across servers, B down and catching up, removal of C's bot,
+// and A blocking B.
 func TestFederatedRooms(t *testing.T) {
 	a, b, c := newFedEnv(t), newFedEnv(t), newFedEnv(t)
 	for _, p := range [][2]*fedEnv{{a, b}, {b, a}, {a, c}, {c, a}, {b, c}, {c, b}} {
@@ -140,7 +141,7 @@ func TestFederatedRooms(t *testing.T) {
 
 	// 2. A message from A reaches B and C. On B, remote messages are
 	// external and carry their author's address.
-	post(a, a1, map[string]any{"content": "hello from A", "message_type": "question"})
+	hello := post(a, a1, map[string]any{"content": "hello from A", "message_type": "question"})
 	remote(arrived(b, b1, "hello from A"), a1Addr)
 	remote(arrived(c, c1, "hello from A"), a1Addr)
 
@@ -173,6 +174,20 @@ func TestFederatedRooms(t *testing.T) {
 	}
 	if onA.ID == onB.ID || onB.ID == onC.ID {
 		t.Fatalf("ids %d (A), %d (B), %d (C) should differ", onA.ID, onB.ID, onC.ID)
+	}
+
+	// A deletes its first message: B and C delete their copies.
+	if r := a.admin("DELETE", fmt.Sprintf("%s/messages/%d", path, hello.ID), nil); r.Status != 204 {
+		t.Fatalf("delete on A: %d %s", r.Status, r.Body)
+	}
+	for _, s := range []struct {
+		f *fedEnv
+		k apiKey
+	}{{b, b1}, {c, c1}} {
+		waitFor(t, "the deleted message gone from "+s.f.domain, func() bool {
+			_, ok := s.f.messages(s.k, room.ID)["hello from A"]
+			return !ok
+		})
 	}
 
 	// 3. Claims go to the host: b1 claims a path, and c1's claim of the
