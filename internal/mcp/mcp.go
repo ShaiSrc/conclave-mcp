@@ -193,12 +193,18 @@ func toolResult(v any, err error) map[string]any {
 			"isError": true,
 		}
 	}
+	if t, ok := v.(textOut); ok { // already rendered for the agent
+		return map[string]any{"content": []map[string]any{{"type": "text", "text": string(t)}}}
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return toolResult(nil, err)
 	}
 	return map[string]any{"content": []map[string]any{{"type": "text", "text": string(b)}}}
 }
+
+// textOut is a tool result sent as plain text instead of JSON.
+type textOut string
 
 func errorResponse(id json.RawMessage, code int, msg string) *jsonRPCResponse {
 	return &jsonRPCResponse{
@@ -284,6 +290,20 @@ var tools = []tool{
 			"paths":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
 			"key_id": keyIDProp},
 		[]string{"room_id"}},
+	{"bots.list", "List the bots on this server you may see: handle, display name, description, skills. " + agent.ExternalProfileNote,
+		map[string]any{}, nil},
+	{"bots.lookup", "Find one bot by handle, here (\"name\") or on a peer server (\"name@domain\"). " + agent.ExternalProfileNote,
+		map[string]any{"handle": str(`Handle, "name" or "name@domain".`)}, []string{"handle"}},
+	{"bots.directory", "List this server's visible bots and the cached bots of peer servers, each with its address. " + agent.ExternalProfileNote,
+		map[string]any{}, nil},
+	{"profile.get", "Show a profile on this server; your own when handle is omitted. " + agent.ExternalProfileNote,
+		map[string]any{"handle": str("Local handle. Default: your own.")}, nil},
+	{"profile.update", "Edit your own profile: display name, description, skills. Only the given fields change; skills replaces the whole list. Visibility is set by the operator.",
+		map[string]any{"display_name": str("Display name."), "description": str("What you do."),
+			"skills": map[string]any{"type": "array", "description": "Your skills; replaces the list.",
+				"items": map[string]any{"type": "object", "required": []string{"id", "name"}, "properties": map[string]any{
+					"id": str("Short id, e.g. code-review."), "name": str("Name."), "description": str("What it covers.")}}}},
+		nil},
 }
 
 func (s *Server) toolList() []map[string]any {
@@ -479,9 +499,99 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			body, _ := json.Marshal(map[string]any{"paths": p.Paths, "key_id": p.KeyID})
 			return s.httpPost(ctx, base+"/release", body)
 		}
+	case "bots.list":
+		return s.profiles(ctx, "/v1/bots")
+	case "bots.directory":
+		return s.profiles(ctx, "/v1/directory")
+	case "bots.lookup":
+		var p struct {
+			Handle string `json:"handle"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.Handle == "" {
+			return nil, errors.New("bots.lookup requires handle")
+		}
+		return s.profile(ctx, http.MethodGet, "/v1/bots/lookup?handle="+url.QueryEscape(p.Handle), nil)
+	case "profile.get":
+		var p struct {
+			Handle string `json:"handle"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.Handle == "" {
+			me, err := s.httpGet(ctx, "/v1/whoami")
+			if m, ok := me.(map[string]any); err == nil && ok {
+				p.Handle, _ = m["handle"].(string)
+			}
+			if p.Handle == "" {
+				return nil, errors.New("profile.get: this key has no handle; pass handle")
+			}
+		}
+		return s.profile(ctx, http.MethodGet, "/v1/bots/"+url.PathEscape(p.Handle), nil)
+	case "profile.update":
+		// Only the three text fields are forwarded; visibility is not
+		// offered even if the model passes it.
+		var in map[string]json.RawMessage
+		_ = json.Unmarshal(args, &in)
+		body := map[string]json.RawMessage{}
+		for _, k := range []string{"display_name", "description", "skills"} {
+			if v, ok := in[k]; ok {
+				body[k] = v
+			}
+		}
+		if len(body) == 0 {
+			return nil, errors.New("profile.update requires display_name, description or skills")
+		}
+		me, err := s.httpGet(ctx, "/v1/whoami")
+		var h string
+		if m, ok := me.(map[string]any); err == nil && ok {
+			h, _ = m["handle"].(string)
+		}
+		if h == "" {
+			return nil, errors.New("profile.update: this key has no handle")
+		}
+		b, _ := json.Marshal(body)
+		return s.profile(ctx, http.MethodPatch, "/v1/bots/"+url.PathEscape(h)+"/profile", b)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
+}
+
+// profiles fetches {"bots":[...]} and renders it for the agent.
+func (s *Server) profiles(ctx context.Context, path string) (any, error) {
+	v, err := s.httpGet(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	var l struct {
+		Bots []agent.ProfileEntry `json:"bots"`
+	}
+	b, _ := json.Marshal(v)
+	_ = json.Unmarshal(b, &l)
+	return textOut(agent.FormatProfiles(l.Bots)), nil
+}
+
+// profile fetches one profile and renders it for the agent.
+func (s *Server) profile(ctx context.Context, method, path string, body json.RawMessage) (any, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, s.BaseURL+path, rd)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	s.addAuth(req)
+	v, err := s.do(req)
+	if err != nil {
+		return nil, err
+	}
+	var p agent.ProfileEntry
+	b, _ := json.Marshal(v)
+	_ = json.Unmarshal(b, &p)
+	return textOut(agent.FormatProfiles([]agent.ProfileEntry{p})), nil
 }
 
 func (s *Server) httpGet(ctx context.Context, path string) (any, error) {
