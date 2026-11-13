@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -99,8 +100,15 @@ func fakeAPI(t *testing.T, inviteStatus int, rooms string) (*httptest.Server, *[
 			if inviteStatus >= 400 {
 				w.Write([]byte(`{"error":{"code":"forbidden","message":"only owner can invite"}}`))
 			}
-		case "DELETE /v1/keys/7":
+		case "DELETE /v1/keys/7", "DELETE /v1/keys/7/handle":
 			w.WriteHeader(204)
+		case "PUT /v1/keys/7/handle":
+			if strings.Contains(b, `"taken"`) {
+				w.WriteHeader(409)
+				w.Write([]byte(`{"error":{"code":"handle_taken","message":"handle already taken"}}`))
+				return
+			}
+			w.Write([]byte(`{"id":7}`))
 		}
 	}))
 	t.Cleanup(api.Close)
@@ -156,6 +164,9 @@ func TestAgentAdd_RevokesKeyWhenInviteFails(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(*calls, "\n"), "DELETE /v1/keys/7") {
 		t.Errorf("orphan key not revoked: %v", *calls)
+	}
+	if strings.Contains(strings.Join(*calls, "\n"), "/handle") {
+		t.Errorf("a handle set before the invite stays reserved by the revoked key: %v", *calls)
 	}
 }
 
@@ -232,8 +243,9 @@ func TestAgentAdd_StoreFailureRevokesKey(t *testing.T) {
 	if out, err := runAgentAdd(t, "agent-c", "--room", "acme/widgets", "--store"); err == nil || out != "" {
 		t.Fatalf("want an error and nothing printed, got out=%q err=%v", out, err)
 	}
-	if !strings.Contains(strings.Join(*calls, "\n"), "DELETE /v1/keys/7") {
-		t.Errorf("unstored key not revoked: %v", *calls)
+	unset, revoked := slices.Index(*calls, "DELETE /v1/keys/7/handle "), slices.Index(*calls, "DELETE /v1/keys/7 ")
+	if revoked < 0 || unset < 0 || unset > revoked {
+		t.Errorf("want the handle removed, then the key revoked: %v", *calls)
 	}
 }
 
@@ -286,5 +298,58 @@ func TestAgentAdd_SendsRights(t *testing.T) {
 	}
 	if _, err := runAgentAdd(t, "agent-d", "--room", "acme/widgets", "--role", "writer"); err == nil {
 		t.Error("--role must be gone")
+	}
+}
+
+func TestAgentAdd_Handle(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		want string // the handle request, or "" for none
+	}{
+		{[]string{"agent-c"}, `PUT /v1/keys/7/handle {"handle":"agent-c"}`},
+		{[]string{"Agent-C"}, `PUT /v1/keys/7/handle {"handle":"agent-c"}`},
+		{[]string{"agent-c", "--handle", "Bob"}, `PUT /v1/keys/7/handle {"handle":"bob"}`},
+		{[]string{"agent c"}, ""},
+		{[]string{"admin"}, ""},
+		{[]string{"agent-c", "--handle", ""}, ""},
+	} {
+		api, calls := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+		useAPI(t, api.URL)
+		if _, err := runAgentAdd(t, append(c.args, "--room", "acme/widgets")...); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		i := slices.IndexFunc(*calls, func(s string) bool { return strings.Contains(s, "/handle") })
+		switch {
+		case c.want == "" && i >= 0:
+			t.Errorf("%v: no handle wanted, got %v", c.args, *calls)
+		case c.want != "" && (i < 0 || (*calls)[i] != c.want):
+			t.Errorf("%v: want %s in %v", c.args, c.want, *calls)
+		case c.want != "" && i < slices.IndexFunc(*calls, func(s string) bool { return strings.HasPrefix(s, "POST /v1/rooms/R/invite") }):
+			t.Errorf("%v: the handle must be set after the invite: %v", c.args, *calls)
+		}
+	}
+}
+
+func TestAgentAdd_BadHandleBeforeCreatingAKey(t *testing.T) {
+	api, calls := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+	useAPI(t, api.URL)
+	for _, h := range []string{"-x", "admin"} {
+		if _, err := runAgentAdd(t, "agent-c", "--room", "acme/widgets", "--handle", h); err == nil {
+			t.Errorf("--handle %q: want an error", h)
+		}
+	}
+	if strings.Contains(strings.Join(*calls, "\n"), "POST /v1/keys") {
+		t.Errorf("key created despite a bad handle: %v", *calls)
+	}
+}
+
+func TestAgentAdd_HandleTakenRevokesKey(t *testing.T) {
+	api, calls := fakeAPI(t, 201, `{"rooms":[{"id":"R","name":"acme/widgets"}]}`)
+	useAPI(t, api.URL)
+	if out, err := runAgentAdd(t, "agent-c", "--room", "acme/widgets", "--handle", "taken"); err == nil || out != "" {
+		t.Fatalf("want an error and no key printed, got out=%q err=%v", out, err)
+	}
+	if !slices.Contains(*calls, "DELETE /v1/keys/7 ") || slices.Contains(*calls, "DELETE /v1/keys/7/handle ") {
+		t.Errorf("want the key revoked and no handle removed: %v", *calls)
 	}
 }

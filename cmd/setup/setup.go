@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/hermes/conclave-mcp/internal/agent"
+	"github.com/hermes/conclave-mcp/internal/bots"
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 	"github.com/hermes/conclave-mcp/internal/cli/keystore"
 	"github.com/hermes/conclave-mcp/internal/rights"
@@ -141,7 +142,7 @@ func NewAgentCmd() *cobra.Command {
 }
 
 func newAgentAddCmd() *cobra.Command {
-	var flagRoom, flagRights, flagTrust string
+	var flagRoom, flagRights, flagTrust, flagHandle string
 	var flagStore bool
 	cmd := &cobra.Command{
 		Use:   "add <label>",
@@ -160,6 +161,8 @@ in the user config dir) and stdout gets "export CONCLAVE_AGENT=<label>"
 instead, so the same eval works. Sessions that do not start from a
 shell (Claude desktop app, IDE) pick the agent up from
 .claude/settings.local.json: {"env": {"CONCLAVE_AGENT": "<label>"}}.
+The key gets the bot handle --handle, by default the label when it is a
+valid handle; --handle "" gives none.
 For an agent in a room with external agents see docs/shared-rooms.md.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -167,6 +170,13 @@ For an agent in a room with external agents see docs/shared-rooms.md.`,
 				if err := keystore.ValidLabel(args[0]); err != nil {
 					return fail(err)
 				}
+			}
+			handle, err := bots.NormalizeHandle(flagHandle)
+			switch {
+			case !cmd.Flags().Changed("handle"):
+				handle, _ = bots.NormalizeHandle(args[0])
+			case flagHandle != "" && err != nil:
+				return fail(err)
 			}
 			name := flagRoom
 			if name == "" {
@@ -197,11 +207,28 @@ For an agent in a room with external agents see docs/shared-rooms.md.`,
 				Body: map[string]any{"label": args[0], "trust_origin": flagTrust}}); err != nil {
 				return fail(err)
 			}
+			keyPath := fmt.Sprintf("/v1/keys/%d", key.ID)
+			// Do not leave behind a key that can reach nothing. A revoked
+			// key keeps its handle reserved, so the handle goes first.
+			undo := func(handleSet bool) {
+				if handleSet {
+					_, _ = c.Do(ctx, client.Request{Method: "DELETE", Path: keyPath + "/handle"})
+				}
+				_, _ = c.Do(ctx, client.Request{Method: "DELETE", Path: keyPath})
+			}
 			if _, err := c.Do(ctx, client.Request{Method: "POST", Path: "/v1/rooms/" + roomID + "/invite",
 				Body: map[string]any{"key_id": key.ID, "rights": rights.Split(flagRights)}}); err != nil {
-				// Do not leave behind a key that can reach nothing.
-				_, _ = c.Do(ctx, client.Request{Method: "DELETE", Path: fmt.Sprintf("/v1/keys/%d", key.ID)})
+				undo(false)
 				return fail(fmt.Errorf("invite to %q: %w", name, err))
+			}
+			who := fmt.Sprintf("key %d", key.ID)
+			if handle != "" {
+				if _, err := c.Do(ctx, client.Request{Method: "PUT", Path: keyPath + "/handle",
+					Body: map[string]any{"handle": handle}}); err != nil {
+					undo(false)
+					return fail(fmt.Errorf("handle %q: %w (key revoked)", handle, err))
+				}
+				who += ", handle " + handle
 			}
 			granted := flagRights
 			if granted == "" {
@@ -209,23 +236,24 @@ For an agent in a room with external agents see docs/shared-rooms.md.`,
 			}
 			if flagStore {
 				if err := storeKey(args[0], key.Key); err != nil {
-					_, _ = c.Do(ctx, client.Request{Method: "DELETE", Path: fmt.Sprintf("/v1/keys/%d", key.ID)})
+					undo(handle != "")
 					return fail(fmt.Errorf("store key: %w (key revoked)", err))
 				}
 				fmt.Fprintf(cmd.OutOrStdout(), "export CONCLAVE_AGENT=%s\n", args[0])
-				fmt.Fprintf(cmd.ErrOrStderr(), "agent %q (key %d) joined %q with rights %s; key stored in %s\n"+
+				fmt.Fprintf(cmd.ErrOrStderr(), "agent %q (%s) joined %q with rights %s; key stored in %s\n"+
 					"desktop/IDE sessions: put {\"env\": {\"CONCLAVE_AGENT\": %q}} in .claude/settings.local.json\n",
-					args[0], key.ID, name, granted, keyWhere(args[0]), args[0])
+					args[0], who, name, granted, keyWhere(args[0]), args[0])
 				return nil
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "export CONCLAVE_API_KEY=%s\n", key.Key)
-			fmt.Fprintf(cmd.ErrOrStderr(), "agent %q (key %d) joined %q with rights %s; the key is shown only once\n", args[0], key.ID, name, granted)
+			fmt.Fprintf(cmd.ErrOrStderr(), "agent %q (%s) joined %q with rights %s; the key is shown only once\n", args[0], who, name, granted)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&flagRoom, "room", "", "room name (default: the current repository's room)")
 	cmd.Flags().StringVar(&flagRights, "rights", "", "comma-separated rights in the room (read, claim, message types) or all; default none")
 	cmd.Flags().StringVar(&flagTrust, "trust-origin", "external", "external (default) or internal (your own agents)")
+	cmd.Flags().StringVar(&flagHandle, "handle", "", "bot handle (default: the label, if it is a valid handle)")
 	cmd.Flags().BoolVar(&flagStore, "store", false, "store the key (macOS Keychain or a 0600 file) and print export CONCLAVE_AGENT=<label>")
 	return cmd
 }

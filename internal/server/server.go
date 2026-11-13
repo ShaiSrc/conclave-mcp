@@ -26,6 +26,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/bots"
 	"github.com/hermes/conclave-mcp/internal/claims"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/federation"
@@ -222,6 +223,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	}
 	auditSvc := audit.NewService(deps.DB)
 	claimsSvc := claims.NewService(deps.DB)
+	botsStore := bots.NewStore(deps.DB)
 
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.
@@ -241,6 +243,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		messagesSvc.Routes(r)
 		auditSvc.Routes(r)
 		claimsSvc.Routes(r)
+		botsStore.Routes(r)
 		if fedSvc != nil {
 			fedSvc.AdminRoutes(r)
 		} else {
