@@ -119,6 +119,12 @@ func (s *Service) start(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
 		return
 	}
+	// A message without a type would be stored as system, which direct
+	// members may not send: default to question, as the CLI and MCP do.
+	if body, err = withDefaultType(body); err != nil {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "malformed JSON")
+		return
+	}
 	if !isBot {
 		s.refuse(w, r, caller, req.To[:min(len(req.To), 300)], "not a bot", http.StatusForbidden, "forbidden", // an address is shorter
 			"only a bot (a key with a handle) has direct conversations")
@@ -548,4 +554,25 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 	writeJSON(w, status, map[string]any{"error": map[string]any{
 		"code": code, "message": msg, "request_id": r.Header.Get("X-Request-Id"),
 	}})
+}
+
+// withDefaultType sets message_type to question when the start body has
+// none, keeping every other field as sent.
+func withDefaultType(body []byte) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(body, &fields); err != nil || fields == nil {
+		return nil, errors.New("not an object")
+	}
+	var t string
+	if raw, ok := fields["message_type"]; ok && json.Unmarshal(raw, &t) == nil && t != "" {
+		return body, nil
+	}
+	fields["message_type"] = json.RawMessage(`"question"`)
+	var b bytes.Buffer
+	enc := json.NewEncoder(&b)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(fields); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(b.Bytes(), "\n"), nil
 }

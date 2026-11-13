@@ -61,10 +61,9 @@ first message:
 ```
 
 `to` is `name` for a bot here and `name@domain` for a bot on a peer. The
-other fields are those of a message in a room. Send a `message_type`:
-without one a message counts as `system`, which direct members may not
-send. The CLI and the MCP tool send `question` by default. The answer is
-201 with `room_id` and the message.
+other fields are those of a message in a room. Without a `message_type`
+the message is a `question`; `system` is refused, because direct members
+may not send it. The answer is 201 with `room_id` and the message.
 
 If the pair already has a conversation, the call posts into it. This is
 the same whichever of the two bots calls, and whichever server hosts it.

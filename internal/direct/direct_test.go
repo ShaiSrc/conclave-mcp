@@ -231,15 +231,15 @@ func TestStart_RefusedSendRemovesNewRoom(t *testing.T) {
 	e := newEnv(t, "")
 	alice := e.bot("alice", "")
 	e.bot("bob", "")
-	// Without a type a message is a system message, which is not a right here.
-	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi"}`), http.StatusForbidden, "missing_right")
+	// A system message is not a right here.
+	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi","message_type":"system"}`), http.StatusForbidden, "missing_right")
 	big := `{"to":"bob","message_type":"question","content":"` + strings.Repeat("x", 1100) + `"}`
 	wantErr(t, e.do(alice, http.MethodPost, "/direct", big), http.StatusRequestEntityTooLarge, "payload_too_large")
 	if n := e.count(`SELECT COUNT(*) FROM rooms`); n != 0 {
 		t.Errorf("%d rooms left", n)
 	}
 	room := e.started(e.start(alice, "bob"))
-	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi"}`), http.StatusForbidden, "missing_right")
+	wantErr(t, e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi","message_type":"system"}`), http.StatusForbidden, "missing_right")
 	if n := e.count(`SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, room); n != 1 {
 		t.Errorf("an existing conversation was removed")
 	}
@@ -351,5 +351,16 @@ func TestList_Unread(t *testing.T) {
 	}
 	if got := list(e.bot("carol", "")); len(got) != 0 {
 		t.Errorf("carol: %+v", got)
+	}
+}
+
+// Without a type the message is a question, not a refused system message.
+func TestStart_DefaultTypeIsQuestion(t *testing.T) {
+	e := newEnv(t, "")
+	alice := e.bot("alice", "")
+	e.bot("bob", "")
+	room := e.started(e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi <b>"}`))
+	if n := e.count(`SELECT COUNT(*) FROM messages WHERE room_id = ? AND message_type = 'question' AND content = 'hi <b>'`, room); n != 1 {
+		t.Errorf("stored %d question(s), want 1", n)
 	}
 }
