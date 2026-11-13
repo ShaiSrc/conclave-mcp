@@ -94,8 +94,12 @@ export async function roomsPage(view) {
 
 export async function roomPage(view, id) {
   const base = '/v1/rooms/' + encodeURIComponent(id);
+  // A replica's claims are its host's, which answers its member bots only
+  // (403 no_handle for the operator key): the page shows that instead.
   const [room, members, held, keys] = await Promise.all([
-    api('GET', base), api('GET', base + '/members'), api('GET', base + '/claims'), api('GET', '/v1/keys')]);
+    api('GET', base), api('GET', base + '/members'),
+    api('GET', base + '/claims').catch(err => { if (err.status === 401) throw err; return { error: err }; }),
+    api('GET', '/v1/keys')]);
   const allKeys = keys.keys || [];
   const home = room.home || ''; // set on a replica: the room is hosted there
   // Delivery state exists only for rooms hosted here that have remote members.
@@ -140,8 +144,8 @@ export async function roomPage(view, id) {
         m.unverified ? h('span', { class: 'ext' }, 'unverified') : '', extMark(m.trust_origin), m.operator ? h('span', { class: 'operator' }, 'operator ✓') : '',
         m.message_type && m.message_type !== 'system' ? h('span', {}, `<${m.message_type}>`) : '',
         replyTo(m) ? h('span', {}, `re #${replyTo(m)}`) : '',
-        room.archived_at ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
-        confirmButton('Delete', 'Delete this message?', async () => {
+        room.archived_at || home ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
+        home ? '' : confirmButton('Delete', 'Delete this message?', async () => {
           await confirmed('DELETE', `${base}/messages/${m.id}`);
           msgs.delete(m.id);
           draw();
@@ -165,7 +169,9 @@ export async function roomPage(view, id) {
     replying.replaceChildren(...(id ? [`Replying to #${id} `, h('button', { type: 'button', onclick: () => reply(0) }, 'Cancel reply')] : []));
     if (id) text.focus();
   }
-  const compose = room.archived_at ? '' : h('form', { onsubmit: e => e.preventDefault() },
+  // A replica takes messages of bots only: the host knows no address for
+  // the operator key.
+  const compose = room.archived_at || home ? '' : h('form', { onsubmit: e => e.preventDefault() },
     h('label', {}, 'Type ', type), replying, h('label', { for: 'compose-text' }, 'Message'), text,
     h('button', {
       type: 'button',
@@ -222,7 +228,8 @@ export async function roomPage(view, id) {
     room.archived_at ? h('p', { class: 'muted' }, 'Archived ' + when(room.archived_at)) : '',
     h('h2', {}, 'Open requests'), requests,
     h('h2', {}, 'Messages'), live, list, compose,
-    h('h2', {}, 'Active claims'), claimsTable(held.claims || []),
+    h('h2', {}, 'Active claims'), !held.error ? claimsTable(held.claims || [])
+      : home ? h('p', { class: 'muted' }, `Claims are held on ${home}, which shows them to member bots only.`) : errorBox(held.error),
     h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys, home),
     delivery.length ? [h('h2', {}, 'Delivery to member servers'), deliveryTable(delivery)] : '',
     room.archived_at || home ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
