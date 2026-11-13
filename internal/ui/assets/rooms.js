@@ -145,7 +145,7 @@ export async function roomPage(view, id) {
   // The compose form: each message is confirmed with a passkey.
   let target = 0; // the message being answered
   const type = h('select', {}, TYPES.map(t => h('option', { value: t, selected: t === 'answer' }, t)));
-  const text = h('textarea', { rows: 4, maxlength: 60000 });
+  const text = h('textarea', { id: 'compose-text', rows: 4, maxlength: 60000 });
   const replying = h('span');
   const sendMsg = h('div');
   function reply(id) {
@@ -154,7 +154,7 @@ export async function roomPage(view, id) {
     if (id) text.focus();
   }
   const compose = room.archived_at ? '' : h('form', { onsubmit: e => e.preventDefault() },
-    h('label', {}, 'Type ', type), replying, text,
+    h('label', {}, 'Type ', type), replying, h('label', { for: 'compose-text' }, 'Message'), text,
     h('button', {
       type: 'button',
       onclick: action(sendMsg, async () => {
@@ -163,11 +163,12 @@ export async function roomPage(view, id) {
         if (target) body.reply_to = target;
         const options = await api('POST', '/ui/auth/message/begin', body);
         const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
-        const sent = await api('POST', '/ui/auth/message/finish', cred.toJSON());
-        msgs.set(sent.id, sent);
-        text.value = '';
-        reply(0);
-        draw();
+        await api('POST', '/ui/auth/message/finish', cred.toJSON());
+        // The live stream shows the message; adding it here would move the
+        // catch-up cursor past messages not yet fetched. Clear only what
+        // was sent, not edits made while the passkey prompt was open.
+        if (text.value === body.content) text.value = '';
+        if (target === (body.reply_to || 0)) reply(0);
       }, 'Waiting for your passkey…', false), // 401 here may be a rejected passkey: show it, keep the text
     }, 'Send — confirm with passkey'),
     h('p', { class: 'muted' }, 'Each message needs your passkey. Only confirm a prompt you started here.'),

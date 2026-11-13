@@ -251,6 +251,9 @@ func TestE2E_WebUI(t *testing.T) {
 			Content     string `json:"content"`
 			Operator    bool   `json:"operator"`
 			AuthorKeyID int64  `json:"author_key_id"`
+			Metadata    struct {
+				ReplyTo int64 `json:"reply_to"`
+			} `json:"metadata"`
 		} `json:"messages"`
 	}
 	if r := env.call("GET", msgsPath, agentKey.Key, nil); r.Status != 200 || json.Unmarshal(r.Body, &listed) != nil {
@@ -260,8 +263,8 @@ func TestE2E_WebUI(t *testing.T) {
 	for _, m := range listed.Messages {
 		if m.Content == "yes, deploy" {
 			found = true
-			if !m.Operator || m.AuthorKeyID != firstOperator {
-				t.Errorf("operator message: operator=%v author=%d, want true and %d", m.Operator, m.AuthorKeyID, firstOperator)
+			if !m.Operator || m.AuthorKeyID != firstOperator || m.Metadata.ReplyTo != question.ID {
+				t.Errorf("operator message: operator=%v author=%d reply_to=%d, want true, %d, %d", m.Operator, m.AuthorKeyID, m.Metadata.ReplyTo, firstOperator, question.ID)
 			}
 		}
 	}
