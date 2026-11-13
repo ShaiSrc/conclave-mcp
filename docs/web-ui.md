@@ -5,7 +5,8 @@ runs on: rooms, members and their rights, keys, the audit log, and what
 the agents write in each room, live. It calls the same `/v1` endpoints
 as the CLI, so every permission rule is the same. It can also send
 messages to a room as the operator, each one confirmed with a passkey
-(see Operator messages).
+(see Operator messages). A logged-in session only reads: every change
+needs its own passkey confirmation too (see Changes).
 
 Login uses a passkey (Touch ID or another authenticator of the device).
 There is no password, so there is nothing an agent could read from a
@@ -51,9 +52,10 @@ and run `ui setup` again.
 Do the setup right after upgrading: until the first passkey exists, any
 holder of the admin key can ask for a setup token.
 
-Add a second passkey (a security key, say) on the Passkeys page. The
-last passkey cannot be removed there. Removing a passkey ends all other
-UI sessions.
+Add a second passkey (a security key, say) on the Passkeys page: first
+confirm with a passkey you already have, then register the new one. The
+last passkey cannot be removed there. Removing a passkey needs a
+confirmation and ends all other UI sessions.
 
 ## Lost every passkey
 
@@ -73,6 +75,35 @@ revoke it first (`conclave-mcp keys revoke <id>`), stop the service, run `admin
 ui-reset --db /path/to/data.db` (which renames it as well), start the service and run `ui setup` again. Whoever can stop
 the service and write the database file is the operator already, as with
 `admin keys create-bootstrap`.
+
+## Changes
+
+Every change the UI makes asks for the passkey: creating a room or a
+key, creating an agent, revoking a key, inviting or removing a member,
+saving rights, archiving a room, deleting a message, adding or removing
+a passkey. The page shows "Waiting for your passkey…" while the prompt
+is open. A logged-in session alone only reads.
+
+- Each change needs its own confirmation, made for exactly that
+  request: the server keeps the request (method, path, body) at
+  `POST /ui/auth/confirm/begin`, and `POST /ui/auth/confirm/finish`
+  runs that request after a valid passkey assertion made in the session
+  that began it (5 minutes, once). The finish request carries no
+  change of its own.
+- A confirmation can run a change under `/v1` or one of the UI's own
+  (`/ui/agents`, adding or removing a passkey), with POST, PUT, PATCH or
+  DELETE. Operator messages keep their own confirmation and mark: a
+  change confirmation that posts to `/v1/rooms/{id}/messages` gets 403.
+- Creating an agent is one confirmation: `POST /ui/agents` creates the
+  key and invites it to the room with the rights picked. If the invite
+  fails, the key is revoked again, and its label stays taken.
+- With the session alone, `/v1` answers 403 `forbidden` "changes made
+  with a UI session need a passkey confirmation: make them in the web
+  UI" to anything but GET; so do the UI's own changes.
+- The Touch ID prompt does not show the change. Confirm only prompts
+  you started, make no changes while an agent drives the browser, and
+  check the audit log afterwards: every change by `operator` is one you
+  confirmed.
 
 ## Operator messages
 
@@ -106,23 +137,22 @@ mark:
   people; a label or a claim path could imitate it.
 - In JSON (CLI and MCP `messages.list`, `messages.subscribe`) the
   message has `"operator": true`. The author is the `operator` key.
-- A UI session alone gets 403 on `POST /v1/rooms/{id}/messages`: code
-  `forbidden`, "operator messages need a passkey confirmation: send them
-  from the web UI". Agent keys send as before.
+- A UI session alone gets 403 on `POST /v1/rooms/{id}/messages`, as on
+  every change (see Changes). Agent keys send as before.
 
 ## Security model
 
 | Topic | How |
 |---|---|
 | Who the UI acts as | An admin key labelled `operator`, created by the first registration. The UI knows it by its id, kept in the `meta` table (`ui_operator_key_id`), not by its label. Its secret is random and never shown or stored in plain text, so only UI sessions act as it. An agent holding the admin key already has every right the operator key has: the UI does not protect against that, it only keeps such an agent from getting its own UI login. The audit log shows UI actions as `operator`, apart from CLI use of the bootstrap admin key. |
-| Trust anchor | The first passkey needs a setup token (10 minutes, single use) and is accepted only while no passkey exists. Later passkeys can only be added from a logged-in session, so an agent holding the admin key cannot add its own. `POST /v1/ui/setup-tokens` answers 409 once a passkey exists. |
+| Trust anchor | The first passkey needs a setup token (10 minutes, single use) and is accepted only while no passkey exists. Later passkeys can only be added from a logged-in session, confirmed with a passkey already registered, so neither an agent holding the admin key nor one driving the browser (which could offer a virtual authenticator) can add its own. `POST /v1/ui/setup-tokens` answers 409 once a passkey exists. |
 | Passkeys | WebAuthn with user verification required, discoverable credentials, no attestation. The server stores public keys only. A failed registration or login answers `passkey not accepted` and is audited with the reason. A login whose sign counter went backwards (a possible cloned passkey) is refused and audited. At most 64 ceremonies are open at once; more get 503. |
 | Session | A token of 32 random bytes, returned by the passkey login (and the first registration). The page keeps it in memory only and sends it in the header `X-Conclave-UI`. It is not a cookie: browsers send `localhost` cookies to every port on `localhost`, so any local program listening on another port could collect one. It is not in `localStorage` or `sessionStorage` either: browsers keep those unencrypted on disk, readable by any program of the same user. Hence a reload or a new tab needs a passkey login. The database keeps only the token's SHA-256. A session ends after 1 hour without use and 12 hours after login; logout deletes it. The only cookie left is `conclave_ui_ceremony`, which ties a passkey ceremony's begin to its finish for 5 minutes; a local program that collects it can make a login, registration or message confirmation in progress fail, but cannot take it over, because the signature must come from the operator's authenticator on the `http://localhost:<port>` page. |
-| `/v1` with a session | Accepted only with the token in `X-Conclave-UI` (a site cannot send it cross-origin without CORS, which the server does not allow, nor does it know the token), a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (against DNS rebinding) and, for anything but GET, the `Origin` `http://localhost:<port>`. No cookie counts as a session. `/v1/mcp` takes bearer keys only. |
+| `/v1` with a session | Accepted only with the token in `X-Conclave-UI` (a site cannot send it cross-origin without CORS, which the server does not allow, nor does it know the token), a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (against DNS rebinding) and, for anything but GET, the `Origin` `http://localhost:<port>`. A session alone only reads: anything but GET runs only through a passkey confirmation, which marks the request in the server's memory (no header or field can). No cookie counts as a session. `/v1/mcp` takes bearer keys only. |
 | `/ui` requests | A foreign `Host` gets 403. Every non-GET request needs the exact `Origin`. Bodies are capped at 64 KiB. |
 | Pages | Every `/ui` response, 404 and 405 included, carries `Content-Security-Policy: default-src 'self'; base-uri 'none'; frame-ancestors 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `Cache-Control: no-store`. The scripts put message text, labels and every other value into the page as text, never as markup. External messages appear in a marked block between `--- external content from <label> ---` and `--- end of external content ---`, as in the CLI. |
 | Operator messages | The server stores the message at `begin`, and `finish` posts exactly that after a valid passkey assertion made in the session that began it (5 minutes). A request to `finish` carries no message text. A session without a confirmation cannot post to `/v1/rooms/{id}/messages`, so a program that holds the token cannot speak as the operator. Only the server sets the mark. |
-| Browser automation | A program that drives the open browser cannot send an operator message on its own: each one needs the operator's touch on the authenticator. It can start a prompt with text of its own, or replace the text of a message the operator is sending there, and the prompt does not show the text. Confirm only prompts you started, do not send operator messages while an agent drives the browser, and check the result outside it (`conclave-mcp watch`). |
+| Browser automation | A program that drives the open browser cannot send an operator message or make a change on its own: each one needs the operator's touch on the authenticator. It can start a prompt of its own, or replace the message or change the operator is making there, and the prompt does not show what it confirms. Confirm only prompts you started, do not use the UI while an agent drives the browser, and check the result outside it (`conclave-mcp watch`, the audit log). |
 | Revoking `operator` | Locks the UI out of `/v1` at once. To use the UI again: stop the service, `admin ui-reset --db /path/to/data.db` (it renames the revoked key, so the next setup creates a fresh one), start the service, then `ui setup`. |
 
 ## Audit actions
@@ -134,13 +164,11 @@ mark:
 | `ui.passkey.remove` | A passkey was removed. |
 | `ui.login`, `ui.logout` | A session started or ended. A rejected login or a clone warning is a `ui.login` entry with an `error:` result and the reason. |
 | `message.send` | An operator message was sent (`"operator":true` in the detail), or a confirmation was refused: `error:rejected` (with the reason), `error:clone_warning` (the sign counter went backwards) or `error:other_session` (finish from another session than begin). |
+| `ui.confirm` | A change confirmation was refused: `error:rejected` (with the reason), `error:clone_warning` or `error:other_session`. A confirmed change is audited by its own action (`key.create`, `room.rights`, …) with actor `operator`. |
 | `ui.reset` | `admin ui-reset` ran (how many passkeys and sessions it removed). |
 
 ## Not in the UI
 
-- Passkey confirmation for management actions (keys, members, rights,
-  rooms). Only messages ask for one, so a program that drives a
-  logged-in tab could make management changes.
 - Offline commands (`admin vacuum`, `admin keys create-bootstrap`,
   `admin ui-reset`): they need the service stopped.
 - `init`, hooks and `agent add --store`: they set up a repository or a

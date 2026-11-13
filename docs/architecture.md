@@ -222,7 +222,9 @@ On a loopback listen address `/v1` (except `/v1/mcp`) also takes
 a web UI session token in the header `X-Conclave-UI`, together
 with a UI `Host` and, unless GET, the UI `Origin`. Such a request
 acts as the admin key labelled `operator` (`internal/ui`,
-[web-ui.md](web-ui.md)). The token is never a cookie: browsers
+[web-ui.md](web-ui.md)). A session alone only reads: anything but
+GET runs only after a passkey confirmation of that exact request
+(`/ui/auth/confirm/begin|finish`). The token is never a cookie: browsers
 send `localhost` cookies to every port, so the page holds it in
 memory only.
 
