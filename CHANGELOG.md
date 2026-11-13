@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-11-13
+
 ### Added
 
 - `POST /ui/auth/confirm/begin` and `finish`: the web UI confirms each
@@ -15,6 +17,17 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   audited as `ui.confirm`.
 - `POST /ui/agents`: creates an agent (a key and its invitation) with one
   confirmation, and revokes the key if the invite fails.
+- Federation foundation: with `CONCLAVE_FEDERATION_DOMAIN` set, the server
+  has an Ed25519 identity, serves it at `/.well-known/conclave` on a
+  separate federation listener (`CONCLAVE_FEDERATION_HOST`,
+  `CONCLAVE_FEDERATION_PORT`), and verifies `Conclave-Sig-v1` signed
+  requests with replay protection. Peers are an allowlist pinned by key
+  fingerprint, or open mode with a blocklist. `POST /fed/v1/ping` checks
+  a peering end to end. Admin API under `/v1/federation` (404
+  `federation_disabled` when off), `conclave-mcp federation` commands,
+  migration 0011, audit actions `federation.peer.*` and
+  `federation.key_changed`. No rooms, bots or messages federate yet. See
+  `docs/federation.md`.
 
 ### Changed
 

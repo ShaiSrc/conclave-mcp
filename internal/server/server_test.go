@@ -1,13 +1,22 @@
 package server
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/hermes/conclave-mcp/internal/federation"
+	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
 func TestServer_Healthz(t *testing.T) {
@@ -251,3 +260,214 @@ func TestServer_StartShutdown(t *testing.T) {
 type fakeDB struct{ pingErr error }
 
 func (f fakeDB) PingContext(ctx context.Context) error { return f.pingErr }
+
+// With a federation domain, the second listener serves the server
+// document and nothing else.
+func TestServer_FederationListener(t *testing.T) {
+	s, err := New(Config{
+		Host: "127.0.0.1", Port: 7432,
+		FederationDomain: "conclave.example.org", FederationHost: "127.0.0.1", FederationPort: 7433,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.fed == nil {
+		t.Fatal("no federation listener with the domain set")
+	}
+	if s.fed.Addr != "127.0.0.1:7433" {
+		t.Errorf("federation addr: %q", s.fed.Addr)
+	}
+	serve := func(h http.Handler, path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, uiRequest("GET", path, "localhost:7432"))
+		return rec
+	}
+	rec := serve(s.fed.Handler, "/.well-known/conclave")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"domain":"conclave.example.org"`) {
+		t.Errorf("/.well-known/conclave on the federation listener: %d %s", rec.Code, rec.Body)
+	}
+	for _, path := range []string{"/v1/whoami", "/ui/", "/healthz"} {
+		if rec := serve(s.fed.Handler, path); rec.Code != http.StatusNotFound {
+			t.Errorf("%s on the federation listener: %d, want 404", path, rec.Code)
+		}
+	}
+	if rec := serve(s.Handler(), "/.well-known/conclave"); rec.Code != http.StatusNotFound {
+		t.Errorf("/.well-known/conclave on the main listener: %d, want 404", rec.Code)
+	}
+	// /fed/v1 is there, behind signature verification, and only there.
+	if rec := serve(s.fed.Handler, "/fed/v1/ping"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("unsigned /fed/v1/ping on the federation listener: %d, want 401", rec.Code)
+	}
+	if rec := serve(s.Handler(), "/fed/v1/ping"); rec.Code != http.StatusNotFound {
+		t.Errorf("/fed/v1/ping on the main listener: %d, want 404", rec.Code)
+	}
+}
+
+// Listener addresses are built with JoinHostPort, so an IPv6 host is
+// bracketed. No socket is opened.
+func TestServer_IPv6ListenerAddrs(t *testing.T) {
+	s, err := New(Config{
+		Host: "::1", Port: 7432,
+		FederationDomain: "conclave.example.org", FederationHost: "::1", FederationPort: 7433,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.http.Addr != "[::1]:7432" || s.fed.Addr != "[::1]:7433" {
+		t.Errorf("addrs: %q, %q", s.http.Addr, s.fed.Addr)
+	}
+	s, err = New(Config{
+		Host: "[::1]", Port: 7432,
+		FederationDomain: "conclave.example.org", FederationHost: "[::1]", FederationPort: 7433,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.http.Addr != "[::1]:7432" || s.fed.Addr != "[::1]:7433" {
+		t.Errorf("bracketed hosts: %q, %q", s.http.Addr, s.fed.Addr)
+	}
+}
+
+// Without a domain there is no second listener and no key.
+func TestServer_NoFederationWithoutDomain(t *testing.T) {
+	db := uiDB(t)
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.fed != nil {
+		t.Error("federation listener built without a domain")
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM federation_keys`).Scan(&n); err != nil || n != 0 {
+		t.Errorf("federation_keys rows: %d, %v; want 0", n, err)
+	}
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// Start serves both listeners, warns about insecure HTTP and shuts
+// both down.
+func TestServer_StartFederationListener(t *testing.T) {
+	var logs bytes.Buffer
+	port, fedPort := freePort(t), freePort(t)
+	s, err := New(Config{
+		Host: "127.0.0.1", Port: port, Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+		FederationDomain: fmt.Sprintf("127.0.0.1:%d", fedPort), FederationHost: "127.0.0.1", FederationPort: fedPort,
+		FederationInsecureHTTP: true,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(ctx) }()
+
+	get := func(port int, path string) int {
+		for i := 0; i < 200; i++ {
+			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d%s", port, path))
+			if err == nil {
+				resp.Body.Close()
+				return resp.StatusCode
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("port %d never answered", port)
+		return 0
+	}
+	if code := get(fedPort, "/.well-known/conclave"); code != http.StatusOK {
+		t.Errorf("federation listener: %d, want 200", code)
+	}
+	if code := get(port, "/healthz"); code != http.StatusOK {
+		t.Errorf("main listener: %d, want 200", code)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Errorf("Start returned: %v", err)
+	}
+	if !strings.Contains(logs.String(), "level=WARN") || !strings.Contains(logs.String(), "insecure") {
+		t.Errorf("no insecure HTTP warning in the logs:\n%s", logs.String())
+	}
+	if _, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", fedPort)); err == nil {
+		t.Error("federation listener still open after shutdown")
+	}
+}
+
+// The federation listener faces the internet: it has read and write
+// timeouts and a header cap, and a request whose body stalls is cut off.
+func TestServer_FederationSlowBody(t *testing.T) {
+	ctx := context.Background()
+	fedPort := freePort(t)
+	domain := fmt.Sprintf("127.0.0.1:%d", fedPort)
+	db := uiDB(t)
+	s, err := New(Config{
+		Host: "127.0.0.1", Port: freePort(t),
+		FederationDomain: domain, FederationHost: "127.0.0.1", FederationPort: fedPort, FederationInsecureHTTP: true,
+	}, Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.fed.ReadTimeout != 10*time.Second || s.fed.WriteTimeout != 15*time.Second || s.fed.MaxHeaderBytes != 16<<10 {
+		t.Errorf("federation listener: read %v, write %v, headers %d; want 10s, 15s, 16384",
+			s.fed.ReadTimeout, s.fed.WriteTimeout, s.fed.MaxHeaderBytes)
+	}
+	s.fed.ReadTimeout = 300 * time.Millisecond
+
+	// An allowed peer, so that the request gets as far as its body.
+	peer, err := federation.LoadOrCreateIdentity(ctx, uiDB(t), "peer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO federation_peers(domain, status, fingerprint, public_key, added_at)
+		VALUES ('peer.example', 'allowed', ?, ?, ?)`, peer.Fingerprint(), []byte(peer.Public), storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(runCtx) }()
+	var conn net.Conn
+	for i := 0; i < 200; i++ {
+		if conn, err = net.Dial("tcp", domain); err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	req, _ := http.NewRequest(http.MethodPost, "http://"+domain+"/fed/v1/ping", nil)
+	if err := peer.SignRequest(req, domain, []byte("{}")); err != nil {
+		t.Fatal(err)
+	}
+	// The headers and one byte of the two-byte body, then nothing.
+	if _, err := fmt.Fprintf(conn, "POST /fed/v1/ping HTTP/1.1\r\nHost: %s\r\nAuthorization: %s\r\nContent-Length: 2\r\n\r\n{",
+		domain, req.Header.Get("Authorization")); err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("no answer to a stalled body: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("stalled body: %d, want 400", resp.StatusCode)
+	}
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Errorf("Start returned: %v", err)
+	}
+}

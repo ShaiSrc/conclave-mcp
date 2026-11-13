@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"strings"
 	"testing"
 	"time"
@@ -145,7 +147,7 @@ func TestNewCmd_RegistersFlags(t *testing.T) {
 	if cmd.Use != "serve" {
 		t.Errorf("Use: got %q, want serve", cmd.Use)
 	}
-	for _, name := range []string{"host", "port", "db"} {
+	for _, name := range []string{"host", "port", "db", "federation-domain"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("expected --%s flag, got nil", name)
 		}
@@ -159,5 +161,47 @@ func TestNewCmd_RejectsArgs(t *testing.T) {
 	cmd.SetErr(&bytes.Buffer{})
 	if err := cmd.Execute(); err == nil {
 		t.Error("expected error for extra positional arg, got nil")
+	}
+}
+
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	return ln.Addr().(*net.TCPAddr).Port
+}
+
+// The federation domain reaches the server from the env var, and the
+// --federation-domain flag wins over it only when given.
+func TestNewCmd_FederationDomain(t *testing.T) {
+	for name, tc := range map[string]struct {
+		args []string
+		want string
+	}{
+		"env":  {nil, "env.example"},
+		"flag": {[]string{"--federation-domain", "flag.example"}, "flag.example"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("CONCLAVE_FEDERATION_DOMAIN", "env.example")
+			t.Setenv("CONCLAVE_FEDERATION_PORT", fmt.Sprint(freePort(t)))
+			var out bytes.Buffer
+			cmd := NewCmd()
+			cmd.SetArgs(append([]string{"--port", fmt.Sprint(freePort(t)), "--db", t.TempDir() + "/data.db"}, tc.args...))
+			cmd.SetOut(&out)
+			cmd.SetErr(&out)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // boot, then shut down at once
+			if err := cmd.ExecuteContext(ctx); err != nil {
+				t.Fatalf("serve: %v\n%s", err, out.String())
+			}
+			for _, want := range []string{fmt.Sprintf(`"federation_domain":%q`, tc.want), `"msg":"federation listener listening"`} {
+				if !strings.Contains(out.String(), want) {
+					t.Errorf("log output missing %s:\n%s", want, out.String())
+				}
+			}
+		})
 	}
 }

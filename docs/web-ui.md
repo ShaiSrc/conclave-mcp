@@ -110,6 +110,19 @@ is open. A logged-in session alone only reads.
   the Passkeys page and the `ui.passkey.add` entries in the audit log;
   remove a passkey you do not know.
 
+## Federation
+
+With federation on (`CONCLAVE_FEDERATION_DOMAIN`), a Federation entry
+appears in the navigation. It shows this server's domain, mode, key ID
+and fingerprint, and the peers with status, fingerprint, note and last
+contact. Block, Remove, Ping and Add peer each ask for the passkey (a
+ping is a POST, so a session alone cannot make it). To add a peer, enter
+its domain and press Look up: the page shows the fingerprint the peer
+serves. Compare it with the one the peer's operator gives you over
+another channel, and add only if they match. The lookup needs no
+passkey; the add sends the fingerprint you saw, and the server refuses
+it if the peer's keys no longer include it.
+
 ## Operator messages
 
 Open a room, pick a type (default `answer`), write the text and press

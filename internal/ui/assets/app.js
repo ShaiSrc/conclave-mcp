@@ -2,6 +2,7 @@
 import { h, api, confirmed, confirmNow, oneAtATime, WAITING, setSession, errorBox, confirmButton, table, when, action } from './lib.js';
 import { roomsPage, roomPage } from './rooms.js';
 import { keysPage, auditPage } from './keys.js';
+import { federationPage } from './federation.js';
 
 const main = document.getElementById('app');
 const nav = document.getElementById('nav');
@@ -97,9 +98,17 @@ async function header() {
     if (err.status === 401) throw err;
     msg.append(errorBox(err)); // the page itself still renders
   }
+  let federation = false; // the entry shows only when the server has federation on
+  try {
+    await api('GET', '/v1/federation');
+    federation = true;
+  } catch (err) {
+    if (err.status === 401) throw err;
+  }
   return [
     h('a', { href: '#/' }, 'Rooms'), h('a', { href: '#/keys' }, 'Keys'),
-    h('a', { href: '#/audit' }, 'Audit'), h('a', { href: '#/passkeys' }, 'Passkeys'),
+    h('a', { href: '#/audit' }, 'Audit'), ...(federation ? [h('a', { href: '#/federation' }, 'Federation')] : []),
+    h('a', { href: '#/passkeys' }, 'Passkeys'),
     h('span', { class: 'rooms' }, rooms.map(r => h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name))),
     msg,
     h('button', { onclick: action(msg, async () => { await logout(); await render(); }) }, 'Log out'),
@@ -114,6 +123,7 @@ const routes = [
   [/^#\/rooms\/([^/]+)$/, roomPage],
   [/^#\/keys$/, keysPage],
   [/^#\/audit$/, auditPage],
+  [/^#\/federation$/, federationPage],
   [/^#\/passkeys$/, passkeysPage],
 ];
 

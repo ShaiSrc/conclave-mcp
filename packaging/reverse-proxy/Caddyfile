@@ -14,21 +14,35 @@
 conclave.example.com {
     encode zstd gzip
 
+    # Federation (only with CONCLAVE_FEDERATION_DOMAIN set): the signature
+    # covers Host and the request URI. reverse_proxy keeps both; do not
+    # add uri or rewrite directives, and use handle, not handle_path.
+    handle /.well-known/conclave {
+        reverse_proxy 127.0.0.1:7433
+    }
+    handle /fed/* {
+        reverse_proxy 127.0.0.1:7433
+    }
+
     # 1 MiB max request body (SPEC-0005 §8).
     # The server enforces 256 KiB per message; this is the proxy
     # boundary so it can reject oversized uploads without buffering.
-    reverse_proxy 127.0.0.1:7432 {
-        transport http {
-            max_request_body 1MB
-            dial_timeout     5s
-            response_header_timeout 30s
+    handle {
+        request_body {
+            max_size 1MB
         }
+        reverse_proxy 127.0.0.1:7432 {
+            transport http {
+                dial_timeout     5s
+                response_header_timeout 30s
+            }
 
-        # Overwrite (not append) X-Forwarded-For so the server
-        # never sees a client-supplied header.
-        header_up X-Real-IP         {remote_host}
-        header_up X-Forwarded-For   {remote_host}
-        header_up X-Forwarded-Proto {scheme}
+            # Overwrite (not append) X-Forwarded-For so the server
+            # never sees a client-supplied header.
+            header_up X-Real-IP         {remote_host}
+            header_up X-Forwarded-For   {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
     }
 
     # JSON access log to stdout (Caddy's default). Operators

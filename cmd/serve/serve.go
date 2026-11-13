@@ -28,9 +28,10 @@ import (
 // so unit tests can drive it without going through cobra.
 func NewCmd() *cobra.Command {
 	var (
-		flagHost string
-		flagPort int
-		flagDB   string
+		flagHost      string
+		flagPort      int
+		flagDB        string
+		flagFedDomain string
 	)
 	cmd := &cobra.Command{
 		Use:   "serve",
@@ -39,11 +40,17 @@ func NewCmd() *cobra.Command {
 HTTP control plane on the configured host:port.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load([]string{
+			args := []string{
 				"--host", flagHost,
 				"--port", fmt.Sprintf("%d", flagPort),
 				"--db", flagDB,
-			})
+			}
+			// Passed only when given, so CONCLAVE_FEDERATION_DOMAIN
+			// still applies without the flag.
+			if cmd.Flags().Changed("federation-domain") {
+				args = append(args, "--federation-domain", flagFedDomain)
+			}
+			cfg, err := config.Load(args)
 			if err != nil {
 				return fmt.Errorf("config: %w", err)
 			}
@@ -53,6 +60,7 @@ HTTP control plane on the configured host:port.`,
 	cmd.Flags().StringVar(&flagHost, "host", "127.0.0.1", "bind host (CONCLAVE_HOST)")
 	cmd.Flags().IntVar(&flagPort, "port", 7432, "bind port (CONCLAVE_PORT)")
 	cmd.Flags().StringVar(&flagDB, "db", "./.conclave-mcp/data.db", "SQLite file path (CONCLAVE_DB_PATH)")
+	cmd.Flags().StringVar(&flagFedDomain, "federation-domain", "", "federation domain; empty turns federation off (CONCLAVE_FEDERATION_DOMAIN)")
 	return cmd
 }
 
@@ -77,6 +85,7 @@ func Execute(ctx context.Context, cfg *config.Config, stderr interface {
 		"max_concurrent_verify", cfg.MaxConcurrentVerify,
 		"rate_limit_per_min", cfg.RateLimitPerMin,
 		"audit_retention", cfg.AuditRetention.String(),
+		"federation_domain", cfg.FederationDomain,
 	)
 
 	// Use a fresh context for the init phase (storage.Open +
@@ -121,6 +130,12 @@ func Execute(ctx context.Context, cfg *config.Config, stderr interface {
 		ReadHeader:  5 * 1e9,   // 5s
 		IdleTimeout: 120 * 1e9, // 120s
 		Logger:      bootLog,
+
+		FederationDomain:       cfg.FederationDomain,
+		FederationHost:         cfg.FederationHost,
+		FederationPort:         cfg.FederationPort,
+		FederationMode:         cfg.FederationMode,
+		FederationInsecureHTTP: cfg.FederationInsecureHTTP,
 	}, server.Deps{
 		DB:                  db,
 		MaxMessageBytes:     cfg.MaxMessageBytes,

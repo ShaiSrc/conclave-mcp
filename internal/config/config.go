@@ -9,9 +9,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
+
+	"github.com/hermes/conclave-mcp/internal/federation"
 )
 
 // Config is the validated runtime configuration for a single
@@ -34,6 +38,19 @@ type Config struct {
 
 	// Logging
 	LogLevel string // debug|info|warn|error, default info
+
+	// Federation (docs/superpowers/specs/2026-11-13-federation-foundation-design.md).
+	// An empty FederationDomain turns federation off and the other
+	// fields are then ignored.
+	FederationDomain       string // canonical form (federation.NormalizeDomain)
+	FederationHost         string // federation listener host, default 127.0.0.1
+	FederationPort         int    // federation listener port, default 7433
+	FederationMode         string // allowlist|open, default allowlist
+	FederationInsecureHTTP bool   // contact peers over http://, for tests and local networks
+
+	// Raw environment values, converted by applyFederationEnv once the
+	// domain is known to be set.
+	fedPortEnv, fedInsecureEnv string
 }
 
 // Load builds a Config from defaults, then overlays environment
@@ -47,6 +64,9 @@ func Load(args []string) (*Config, error) {
 	}
 
 	if err := applyFlags(c, args); err != nil {
+		return nil, err
+	}
+	if err := c.applyFederationEnv(); err != nil {
 		return nil, err
 	}
 
@@ -76,6 +96,9 @@ func defaults() *Config {
 		ListLimitMessages:   50,
 		ListLimitAudit:      100,
 		LogLevel:            "info",
+		FederationHost:      "127.0.0.1",
+		FederationPort:      7433,
+		FederationMode:      "allowlist",
 	}
 }
 
@@ -133,6 +156,45 @@ func applyEnv(c *Config) error {
 	if v, ok := lookup("CONCLAVE_LOG_LEVEL"); ok {
 		c.LogLevel = v
 	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_DOMAIN"); ok {
+		c.FederationDomain = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_HOST"); ok {
+		c.FederationHost = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_PORT"); ok {
+		c.fedPortEnv = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_MODE"); ok {
+		c.FederationMode = v
+	}
+	if v, ok := lookup("CONCLAVE_FEDERATION_INSECURE_HTTP"); ok {
+		c.fedInsecureEnv = v
+	}
+	return nil
+}
+
+// applyFederationEnv parses the federation port and insecure-HTTP
+// values from the environment, only when federation is on: with an
+// empty domain they are ignored, bad or not.
+func (c *Config) applyFederationEnv() error {
+	if c.FederationDomain == "" {
+		return nil
+	}
+	if c.fedPortEnv != "" {
+		n, err := strconv.Atoi(c.fedPortEnv)
+		if err != nil {
+			return fmt.Errorf("CONCLAVE_FEDERATION_PORT: %w", err)
+		}
+		c.FederationPort = n
+	}
+	if c.fedInsecureEnv != "" {
+		b, err := strconv.ParseBool(c.fedInsecureEnv)
+		if err != nil {
+			return fmt.Errorf("CONCLAVE_FEDERATION_INSECURE_HTTP: %w", err)
+		}
+		c.FederationInsecureHTTP = b
+	}
 	return nil
 }
 
@@ -144,6 +206,7 @@ func applyFlags(c *Config, args []string) error {
 	host := fs.String("host", c.Host, "bind host (CONCLAVE_HOST)")
 	port := fs.Int("port", c.Port, "bind port (CONCLAVE_PORT)")
 	dbPath := fs.String("db", c.DBPath, "SQLite file path (CONCLAVE_DB_PATH)")
+	fedDomain := fs.String("federation-domain", c.FederationDomain, "federation domain; empty turns federation off (CONCLAVE_FEDERATION_DOMAIN)")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -151,6 +214,7 @@ func applyFlags(c *Config, args []string) error {
 	c.Host = *host
 	c.Port = *port
 	c.DBPath = *dbPath
+	c.FederationDomain = *fedDomain
 	return nil
 }
 
@@ -161,6 +225,11 @@ var (
 	ErrInvalidRateLimit       = errors.New("rate limit per min must be > 0")
 	ErrRetentionTooShort      = errors.New("audit retention must be >= 720h (30d)")
 	ErrInvalidLogLevel        = errors.New("log level must be one of: debug, info, warn, error")
+
+	ErrInvalidFederationDomain = errors.New("federation domain must be lowercase letters, digits, dots and hyphens with an optional :port, at most 253 characters")
+	ErrInvalidFederationMode   = errors.New("federation mode must be one of: allowlist, open")
+	ErrInvalidFederationPort   = errors.New("federation port must be 1..65535")
+	ErrFederationListener      = errors.New("federation listener must differ from the main listener")
 )
 
 // parseRetention accepts Go duration strings plus shorthand d (days)
@@ -200,5 +269,62 @@ func (c *Config) validate() error {
 	default:
 		return fmt.Errorf("%q: %w", c.LogLevel, ErrInvalidLogLevel)
 	}
+	return c.validateFederation()
+}
+
+// validateFederation checks the federation settings when a domain is
+// set, and stores the domain in canonical form.
+func (c *Config) validateFederation() error {
+	if c.FederationDomain == "" {
+		return nil
+	}
+	d, err := federation.NormalizeDomain(c.FederationDomain)
+	if err != nil {
+		return fmt.Errorf("%q: %w", c.FederationDomain, ErrInvalidFederationDomain)
+	}
+	c.FederationDomain = d
+	switch c.FederationMode {
+	case "allowlist", "open":
+	default:
+		return fmt.Errorf("%q: %w", c.FederationMode, ErrInvalidFederationMode)
+	}
+	if c.FederationPort < 1 || c.FederationPort > 65535 {
+		return fmt.Errorf("federation port %d: %w", c.FederationPort, ErrInvalidFederationPort)
+	}
+	if sameListener(c.Host, c.Port, c.FederationHost, c.FederationPort) {
+		return fmt.Errorf("%s:%d: %w", c.Host, c.Port, ErrFederationListener)
+	}
 	return nil
+}
+
+// sameListener reports whether two listener addresses would collide:
+// the ports are equal and the hosts are equal once normalized (IPs
+// parsed, so spellings and brackets do not matter; names compared
+// case-insensitively) or either host is unspecified.
+func sameListener(h1 string, p1 int, h2 string, p2 int) bool {
+	if p1 != p2 {
+		return false
+	}
+	a, ok1 := parseHost(h1)
+	b, ok2 := parseHost(h2)
+	if ok1 && ok2 {
+		return a == b || a.IsUnspecified() || b.IsUnspecified()
+	}
+	if ok1 != ok2 {
+		// A name and an IP: the name may resolve to it, but only an
+		// unspecified address is certain to cover it.
+		return (ok1 && a.IsUnspecified()) || (ok2 && b.IsUnspecified())
+	}
+	return strings.EqualFold(h1, h2)
+}
+
+func parseHost(h string) (netip.Addr, bool) {
+	if h == "" { // net.Listen treats an empty host as all interfaces
+		return netip.IPv6Unspecified(), true
+	}
+	a, err := netip.ParseAddr(strings.Trim(h, "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.Unmap().WithZone(""), true
 }

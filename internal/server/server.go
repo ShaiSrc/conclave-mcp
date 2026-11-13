@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/claims"
 	"github.com/hermes/conclave-mcp/internal/events"
+	"github.com/hermes/conclave-mcp/internal/federation"
 	"github.com/hermes/conclave-mcp/internal/keys"
 	"github.com/hermes/conclave-mcp/internal/mcp"
 	"github.com/hermes/conclave-mcp/internal/messages"
@@ -41,6 +43,8 @@ type Server struct {
 	logger *slog.Logger
 	router chi.Router
 	http   *http.Server
+	fed    *http.Server // the federation listener; nil with federation off
+	fedSvc *federation.Service
 
 	mu      sync.Mutex
 	started bool
@@ -54,6 +58,14 @@ type Config struct {
 	ReadHeader  time.Duration // default 5s
 	IdleTimeout time.Duration // default 120s
 	Logger      *slog.Logger
+
+	// Federation. An empty FederationDomain turns it off: no second
+	// listener, no key.
+	FederationDomain       string
+	FederationHost         string
+	FederationPort         int
+	FederationMode         string
+	FederationInsecureHTTP bool
 }
 
 // New builds a Server with all middleware wired and routes mounted.
@@ -79,14 +91,50 @@ func New(cfg Config, deps Deps) (*Server, error) {
 			return nil, fmt.Errorf("web ui: %w", err)
 		}
 	}
-	s.router = s.buildRouter(deps, uiSvc)
+	var fedSvc *federation.Service
+	if cfg.FederationDomain != "" {
+		var err error
+		if fedSvc, err = federation.New(deps.DB, federation.Options{
+			Domain:       cfg.FederationDomain,
+			Mode:         cfg.FederationMode,
+			InsecureHTTP: cfg.FederationInsecureHTTP,
+			Logger:       cfg.Logger,
+		}); err != nil {
+			return nil, fmt.Errorf("federation: %w", err)
+		}
+		s.fedSvc = fedSvc
+	}
+	s.router = s.buildRouter(deps, uiSvc, fedSvc)
 	s.http = &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Addr:              net.JoinHostPort(strings.Trim(cfg.Host, "[]"), strconv.Itoa(cfg.Port)),
 		Handler:           s.router,
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
 		// No WriteTimeout: long-running MCP streams may block on writes.
 		// No ErrorLog: rare net/http errors fall through to log.Default.
+	}
+
+	// The federation listener serves only the federation routes, so
+	// the agent API and the web UI are never reachable through it.
+	if fedSvc != nil {
+		fr := chi.NewRouter()
+		fr.Use(RequestIDMiddleware())
+		fr.Use(RecoveryMiddleware(s.logger))
+		fedSvc.PublicRoutes(fr)
+		fr.NotFound(s.notFound)
+		fr.MethodNotAllowed(s.methodNotAllowed)
+		// Strangers reach this listener: whole-request read and write
+		// timeouts (a document fetch of up to 5 s comes before the body
+		// is read) and a small header cap.
+		s.fed = &http.Server{
+			Addr:              net.JoinHostPort(strings.Trim(cfg.FederationHost, "[]"), strconv.Itoa(cfg.FederationPort)),
+			Handler:           fr,
+			ReadHeaderTimeout: cfg.ReadHeader,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      15 * time.Second,
+			MaxHeaderBytes:    16 << 10,
+			IdleTimeout:       cfg.IdleTimeout,
+		}
 	}
 	return s, nil
 }
@@ -130,7 +178,7 @@ type DBHealthChecker interface {
 	PingContext(ctx context.Context) error
 }
 
-func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
+func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Service) chi.Router {
 	r := chi.NewRouter()
 	r.Use(RequestIDMiddleware())
 	r.Use(RecoveryMiddleware(s.logger))
@@ -193,6 +241,11 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service) chi.Router {
 		messagesSvc.Routes(r)
 		auditSvc.Routes(r)
 		claimsSvc.Routes(r)
+		if fedSvc != nil {
+			fedSvc.AdminRoutes(r)
+		} else {
+			federation.DisabledRoutes(r)
+		}
 		if uiSvc != nil {
 			uiSvc.V1Routes(r)
 		}
@@ -259,38 +312,70 @@ func (s *Server) Handler() http.Handler {
 	return s.router
 }
 
-// Start binds the listener and serves until ctx is cancelled, then
-// performs a graceful shutdown with a 10s drain.
+// Start binds the listeners (the main one and, with federation on,
+// the federation one) and serves until ctx is cancelled or a listener
+// fails, then shuts both down with a 10s drain.
 func (s *Server) Start(ctx context.Context) error {
-	ln, err := net.Listen("tcp", s.http.Addr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", s.http.Addr, err)
+	servers := []*http.Server{s.http}
+	if s.fed != nil {
+		servers = append(servers, s.fed)
+	}
+	lns := make([]net.Listener, 0, len(servers))
+	for _, hs := range servers {
+		ln, err := net.Listen("tcp", hs.Addr)
+		if err != nil {
+			for _, l := range lns {
+				_ = l.Close()
+			}
+			return fmt.Errorf("listen %s: %w", hs.Addr, err)
+		}
+		lns = append(lns, ln)
 	}
 	s.mu.Lock()
 	s.started = true
 	s.mu.Unlock()
 
+	// The federation nonce pruning stops when Start returns.
+	ctx, stop := context.WithCancel(ctx)
+	defer stop()
+	if s.fedSvc != nil {
+		go s.fedSvc.Run(ctx)
+	}
+
 	s.logger.Info("http server listening", "addr", s.http.Addr)
+	if s.fed != nil {
+		s.logger.Info("federation listener listening", "addr", s.fed.Addr,
+			"domain", s.cfg.FederationDomain, "mode", s.cfg.FederationMode)
+		if s.cfg.FederationInsecureHTTP {
+			s.logger.Warn("federation insecure HTTP is on: peers are contacted over http://, without TLS")
+		}
+	}
 
-	errCh := make(chan error, 1)
-	go func() { errCh <- s.http.Serve(ln) }()
+	errCh := make(chan error, len(servers))
+	for i, hs := range servers {
+		go func() { errCh <- hs.Serve(lns[i]) }()
+	}
 
+	var serveErr error
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		s.logger.Info("http server shutting down")
-		if err := s.http.Shutdown(shutdownCtx); err != nil {
-			s.logger.Warn("graceful shutdown failed", "err", err)
-			return err
+	case serveErr = <-errCh:
+		if errors.Is(serveErr, http.ErrServerClosed) {
+			serveErr = nil
 		}
-		return nil
-	case err := <-errCh:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
-		}
-		return err
 	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.logger.Info("http server shutting down")
+	for _, hs := range servers {
+		if err := hs.Shutdown(shutdownCtx); err != nil {
+			s.logger.Warn("graceful shutdown failed", "addr", hs.Addr, "err", err)
+			if serveErr == nil {
+				serveErr = err
+			}
+		}
+	}
+	return serveErr
 }
 
 // notFound returns the SPEC-0003 §5 error envelope for unknown routes.
