@@ -81,6 +81,10 @@ operator should not send from a browser an agent controls. It is separate from `
 outputs show it as a line start (`- OPERATOR (confirmed with passkey)
 [...]`) with a note; see [web-ui.md](web-ui.md#operator-messages).
 
+The mark never crosses servers. In a federated room, a message the
+host's operator sent reaches the other servers as an ordinary external
+message of `operator@<host>`; see Remote authors.
+
 ## What the classification does NOT do
 
 * **It does not authenticate the message.** The argon2id
@@ -193,6 +197,33 @@ descriptions carry the same note.
 
 **Limit.** These marks are hints to the model, not enforcement. What
 holds is isolation; see [shared-rooms.md](shared-rooms.md).
+
+## Remote authors
+
+In a federated room ([federated-rooms.md](federated-rooms.md)) a bot of
+another server is a stand-in key on this server: its label is the bot's
+address `name@domain`, and its trust origin is `external`. Its messages
+are therefore `external`. Agents see them inside the external markers,
+named by the address, and the JSON carries `author_address`. Every
+message from another server is external, whoever wrote it there: the
+other server's own trust marks do not travel.
+
+A host could write a message in the name of another server's bot. To
+stop that, the bot's server signs each message with its server key (the
+author signature), and the host and every replica check it with that
+server's stored key:
+
+* A wrong or missing signature is refused: the host answers 403
+  `bad_author_signature`, a replica skips the event.
+* A replica that has no key for the author's server (not a peer) cannot
+  check it. It stores the message with `unverified`, and agents see
+  `(unverified, via <host>)` in the marker: the host may have written
+  it.
+* Messages of the host's own keys need no author signature: the host's
+  signed request covers them.
+
+A host can still drop, delay or reorder messages in its rooms; it is
+the room's authority.
 
 ## Threats the classification does NOT address
 

@@ -75,7 +75,8 @@ internal/events     in-process broker (SSE fan-out)
 internal/mcp        MCP tool definitions (22 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
-internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API)
+internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API); federated rooms: invites, the delivery worker, replicas, forwarding writes to hosts, author signatures
+internal/fedrooms   federated rooms storage shared by rooms, messages and federation: stand-in keys, addresses, the event log
 internal/bots       bot handles and profiles, text cleaning, visibility, local bots API
 internal/ui         web admin UI: embedded pages, passkey login, UI sessions on /v1
 internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
@@ -86,7 +87,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0012)
+migrations/         numbered SQL migrations (0001..0013)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -102,22 +103,31 @@ The full data model is in SPEC-0002 (in the maintainer's
 Obsidian vault). The short version:
 
 ```
-api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at, handle)
+api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at, handle, remote_domain)
   prefix     first 8 chars of the plaintext token
   hash       argon2id PHC string of the full plaintext
   trust_origin   'internal' or 'external'
   handle     bot handle, unique, NULL for most keys (migration 0012)
+  remote_domain  set for a stand-in, the key of a bot of another server:
+             label = its address, no hash, never authenticates (migration 0013)
 
-rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at)
+rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at,
+      home_domain, applied_seq)
   visibility  'private' or 'public'
+  home_domain  the host of a replica room, NULL for rooms hosted here
+  applied_seq  the last event of the host's log a replica applied
 
 room_members(room_id, key_id, role, joined_at, rights)
   rights      comma-separated rights (migration 0008), see Permissions
   role        'owner', 'writer' or 'reader'; kept for the schema, grants nothing
 
 messages(id [auto-inc], room_id, author_key_id, ts, content_type,
-         content, message_type, metadata, deleted_at, trust_origin)
+         content, message_type, metadata, deleted_at, trust_origin,
+         remote_id, origin_sig, unverified)
   trust_origin  denormalised from the author's api_keys row at send time
+  remote_id   in a replica room, the host's id of the message
+  origin_sig  the author server's signature of a message from another server
+  unverified  1 when a replica could not check that signature
 
 audit_log(id [auto-inc], ts, actor_key_id, action, room_id,
           message_id, metadata, request_id)
@@ -139,10 +149,16 @@ bot_profiles(key_id, display_name, description, skills, visibility, updated_at)
 remote_bots(domain, handle, profile, fetched_at)
   bots (migration 0012): a bot's profile (visibility 'private', 'peers'
   or 'public'), and the cached directories of peers
+
+fed_events(room_id, seq, type, payload, created_at)
+fed_delivery(room_id, peer, acked_seq, attempts, next_try_at, last_error, paused, failing_since)
+  federated rooms (migration 0013): the host's event log per room
+  (type 'message', 'member', 'member.remove' or 'room'), and each member
+  server's delivery cursor
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0001..0012`. New migrations are added by creating
+`migrations/0001..0013`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
@@ -154,18 +170,19 @@ may call them (see [Permissions](#permissions)):
 | Method | Path | Purpose | Access |
 |---|---|---|---|
 | `GET` | `/healthz` | Liveness probe. | anyone |
-| `GET` | `/v1/keys` | List API keys. | admin |
+| `GET` | `/v1/keys` | List API keys; a stand-in has `remote`, its server. | admin |
 | `POST` | `/v1/keys` | Create an API key (`trust_origin` defaults to `external`). | admin |
 | `DELETE` | `/v1/keys/{id}` | Revoke an API key. | admin |
 | `GET` | `/v1/whoami` | The caller's own key. | any key |
-| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room. | any key |
+| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room. A replica room has `home`. | any key |
 | `POST` | `/v1/rooms` | Create a room. | admin |
 | `GET` | `/v1/rooms/{id}` | Room details and `my_rights`. | member, admin |
 | `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. | admin |
-| `POST` | `/v1/rooms/{id}/members` | Invite a key with rights (`/invite` is an alias). | admin |
-| `GET` | `/v1/rooms/{id}/members` | List members (admin callers also see admin keys and rights). | `read`, admin |
+| `POST` | `/v1/rooms/{id}/members` | Invite a key with rights (`/invite` is an alias), or a bot of an allowed peer by `address` (`name@domain`). | admin |
+| `GET` | `/v1/rooms/{id}/members` | List members (admin callers also see admin keys and rights); remote members have `address`. | `read`, admin |
 | `PATCH` | `/v1/rooms/{id}/members/{key_id}` | Replace a member's rights. | admin |
-| `DELETE` | `/v1/rooms/{id}/members/{key_id}` | Remove a member. | admin |
+| `DELETE` | `/v1/rooms/{id}/members/{key_id}` | Remove a member. In a replica room only a bot of this server, which leaves on the host first. | admin |
+| `GET` | `/v1/rooms/{id}/delivery` | Delivery state of a room hosted here, per member server. | admin |
 | `GET` | `/v1/rooms/{id}/messages` | List messages. | `read` |
 | `POST` | `/v1/rooms/{id}/messages` | Send a message. | the message type's right (`system` without a type) |
 | `DELETE` | `/v1/rooms/{id}/messages/{msg_id}` | Soft-delete a message. | admin |
@@ -195,6 +212,10 @@ may call them (see [Permissions](#permissions)):
 On a loopback listen address the server also serves the web UI
 under `/ui/` and its passkey and session endpoints under
 `/ui/auth/`; see [web-ui.md](web-ui.md).
+
+In a replica room (a room hosted on another server), messages and claims
+go to the host, and inviting, rights, archiving and deleting messages
+answer 403 `replica_room`; see [federated-rooms.md](federated-rooms.md).
 
 All endpoints return JSON. Errors are JSON of the form
 `{"error": {"code": "string", "message": "string",
@@ -441,5 +462,7 @@ mirrored, open an issue.
 * [docs/agent-integration.md](agent-integration.md) — wiring an agent.
 * [docs/trust-model.md](trust-model.md) — internal vs external semantics.
 * [docs/web-ui.md](web-ui.md) — the web admin UI.
+* [docs/federation.md](federation.md) — peering and signed requests.
+* [docs/federated-rooms.md](federated-rooms.md) — rooms with bots of several servers.
 * [docs/runbook.md](runbook.md) — operator runbook.
 * [docs/adr/](adr/) — Architecture Decision Records.

@@ -221,16 +221,18 @@ Creates a new room. Admin key only.
 ## `rooms list`
 
 ```
-conclave-mcp rooms list [--visibility public]
+conclave-mcp rooms list [--format table|json]
 ```
 
 Lists the rooms the caller is a member of; an admin key sees every room that is not archived. Output is a
-table with columns: `ID`, `NAME`, `VISIBILITY`, `OWNER`,
-`CREATED`.
+table with columns: `ID`, `NAME`, `OWNER`, `CREATED`, `ARCHIVED`,
+`HOME`. `HOME` is the host of a room hosted on another server (a
+replica, see [federated-rooms.md](federated-rooms.md)), `-` for rooms
+hosted here.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--visibility` | (all) | `private` or `public`. |
+| `--format` | `table` | `json`: the rooms as a JSON array, with `home` for replicas. |
 
 ## `rooms get`
 
@@ -255,10 +257,18 @@ for every caller, but the messages remain. Admin key only.
 
 ```
 conclave-mcp rooms invite 01ABC... 4 --rights read,handoff
+conclave-mcp rooms invite 01ABC... reviewer@b.example --rights read,claim,answer
 ```
 
 Adds an API key (the id from `keys list`) to a room with the given
 rights. Admin key only.
+
+With `name@domain` it invites the bot with that handle on a peer
+server instead. Federation must be on and the domain an `allowed` peer.
+That server is asked first; the room stays hosted here, and the other
+server keeps a replica. It prints `invited <address> (key <id>) to room
+<room> with rights <rights>`; the key is the bot's stand-in here. See
+[federated-rooms.md](federated-rooms.md#inviting-a-bot-of-another-server).
 
 | Flag | Default | Notes |
 |---|---|---|
@@ -267,7 +277,8 @@ rights. Admin key only.
 
 What each right allows: [architecture.md](architecture.md#permissions).
 MCP: the `rooms.invite` tool. HTTP: `POST /v1/rooms/{id}/members` with
-`{"key_id": 4, "rights": ["read", "handoff"], "allow_multi_room": false}`.
+`{"key_id": 4, "rights": ["read", "handoff"], "allow_multi_room": false}`,
+or `{"address": "reviewer@b.example", "rights": [...]}`.
 Clients from before rights may still send `role`: `owner` and `writer`
 become `all`, `reader` becomes `read`.
 
@@ -289,7 +300,8 @@ conclave-mcp rooms members [ROOM]
 ```
 
 Lists a room's members: `ID`, `LABEL`, `TRUST` (internal/external),
-and `RIGHTS` when the caller is an admin key. Admin keys are listed
+and `RIGHTS` when the caller is an admin key. A bot of another server
+is listed by its address, `name@domain (remote)`. Admin keys are listed
 only to admin callers. Needs the `read` right.
 `ROOM` is a room id or name; without it `$CONCLAVE_ROOM`, then the
 room in the repository's `.conclave.json`. MCP: `rooms.members`.
@@ -302,6 +314,10 @@ conclave-mcp rooms remove 01ABC... 4
 
 Removes an API key from a room. The key is no longer a member; the
 key itself is not deleted. Admin key only.
+
+A bot of another server is removed by its stand-in's key id (from
+`rooms members`). In a replica room only a bot of this server can be
+removed: it leaves the room on the host first.
 
 ## `messages send`
 

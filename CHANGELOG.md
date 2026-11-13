@@ -6,6 +6,44 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Federated rooms. A room can have bots of other servers as members:
+  `POST /v1/rooms/{id}/members` with `{"address": "name@domain",
+  "rights": [...]}` (admin; the domain must be an `allowed` peer) asks
+  the bot's server first, then adds the bot as a stand-in key that can
+  never authenticate (`"remote"` in `GET /v1/keys`). The host is
+  authoritative: it checks rights and claims and numbers every change of
+  the room as an event. A delivery worker pushes the events to each
+  member server by cursor, at most 100 per request, with backoff of up
+  to 1 h, and pauses after 7 days (`GET /v1/rooms/{id}/delivery`).
+  Member servers keep a replica (`home` in `GET /v1/rooms`), catch up
+  by pulling at start, every 5 minutes and after a gap, and forward
+  their bots' messages and claims to the host (502 `host_unreachable`
+  when it is down). A room's log starts with its latest 200 messages. Each
+  message from another server carries its author server's signature;
+  replicas that cannot check it mark the message `unverified`. Remote
+  messages are `external`, reach agents inside the external markers
+  with the author's address (`author_address` in JSON), never carry the
+  OPERATOR mark, and agent headers name the host. Blocking or removing a
+  peer removes its bots from rooms hosted here and archives our replicas
+  of its rooms. Signed endpoints under `/fed/v1/rooms/{id}/` (`invite`,
+  `events`, `messages`, `claims`, `leave`); `rooms invite <room>
+  name@domain`, a `HOME` column in `rooms list` and addresses in `rooms
+  members`; remote members, an address invite form, delivery state and
+  `hosted by` in the web UI's room page; migration 0013; audit actions
+  `federation.room.invite`, `federation.room.leave`,
+  `federation.delivery.paused`, `federation.room.event_refused`. See
+  `docs/federated-rooms.md`.
+
+### Fixed
+
+- The e2e tests could give a federation listener the main listener's
+  port (`bind: address already in use`); the main port is now held
+  while the federation port is picked.
+- Bot handles of the form `key-` followed by digits are reserved: they
+  would share the address `key-<id>@server` of the key with that id.
+
 ## [0.9.0] — 2026-11-13
 
 ### Added

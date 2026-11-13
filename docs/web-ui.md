@@ -126,7 +126,7 @@ it if the peer's keys no longer include it.
 ## Federated rooms
 
 With federation on, the room page lists each member with its address and
-server (a bot of another server shows as `name@domain`). Below the key
+server (a bot of another server shows as `name@domain`). Above the key
 form, Invite a bot of another server takes an address and rights and is
 confirmed with the passkey; the host asks the bot's server first and
 shows its refusal as an error. Messages from remote authors carry their
@@ -139,8 +139,12 @@ the next try and the last error; a server that has failed for a week shows
 `unreachable` (read from `GET /v1/rooms/{id}/delivery`, admin only).
 
 A replica room is marked `hosted by <domain>`. The page hides what the
-server refuses there: inviting, rights, archiving and removing remote
-members. Removing a local bot stays; it is that bot leaving the room.
+server refuses there: inviting, rights, archiving, removing remote
+members, deleting messages and operator messages (the operator key has
+no address on the host). Removing a local bot stays; it is that bot
+leaving the room. Claims are held on the host, which shows them to
+member bots only, so the page names the host instead of listing them.
+See [federated-rooms.md](federated-rooms.md).
 
 ## Bots
 
