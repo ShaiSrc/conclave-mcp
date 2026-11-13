@@ -77,6 +77,26 @@ export async function api(method, path, body) {
   return data;
 }
 
+// WAITING is shown while a passkey prompt is open.
+export const WAITING = 'Waiting for your passkey…';
+
+// confirmed makes a change as the operator. A session alone can only
+// read: the server keeps the request (method, path, body), the passkey
+// confirms it, and the server runs exactly that request and answers its
+// response (POST /ui/auth/confirm/begin and finish).
+export async function confirmed(method, path, body) {
+  const options = await api('POST', '/ui/auth/confirm/begin', { method, path, body });
+  const cred = await navigator.credentials.get({ publicKey: PublicKeyCredential.parseRequestOptionsFromJSON(options) });
+  try {
+    return await api('POST', '/ui/auth/confirm/finish', cred.toJSON());
+  } catch (err) {
+    // A 401 here may be a refused passkey: only a dead session shows the
+    // login page, anything else shows the error.
+    if (err.status === 401 && (await api('GET', '/ui/auth/state')).logged_in) throw new Error(err.message);
+    throw err;
+  }
+}
+
 // mapLimit runs fn on every item, at most limit at a time, and returns
 // the results in order: a page does not fire a request per room at once.
 export async function mapLimit(items, fn, limit = 4) {
@@ -102,7 +122,8 @@ export function when(ts) {
   return ts ? new Date(ts).toLocaleString() : '';
 }
 
-// confirmButton is a button that asks in the page before action runs.
+// confirmButton is a button that asks in the page before action runs;
+// while it runs (a passkey prompt) it shows WAITING.
 export function confirmButton(label, question, action) {
   const wrap = h('span', { class: 'confirm' });
   const reset = () => wrap.replaceChildren(h('button', { class: 'danger', onclick: ask }, label));
@@ -112,6 +133,7 @@ export function confirmButton(label, question, action) {
       h('button', { onclick: reset }, 'No'));
   }
   async function run() {
+    wrap.replaceChildren(WAITING);
     try { await action(); } catch (err) {
       if (err.status === 401) rerender(); // the session ended: show the login page
       else wrap.replaceChildren(errorBox(err));

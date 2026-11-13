@@ -1,5 +1,6 @@
-// Keys (create, create an agent, revoke) and the audit log.
-import { h, api, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, showSecret } from './lib.js';
+// Keys (create, create an agent, revoke) and the audit log. Every
+// change is confirmed with a passkey.
+import { h, api, confirmed, WAITING, mapLimit, errorBox, confirmButton, table, when, rerender, rightsPicker, showSecret } from './lib.js';
 
 function trustSelect() {
   return h('select', {},
@@ -7,12 +8,17 @@ function trustSelect() {
     h('option', { value: 'internal' }, 'internal (your own agents)'));
 }
 
-// submit makes a form handler that shows errors in msg.
+// submit makes a form handler that shows WAITING, then errors, in msg.
 function submit(msg, fn) {
   return async e => {
     e.preventDefault();
-    msg.replaceChildren();
-    try { await fn(); } catch (err) { msg.replaceChildren(errorBox(err)); }
+    msg.replaceChildren(WAITING);
+    try {
+      await fn();
+    } catch (err) {
+      if (err.status === 401) rerender(); // the session ended: show the login page
+      else msg.replaceChildren(errorBox(err));
+    }
   };
 }
 
@@ -39,7 +45,7 @@ export async function keysPage(view) {
     h('td', {}, when(k.created_at)), h('td', {}, when(k.revoked_at)),
     h('td', {}, k.revoked_at || k.label === 'operator' ? '' // the UI itself acts as operator
       : confirmButton('Revoke', `Revoke ${k.label}? Whoever uses it loses access at once.`, async () => {
-        await api('DELETE', `/v1/keys/${k.id}`);
+        await confirmed('DELETE', `/v1/keys/${k.id}`);
         rerender();
       }))));
 
@@ -48,7 +54,7 @@ export async function keysPage(view) {
   const keyMsg = h('div');
   const keyForm = h('form', {
     onsubmit: submit(keyMsg, async () => {
-      const created = await api('POST', '/v1/keys', { label: label.value, trust_origin: trust.value });
+      const created = await confirmed('POST', '/v1/keys', { label: label.value, trust_origin: trust.value });
       showSecret(view, `Key ${created.label} created`, created.key);
     }),
   }, h('label', {}, 'Label ', label), h('label', {}, 'Trust ', trust), h('button', {}, 'Create key'));
@@ -62,18 +68,10 @@ export async function keysPage(view) {
     onsubmit: submit(agentMsg, async () => {
       // A key with no rights can neither read nor send in its room.
       if (!rights.value().length) throw new Error('Pick at least one right for the agent.');
-      const created = await api('POST', '/v1/keys', { label: agent.value, trust_origin: agentTrust.value });
-      try {
-        await api('POST', `/v1/rooms/${encodeURIComponent(room.value)}/invite`, { key_id: created.id, rights: rights.value() });
-      } catch (err) {
-        try {
-          await api('DELETE', `/v1/keys/${created.id}`); // no key that can reach nothing
-        } catch (delErr) {
-          if (delErr.status === 401) { rerender(); return; } // the session ended: show the login page
-          throw new Error(`Invite failed (${err.message}); revoking key ${created.id} also failed (${delErr.message}) — revoke it on the Keys page.`);
-        }
-        throw new Error(`${err.message} The label stays taken by the revoked key, so a retry needs a different label.`);
-      }
+      // One confirmation: the server creates the key and invites it, and
+      // revokes the key again if the invite fails.
+      const created = await confirmed('POST', '/ui/agents',
+        { label: agent.value, trust_origin: agentTrust.value, room_id: room.value, rights: rights.value() });
       showSecret(view, `Agent ${created.label} created`, `export CONCLAVE_API_KEY=${created.key}`);
     }),
   }, h('label', {}, 'Label ', agent), h('label', {}, 'Trust ', agentTrust), h('label', {}, 'Room ', room),
