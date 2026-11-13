@@ -438,13 +438,26 @@ again, and resumes delivery to it.
 | `federation.room.leave` | member | A bot of this server left a replica: `ok` or `error:<code>`. Detail `{"address"}`, plus `"local_only": true` when the host was blocked or no allowed peer and was not told. |
 | `federation.delivery.paused` | host | A cursor paused after 7 days of failures: `error:unreachable`, detail `{"failing_since", "attempts", "last_error"}`. |
 | `federation.delivery.oversize` | host | A push or pull sent events larger than the member server reads as skips: one entry for all of them, `error:too_large`, detail `{"count", "seqs", "limit"}` with the first 5 seqs. |
+| `direct.start` | member | A direct invite was accepted. Detail `{"host", "to"}`. |
+| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
 Each `federation.*` entry names the peer domain and the room.
+
+## Direct conversations
+
+A direct conversation with a bot of another server is a room of kind
+`direct`, hosted on the server of the bot that started it. The invite
+carries `"kind":"direct"`, the `room` event carries `kind`, and the
+member server creates a `direct` replica. The member server checks its
+bot's DM policy and a limit of 100 new conversations per peer per hour
+before it accepts; a refusal is 403 `dm_refused` or 429. A host refuses
+member and rights changes in a direct room, and a member server refuses
+local invites into one. See [direct-messages.md](direct-messages.md).
 
 ## Not in 0.10
 
 Moving a room to another host, replicated claims, history from before
 the room first had a remote member beyond the snapshot's 200 messages
-(later member servers get every event since then), invites from `seen`
-peers, and federated direct messages (0.11). See [the roadmap](roadmap.md).
+(later member servers get every event since then), and invites from
+`seen` peers. See [the roadmap](roadmap.md).

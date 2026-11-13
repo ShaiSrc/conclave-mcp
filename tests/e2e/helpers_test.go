@@ -249,7 +249,8 @@ type subprocessEnv struct {
 	dataDir    string
 	binaryPath string
 	stopOnce   sync.Once
-	stderr     *bytes.Buffer
+	stderr     *syncBuffer
+	exited     chan struct{} // closed when the process has exited
 }
 
 // startSubprocess builds, then spawns the binary on a random port.
@@ -274,7 +275,26 @@ func startSubprocess(t *testing.T) *subprocessEnv {
 		t.Fatalf("go build: %v", err)
 	}
 
-	// Pick a port. Same race-prone pattern as the in-process env.
+	// Pick a port by listening and closing, which races with other
+	// processes taking it. If the server exits on a bind error, pick
+	// another port; up to 3 tries.
+	for attempt := 1; ; attempt++ {
+		env, bindErr := trySubprocess(t, binPath)
+		if env != nil {
+			return env
+		}
+		if !bindErr || attempt == 3 {
+			t.Fatalf("subprocess did not become healthy (attempt %d)", attempt)
+		}
+	}
+}
+
+// trySubprocess starts the binary on a freshly picked port. It returns
+// the env once /healthz answers, or nil and whether the process died on
+// "address already in use" (the caller may retry). Other failures end
+// the test.
+func trySubprocess(t *testing.T, binPath string) (*subprocessEnv, bool) {
+	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -296,18 +316,17 @@ func startSubprocess(t *testing.T) *subprocessEnv {
 	// vars. Strip the inherited env so a stray CONCLAVE_PORT
 	// from the test runner cannot override our --port flag.
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH")}
-	// Capture both stdout and stderr for diagnostics. The serve
-	// stub logs to stderr; a missing port-bind error would also
-	// show up there. Stderr alone was empty in early runs and
-	// the test failed with "did not become healthy", which is
-	// what we are trying to root-cause.
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	cmd.Stdout = &stderr
+	// Capture both stdout and stderr for diagnostics.
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
+	cmd.Stdout = stderr
 	if err := cmd.Start(); err != nil {
 		cancel()
 		t.Fatalf("start binary: %v", err)
 	}
+	exited := make(chan struct{})
+	var waitErr error
+	go func() { waitErr = cmd.Wait(); close(exited) }()
 
 	env := &subprocessEnv{
 		t:          t,
@@ -316,26 +335,55 @@ func startSubprocess(t *testing.T) *subprocessEnv {
 		cancel:     cancel,
 		dataDir:    dataDir,
 		binaryPath: binPath,
+		exited:     exited,
+		stderr:     stderr,
 	}
-
-	env.stderr = &stderr
-	t.Cleanup(env.stop)
 
 	// Wait for ready.
 	client := &http.Client{Timeout: 2 * time.Second}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case <-exited:
+			cancel()
+			if strings.Contains(stderr.String(), "address already in use") {
+				return nil, true
+			}
+			t.Fatalf("subprocess exited (%v); stderr: %s", waitErr, stderr.String())
+		default:
+		}
 		resp, err := client.Get("http://" + addr + "/healthz")
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
-				return env
+				t.Cleanup(env.stop)
+				return env, false
 			}
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+	cancel()
 	t.Fatalf("subprocess did not become healthy; stderr: %s", stderr.String())
-	return env
+	return nil, false
+}
+
+// syncBuffer is a bytes.Buffer the child's output and the test can use
+// at the same time.
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 // stop shuts the server down and waits for it; safe to call twice (the
@@ -347,17 +395,8 @@ func (s *subprocessEnv) stop() {
 		// call cmd.Process.Kill() because that masks shutdown
 		// bugs we want to see.
 		s.cancel()
-		doneCh := make(chan struct{})
-		var waitErr error
-		go func() {
-			waitErr = s.cmd.Wait()
-			close(doneCh)
-		}()
 		select {
-		case <-doneCh:
-			if waitErr != nil && !strings.Contains(waitErr.Error(), "exit status") && !strings.Contains(waitErr.Error(), "signal:") {
-				s.t.Logf("subprocess wait error: %v", waitErr)
-			}
+		case <-s.exited:
 		case <-time.After(3 * time.Second):
 			s.t.Logf("subprocess did not exit within 3s; captured stderr: %s", s.stderr.String())
 			_ = s.cmd.Process.Kill()
