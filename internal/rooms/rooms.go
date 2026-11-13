@@ -4,7 +4,8 @@
 // internal/rights):
 //
 //	POST   /v1/rooms                       -- create (admin)
-//	GET    /v1/rooms                       -- the caller's rooms (admin: every room)
+//	GET    /v1/rooms                       -- the caller's rooms (admin: every room);
+//	                                          ?visibility= and ?kind= narrow them
 //	GET    /v1/rooms/{id}                  -- details + my_rights (members, admin; 404 otherwise)
 //	GET    /v1/rooms/{id}/members          -- members (read right, admin)
 //	POST   /v1/rooms/{id}/archive          -- soft-delete (admin)
@@ -14,6 +15,10 @@
 //	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (admin); in a
 //	                                          replica room only this server's
 //	                                          bot, which leaves on the host first
+//
+// A direct room (kind direct, internal/direct) is a conversation of two
+// bots: it refuses invites and rights changes with 403 direct_room, and
+// removing a member archives it.
 //
 // Mutations are audit-logged. With federation on, every change of a
 // room with remote members is written to its event log in the change's
@@ -108,6 +113,7 @@ type roomView struct {
 	// responses so clients never have to default.
 	Visibility string `json:"visibility"`
 	Home       string `json:"home,omitempty"` // the host of a replica room
+	Kind       string `json:"kind"`           // room or direct
 }
 
 type createRequest struct {
@@ -197,11 +203,13 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 		OwnerKeyID:  caller,
 		CreatedAt:   now,
 		Visibility:  visibility,
+		Kind:        "room",
 	})
 }
 
 // list returns the rooms the caller is a member of; an admin key gets
-// every room. Archived rooms are left out; ?visibility= narrows the set.
+// every room. Archived rooms are left out; ?visibility= and ?kind=
+// narrow the set.
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	caller := callerKeyID(r)
 	if caller == 0 {
@@ -213,18 +221,24 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "visibility must be private or public")
 		return
 	}
+	kind := r.URL.Query().Get("kind")
+	if kind != "" && kind != "room" && kind != "direct" {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "kind must be room or direct")
+		return
+	}
 	admin := 0
 	if auth.IsAdmin(r.Context()) {
 		admin = 1
 	}
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, '')
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), r.kind
 		 FROM rooms r
 		 WHERE r.archived_at IS NULL
 		   AND (? = 1 OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.key_id = ?))
 		   AND (? = '' OR r.visibility = ?)
+		   AND (? = '' OR r.kind = ?)
 		 ORDER BY r.created_at DESC`,
-		admin, caller, visibilityFilter, visibilityFilter)
+		admin, caller, visibilityFilter, visibilityFilter, kind, kind)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "list query")
 		return
@@ -238,7 +252,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			desc     sql.NullString
 			archived sql.NullString
 		)
-		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home); err != nil {
+		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home, &rv.Kind); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
@@ -262,8 +276,8 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 		archived sql.NullString
 	)
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility, COALESCE(home_domain, '') FROM rooms WHERE id = ?`, id,
-	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home); err != nil {
+		`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility, COALESCE(home_domain, ''), kind FROM rooms WHERE id = ?`, id,
+	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home, &rv.Kind); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "get query")
 		return
 	}
@@ -321,7 +335,7 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
-	if s.refuseReplica(w, r, id) {
+	if s.refuseReplica(w, r, id, false) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -374,7 +388,7 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 	}
 	caller := callerKeyID(r)
 	id := chi.URLParam(r, "id")
-	if s.refuseReplica(w, r, id) {
+	if s.refuseReplica(w, r, id, true) {
 		return
 	}
 	var req inviteRequest
@@ -408,12 +422,13 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// One room per key: a key that is not an admin key and is already
-	// in another room that is not archived needs allow_multi_room.
+	// in another room that is not archived needs allow_multi_room. Its
+	// direct conversations do not count.
 	var isAdmin, elsewhere, remote bool
 	err = s.DB.QueryRowContext(r.Context(),
 		`SELECT k.is_admin, EXISTS (
 		   SELECT 1 FROM room_members m JOIN rooms o ON o.id = m.room_id
-		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL), k.remote_domain IS NOT NULL
+		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL AND o.kind = 'room'), k.remote_domain IS NOT NULL
 		 FROM api_keys k WHERE k.id = ? AND k.revoked_at IS NULL`,
 		id, req.KeyID,
 	).Scan(&isAdmin, &elsewhere, &remote)
@@ -549,7 +564,7 @@ func (s *Service) setRights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := chi.URLParam(r, "id")
-	if s.refuseReplica(w, r, id) {
+	if s.refuseReplica(w, r, id, true) {
 		return
 	}
 	keyid, err := strconv.ParseInt(chi.URLParam(r, "keyid"), 10, 64)
@@ -629,7 +644,7 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 	// This server's own bot may leave a replica room; nothing else changes it.
 	// A stand-in's label is its address, kept in the audit entry.
 	var local, member bool
-	var address string
+	var address, kind string
 	var home sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
 		`SELECT remote_domain IS NULL, CASE WHEN remote_domain IS NULL THEN '' ELSE label END FROM api_keys WHERE id = ?`, keyid,
@@ -638,8 +653,8 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT home_domain, EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?) FROM rooms WHERE id = ?`, id, keyid, id,
-	).Scan(&home, &member); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		`SELECT home_domain, kind, EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?) FROM rooms WHERE id = ?`, id, keyid, id,
+	).Scan(&home, &kind, &member); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
 		return
 	}
@@ -696,6 +711,16 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "archive replica")
 			return
 		}
+	} else if kind == "direct" { // a conversation needs both bots
+		if _, err := tx.ExecContext(r.Context(), `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
+			time.Now().UTC().Format(time.RFC3339Nano), id); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "archive direct room")
+			return
+		}
+		if err := fedrooms.LogRoom(r.Context(), tx, id, s.FedDomain); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
@@ -713,10 +738,13 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 
 // refuseReplica answers 403 replica_room and returns true when roomID
 // is a replica: its host owns the members, rights and archive state.
-// A room that does not exist is left to the handler's 404.
-func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID string) bool {
+// With direct, it answers 403 direct_room for a direct room too: its
+// two bots are its only members, with fixed rights. A room that does
+// not exist is left to the handler's 404.
+func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID string, direct bool) bool {
 	var home sql.NullString
-	err := s.DB.QueryRowContext(r.Context(), `SELECT home_domain FROM rooms WHERE id = ?`, roomID).Scan(&home)
+	var kind string
+	err := s.DB.QueryRowContext(r.Context(), `SELECT home_domain, kind FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return false
@@ -725,6 +753,9 @@ func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID s
 		return true
 	case home.Valid:
 		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted by "+home.String+"; change it there")
+		return true
+	case direct && kind == "direct":
+		writeErr(w, r, http.StatusForbidden, "direct_room", "a direct conversation has its two bots as members, with fixed rights")
 		return true
 	}
 	return false

@@ -28,6 +28,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/bots"
 	"github.com/hermes/conclave-mcp/internal/claims"
+	"github.com/hermes/conclave-mcp/internal/direct"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/federation"
 	"github.com/hermes/conclave-mcp/internal/keys"
@@ -225,6 +226,8 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	auditSvc := audit.NewService(deps.DB)
 	claimsSvc := claims.NewService(deps.DB)
 	botsStore := bots.NewStore(deps.DB)
+	// Direct conversations post through the messages service's send path.
+	directSvc := &direct.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.Send}
 	// Federated rooms: rooms and messages log changes of rooms with
 	// remote members, invite by address through the federation service
 	// and wake its delivery worker after each change; the federation
@@ -236,7 +239,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// Functions and a handler are passed in here, so rooms, messages and
 	// claims never import federation.
 	if fedSvc != nil {
-		roomsSvc.FedDomain, messagesSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain()
+		roomsSvc.FedDomain, messagesSvc.FedDomain, directSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain(), fedSvc.Domain()
 		roomsSvc.MaxMessageBytes = messagesSvc.MaxMessageBytes
 		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		roomsSvc.FedNotify, messagesSvc.FedNotify = fedSvc.DeliverSoon, fedSvc.DeliverSoon
@@ -266,6 +269,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		auditSvc.Routes(r)
 		claimsSvc.Routes(r)
 		botsStore.Routes(r)
+		directSvc.Routes(r)
 		// GET /v1/bots/lookup and /v1/directory, with federation off too.
 		federation.BotRoutes(r, botsStore, fedSvc)
 		if fedSvc != nil {

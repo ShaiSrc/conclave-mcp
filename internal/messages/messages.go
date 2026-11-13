@@ -85,7 +85,7 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.post(w, r, chi.URLParam(r, "id"), false, "", "")
+		s.Send(w, r, chi.URLParam(r, "id"))
 	})
 	r.Get("/rooms/{id}/messages", s.list)
 	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
@@ -144,6 +144,12 @@ var allowedMessageTypes = map[string]struct{}{
 	"task_assignment": {},
 	"alert":           {},
 	"system":          {},
+}
+
+// Send stores the request body as a message of the caller in roomID,
+// as POST /v1/rooms/{id}/messages does.
+func (s *Service) Send(w http.ResponseWriter, r *http.Request, roomID string) {
+	s.post(w, r, roomID, false, "", "")
 }
 
 // SendAsOperator stores the request body as an operator message. It is
@@ -627,6 +633,13 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	var nextSince string
 	if n := len(out); n > 0 {
 		nextSince = out[n-1].TS
+		// A member reading a direct room has read up to here, for its
+		// unread count (GET /v1/direct). The list stands without it.
+		_, _ = s.DB.ExecContext(r.Context(), `INSERT INTO direct_reads(room_id, key_id, last_read_id)
+			SELECT ?, ?, ? WHERE EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?)
+			ON CONFLICT(room_id, key_id) DO UPDATE SET last_read_id = MAX(last_read_id, excluded.last_read_id)`,
+			roomID, caller, out[n-1].ID, roomID, roomID, caller)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messages":   out,

@@ -256,6 +256,33 @@ func TestProfile_WhoEdits(t *testing.T) {
 	}
 }
 
+// The DM policy is local without a saved one, only admin keys change
+// it, and a bot's own save keeps it.
+func TestProfile_DMPolicy(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	fresh := addKey(t, w.db, "fresh", false)
+	if err := w.s.SetHandle(ctx, fresh, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"fresh", "pub"} {
+		if p := profileOf(t, do(w.s, adminC(w.admin), "GET", "/v1/bots/"+h, "")); p.DMPolicy != DMLocal {
+			t.Errorf("%s: dm_policy %q, want local", h, p.DMPolicy)
+		}
+	}
+	want(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"dm_policy":"peers"}`), 403, "forbidden")
+	want(t, do(w.s, adminC(w.admin), "PATCH", "/v1/bots/pub/profile", `{"dm_policy":"everyone"}`), 400, "bad_request")
+	if p := profileOf(t, do(w.s, adminC(w.admin), "PATCH", "/v1/bots/pub/profile", `{"dm_policy":"none"}`)); p.DMPolicy != DMNone {
+		t.Errorf("admin set: %+v", p)
+	}
+	if p := profileOf(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"description":"d"}`)); p.DMPolicy != DMNone || p.Visibility != Public {
+		t.Errorf("bot's save: %+v", p)
+	}
+	if p, err := w.s.Update(ctx, "fresh", Patch{Description: new(string)}, false); err != nil || p.DMPolicy != DMLocal {
+		t.Errorf("first save: %+v, %v", p, err)
+	}
+}
+
 // A bot's save writes only the fields it sent: it keeps the visibility
 // and the other fields an admin set, also when the bot read the profile
 // before the admin wrote it. A first save fills the rest with defaults.
@@ -385,6 +412,7 @@ func TestAudit_Rows(t *testing.T) {
 	want(t, do(s, keyC(k), "PATCH", "/v1/bots/bob/profile", `{"description":"d"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"B","visibility":"public"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"C","description":"d","visibility":"public"}`), 200, "")
+	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"dm_policy":"peers"}`), 200, "")
 	want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 204, "")
 
 	rows, err := db.Query(`SELECT actor_key_id, action, target_type, target_id, result, detail FROM audit ORDER BY id`)
@@ -403,9 +431,10 @@ func TestAudit_Rows(t *testing.T) {
 	}
 	wantRows := []string{
 		fmt.Sprintf(`%d bot.handle.set key %d ok {"handle":"bob"}`, admin, k),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private"}`, k),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public"}`, admin),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private","dm_policy":"local"}`, k),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public","dm_policy":"local"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public","dm_policy":"local"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["dm_policy"],"visibility":"public","dm_policy":"peers"}`, admin),
 		fmt.Sprintf(`%d bot.handle.remove key %d ok {"handle":"bob"}`, admin, k),
 	}
 	if !slices.Equal(got, wantRows) {
