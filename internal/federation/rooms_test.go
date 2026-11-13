@@ -126,10 +126,11 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	db := svc.db
 	broker := events.NewBroker()
 	rs := rooms.NewService(db)
-	rs.FedDomain, rs.InviteRemote, rs.FedNotify = svc.Domain(), svc.InviteRemote, svc.DeliverSoon
+	rs.FedDomain, rs.InviteRemote, rs.FedNotify, rs.Leave = svc.Domain(), svc.InviteRemote, svc.DeliverSoon, svc.LeaveRemote
 	ms := messages.NewService(db, 0, broker)
-	ms.FedDomain, ms.FedNotify = svc.Domain(), svc.DeliverSoon
+	ms.FedDomain, ms.FedNotify, ms.Forward = svc.Domain(), svc.DeliverSoon, svc.ForwardMessage
 	cs := claims.NewService(db)
+	cs.Forward = svc.ForwardClaims
 	cl := chi.NewRouter()
 	cs.Routes(cl)
 	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica}

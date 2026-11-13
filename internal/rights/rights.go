@@ -95,6 +95,7 @@ type Member struct {
 	Rights      Set    // an admin key holds All
 	TrustOrigin string // the caller key's mark, copied onto its messages
 	Archived    bool
+	Home        string // the host of a replica room, "" for a room hosted here
 }
 
 // DB is what Lookup needs; *sql.DB satisfies it.
@@ -111,13 +112,13 @@ func Lookup(ctx context.Context, db DB, roomID string) (mem Member, ok bool, err
 	mem = Member{KeyID: c.KeyID, Admin: auth.IsAdmin(ctx)}
 	var archived, stored sql.NullString
 	err = db.QueryRowContext(ctx,
-		`SELECT r.archived_at, k.trust_origin, m.rights
+		`SELECT r.archived_at, k.trust_origin, m.rights, COALESCE(r.home_domain, '')
 		 FROM rooms r
 		 JOIN api_keys k ON k.id = ? AND k.revoked_at IS NULL
 		 LEFT JOIN room_members m ON m.room_id = r.id AND m.key_id = k.id
 		 WHERE r.id = ?`,
 		c.KeyID, roomID,
-	).Scan(&archived, &mem.TrustOrigin, &stored)
+	).Scan(&archived, &mem.TrustOrigin, &stored, &mem.Home)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mem, false, nil
 	}

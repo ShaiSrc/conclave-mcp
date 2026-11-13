@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -649,4 +651,177 @@ func (s *Service) leaveHosted(ctx context.Context, roomID string, keyID int64) (
 		return false, err
 	}
 	return true, tx.Commit()
+}
+
+// Writes from this server's bots in replicas: messages, claims and
+// leaving go to the room's host, which decides; a message the host
+// stored is applied here like a pushed one.
+
+// ourAuthor returns the host of replica roomID and the address there of
+// our key keyID, handle@ourdomain. A key without a handle has no stand-in
+// on any host: 403 no_handle.
+func (s *Service) ourAuthor(ctx context.Context, roomID string, keyID int64) (host, address string, err error) {
+	var handle string
+	if err := s.db.QueryRowContext(ctx, `SELECT r.home_domain, COALESCE(k.handle, '') FROM rooms r JOIN api_keys k ON k.id = ?
+		WHERE r.id = ? AND r.home_domain IS NOT NULL`, keyID, roomID).Scan(&host, &handle); err != nil {
+		return "", "", err
+	}
+	if handle == "" {
+		return "", "", &fedrooms.Error{Status: http.StatusForbidden, Code: "no_handle",
+			Message: "only a bot with a handle can write to a room hosted on another server"}
+	}
+	return host, handle + "@" + s.id.Domain, nil
+}
+
+// unreachable is the refusal for a forwarded request the host did not
+// answer: no answer, our signature refused (401) or a failure (5xx).
+// It is nil for any other answer.
+func (s *Service) unreachable(host string, status int, err error) error {
+	switch {
+	case err != nil:
+		if s.warnLog.allow(host + " host_unreachable") {
+			s.logger.Warn("federation room host unreachable", "host", host, "err", err)
+		}
+		return &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: host + " did not answer"}
+	case status == http.StatusUnauthorized || status >= 500:
+		return &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: fmt.Sprintf("%s answered with status %d", host, status)}
+	}
+	return nil
+}
+
+// hostError is a host's 4xx answer as a refusal with its status, code
+// and message.
+func hostError(status int, body []byte) error {
+	var env struct {
+		Error struct{ Code, Message string } `json:"error"`
+	}
+	_ = json.Unmarshal(body, &env)
+	if env.Error.Code == "" {
+		env.Error.Code, env.Error.Message = "host_refused", fmt.Sprintf("the host answered with status %d", status)
+	}
+	return &fedrooms.Error{Status: status, Code: env.Error.Code, Message: env.Error.Message}
+}
+
+// ForwardMessage sends m, a message of our key author in replica
+// roomID, to the room's host with our author signature, and applies the
+// event the host answers like a pushed one, so the message is stored
+// and published here once, whichever comes first. It returns the
+// message's id here. m's metadata is in its wire form and its reply_to
+// is the host's id. A refusal, the host's 4xx included, is a
+// *fedrooms.Error; nothing is stored then.
+func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int64, m fedrooms.MessagePayload) (int64, error) {
+	host, addr, err := s.ourAuthor(ctx, roomID, author)
+	if err != nil {
+		return 0, err
+	}
+	sig := s.id.SignMessage(MessageSig{Room: roomID + "@" + host, Author: addr, ContentType: m.ContentType,
+		MessageType: m.MessageType, Content: m.Content, Metadata: m.Metadata, ReplyTo: m.ReplyTo})
+	body := rawJSON(struct {
+		Author      string          `json:"author"`
+		Content     string          `json:"content"`
+		ContentType string          `json:"content_type"`
+		MessageType string          `json:"message_type"`
+		Metadata    json.RawMessage `json:"metadata,omitempty"`
+		ReplyTo     *int64          `json:"reply_to,omitempty"`
+		Sig         string          `json:"sig"`
+	}{addr, m.Content, m.ContentType, m.MessageType, m.Metadata, m.ReplyTo, sig})
+	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/messages", body, s.eventsLimit())
+	if err := s.unreachable(host, status, err); err != nil {
+		return 0, err
+	}
+	if status >= 400 {
+		return 0, hostError(status, out)
+	}
+	var ev fedrooms.Event
+	var p fedrooms.MessagePayload
+	if status != http.StatusCreated || json.Unmarshal(out, &ev) != nil || ev.Type != fedrooms.EventMessage ||
+		json.Unmarshal(ev.Payload, &p) != nil || p.ID <= 0 || p.Author != addr {
+		return 0, &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: host + " did not answer with the message's event"}
+	}
+	return s.applyAnswered(ctx, roomID, host, ev, p.ID)
+}
+
+// applyAnswered applies ev, the event of message remoteID that the host
+// answered, through the replica's apply path, and returns the message's
+// id here. Events before it that the replica lacks are pulled first, so
+// the message is stored after them. If they cannot be, it is stored out
+// of order; applying it again in order finds it stored.
+func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fedrooms.Event, remoteID int64) (int64, error) {
+	_, gap, err := s.applyBatch(ctx, roomID, host, []fedrooms.Event{ev})
+	if err != nil {
+		return 0, err
+	}
+	if gap {
+		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
+		if _, err := s.pull(pctx, roomID, host); err != nil {
+			s.logger.Warn("federation room pull failed", "room", roomID, "host", host, "err", err)
+		}
+		cancel()
+	}
+	var id int64
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, remoteID).Scan(&id)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return id, err
+	}
+	s.applyMu.Lock()
+	err = s.applyMessage(ctx, roomID, host, ev.Payload)
+	s.applyMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	err = s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, remoteID).Scan(&id)
+	return id, err
+}
+
+// ForwardClaims sends r, a claims request (list, claim, heartbeat or
+// release) of our key author in replica roomID, to the room's host for
+// the author's address, and returns the host's status and body as they
+// are. Claims carry paths, so nothing is translated. A refusal (no
+// handle, host unreachable) is a *fedrooms.Error.
+func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (int, []byte, error) {
+	ctx := r.Context()
+	host, addr, err := s.ourAuthor(ctx, roomID, author)
+	if err != nil {
+		return 0, nil, err
+	}
+	var body []byte
+	if r.Method != http.MethodGet {
+		if body, err = io.ReadAll(io.LimitReader(r.Body, maxBody+1)); err != nil {
+			return 0, nil, err
+		}
+		if len(body) > maxBody {
+			return 0, nil, &fedrooms.Error{Status: http.StatusRequestEntityTooLarge, Code: "payload_too_large", Message: "body over 64 KiB"}
+		}
+	}
+	_, sub, _ := strings.Cut(r.URL.Path, "/rooms/"+roomID) // /claims, /claims/heartbeat or /claims/release
+	// ponytail: claim lists are read up to the events limit, which bounds
+	// what one answer of the host may cost.
+	status, out, err := s.sendSigned(ctx, r.Method, host,
+		"/fed/v1/rooms/"+roomID+sub+"?"+url.Values{"author": {addr}}.Encode(), body, s.eventsLimit())
+	if err := s.unreachable(host, status, err); err != nil {
+		return 0, nil, err
+	}
+	return status, out, nil
+}
+
+// LeaveRemote tells the host of replica roomID that our bot keyID leaves
+// the room. A host that no longer has the bot in the room (404) agrees.
+// A refusal is a *fedrooms.Error.
+func (s *Service) LeaveRemote(ctx context.Context, roomID string, keyID int64) error {
+	host, addr, err := s.ourAuthor(ctx, roomID, keyID)
+	if err != nil {
+		return err
+	}
+	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/leave",
+		rawJSON(map[string]string{"author": addr}), maxBody)
+	if err = s.unreachable(host, status, err); err == nil && status >= 400 && status != http.StatusNotFound {
+		err = hostError(status, out)
+	}
+	detail, _ := json.Marshal(map[string]string{"address": addr})
+	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
+		s.auditRoom(ctx, "federation.room.leave", host, roomID, "error:"+fe.Code, string(detail))
+		return err
+	}
+	s.auditRoom(ctx, "federation.room.leave", host, roomID, "ok", string(detail))
+	return nil
 }

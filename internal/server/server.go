@@ -230,12 +230,15 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// listener runs member servers' messages and claims through the same
 	// send and claims paths, as the bots' stand-in keys, and stores the
 	// messages of replica rooms through the messages service, which
-	// publishes them like sent ones. Functions and a handler are passed
-	// in here, so rooms, messages and claims never import federation.
+	// publishes them like sent ones. In replica rooms, our bots' messages,
+	// claims and leaving go to the host through the federation service.
+	// Functions and a handler are passed in here, so rooms, messages and
+	// claims never import federation.
 	if fedSvc != nil {
 		roomsSvc.FedDomain, messagesSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain()
-		roomsSvc.InviteRemote = fedSvc.InviteRemote
+		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		roomsSvc.FedNotify, messagesSvc.FedNotify = fedSvc.DeliverSoon, fedSvc.DeliverSoon
+		messagesSvc.Forward, claimsSvc.Forward = fedSvc.ForwardMessage, fedSvc.ForwardClaims
 		claimsLocal := chi.NewRouter()
 		claimsSvc.Routes(claimsLocal)
 		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,

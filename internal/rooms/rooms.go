@@ -11,7 +11,9 @@
 //	POST   /v1/rooms/{id}/members          -- invite with rights (admin; /invite is an alias);
 //	                                          a bot of a peer server by its address
 //	PATCH  /v1/rooms/{id}/members/{keyid}  -- replace a member's rights (admin)
-//	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (admin)
+//	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (admin); in a
+//	                                          replica room only this server's
+//	                                          bot, which leaves on the host first
 //
 // Mutations are audit-logged. With federation on, every change of a
 // room with remote members is written to its event log in the change's
@@ -50,6 +52,11 @@ type Service struct {
 	// FedNotify, when set, is called after each change of a room's
 	// members or state: it wakes the federation delivery worker.
 	FedNotify func()
+	// Leave tells the host of replica room roomID that keyID, a bot of
+	// this server, leaves the room; the bot is removed here after it.
+	// A refusal is a *fedrooms.Error. Set by the server with federation
+	// on.
+	Leave func(ctx context.Context, roomID string, keyID int64) error
 }
 
 // changed runs FedNotify after a committed change.
@@ -456,12 +463,7 @@ func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, a
 		return
 	}
 	if err := s.InviteRemote(r.Context(), roomID, name, address, set); err != nil {
-		var fe *fedrooms.Error
-		if errors.As(err, &fe) {
-			writeErr(w, r, fe.Status, fe.Code, fe.Message)
-		} else {
-			writeErr(w, r, http.StatusInternalServerError, "internal_error", "invite")
-		}
+		writeFedErr(w, r, err, "invite")
 		return
 	}
 	keyID, ok := s.addMember(w, r, roomID, 0, address, set)
@@ -599,16 +601,34 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 	}
 	// This server's own bot may leave a replica room; nothing else changes it.
 	// A stand-in's label is its address, kept in the audit entry.
-	var local bool
+	var local, member bool
 	var address string
+	var home sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
 		`SELECT remote_domain IS NULL, CASE WHEN remote_domain IS NULL THEN '' ELSE label END FROM api_keys WHERE id = ?`, keyid,
 	).Scan(&local, &address); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "key lookup")
 		return
 	}
-	if !local && s.refuseReplica(w, r, id) {
+	if err := s.DB.QueryRowContext(r.Context(),
+		`SELECT home_domain, EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?) FROM rooms WHERE id = ?`, id, keyid, id,
+	).Scan(&home, &member); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
 		return
+	}
+	switch {
+	case !home.Valid: // hosted here, or no such room (404 below)
+	case !local:
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted by "+home.String+"; change it there")
+		return
+	case !member:
+		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
+		return
+	case s.Leave != nil: // the host first: if it cannot be told, nothing changes here
+		if err := s.Leave(r.Context(), id, keyid); err != nil {
+			writeFedErr(w, r, err, "leave")
+			return
+		}
 	}
 	tx, err := s.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -636,6 +656,16 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 	if err := fedrooms.LogRemove(r.Context(), tx, id, keyid, s.FedDomain); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
 		return
+	}
+	// A replica with no key of ours left is archived, as when its host
+	// removes our last bot.
+	if home.Valid {
+		if _, err := tx.ExecContext(r.Context(), `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ?
+			AND NOT EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id WHERE m.room_id = ? AND k.remote_domain IS NULL)`,
+			time.Now().UTC().Format(time.RFC3339Nano), id, id); err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "archive replica")
+			return
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
@@ -668,6 +698,16 @@ func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID s
 		return true
 	}
 	return false
+}
+
+// writeFedErr answers a refusal of the federation service with its
+// status and code, and any other error with 500.
+func writeFedErr(w http.ResponseWriter, r *http.Request, err error, what string) {
+	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
+		writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		return
+	}
+	writeErr(w, r, http.StatusInternalServerError, "internal_error", what)
 }
 
 func callerKeyID(r *http.Request) int64 {

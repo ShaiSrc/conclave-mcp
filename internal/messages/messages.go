@@ -47,6 +47,13 @@ type Service struct {
 	// FedNotify, when set, is called after each send: it wakes the
 	// federation delivery worker.
 	FedNotify func()
+	// Forward, when set, sends a message of key author in replica room
+	// roomID to the room's host and stores the copy the host answers,
+	// as StoreReplica does; it returns the copy's id. m's metadata is
+	// in its wire form and its reply_to is the host's id. A refusal,
+	// the host's included, is a *fedrooms.Error. Set by the server with
+	// federation on.
+	Forward func(ctx context.Context, roomID string, author int64, m fedrooms.MessagePayload) (int64, error)
 
 	// stampMu makes taking a timestamp and inserting one step, and
 	// lastTS keeps timestamps strictly increasing, so ts order is
@@ -253,10 +260,11 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 			req.ReplyTo = &id
 		}
 	}
+	var hostReply *int64 // in a replica room, the host's id of the message replied to
 	if req.ReplyTo != nil {
-		var exists int
+		var remote sql.NullInt64
 		err := s.DB.QueryRowContext(r.Context(),
-			`SELECT 1 FROM messages WHERE id = ? AND room_id = ? AND deleted_at IS NULL`, *req.ReplyTo, roomID).Scan(&exists)
+			`SELECT remote_id FROM messages WHERE id = ? AND room_id = ? AND deleted_at IS NULL`, *req.ReplyTo, roomID).Scan(&remote)
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: no message "+strconv.FormatInt(*req.ReplyTo, 10)+" in this room (or it was deleted)")
 			return
@@ -264,6 +272,13 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "reply_to lookup")
 			return
+		}
+		if mem.Home != "" {
+			if !remote.Valid {
+				writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: message "+strconv.FormatInt(*req.ReplyTo, 10)+" is not one of the host's")
+				return
+			}
+			hostReply = &remote.Int64
 		}
 		// RawMessage values keep the other fields byte for byte (no
 		// float64 rounding of big numbers).
@@ -278,6 +293,10 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		b, _ := json.Marshal(meta)
 		metadata = sql.NullString{String: string(b), Valid: true}
 		req.Metadata = b
+	}
+	if mem.Home != "" {
+		s.forward(w, r, roomID, caller, req, messageType, metadata, hostReply)
+		return
 	}
 
 	s.stampMu.Lock()
@@ -332,6 +351,59 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		}
 	}
 	writeJSON(w, http.StatusCreated, mv)
+}
+
+// forward sends a checked message of a replica room to the room's
+// host, which checks and stores it, and answers with the copy stored
+// here, as a send answers. reply is the host's id of the message
+// replied to.
+func (s *Service) forward(w http.ResponseWriter, r *http.Request, roomID string, caller int64, req sendRequest,
+	messageType string, metadata sql.NullString, reply *int64) {
+	if s.Forward == nil {
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted on another server, and federation is off")
+		return
+	}
+	wire, _, _ := fedrooms.SplitMetadata([]byte(metadata.String)) // an object or null: checked above
+	id, err := s.Forward(r.Context(), roomID, caller, fedrooms.MessagePayload{ContentType: req.ContentType,
+		MessageType: messageType, Content: req.Content, Metadata: wire, ReplyTo: reply})
+	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
+		writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		return
+	}
+	var mv messageView
+	if err == nil {
+		mv, err = scanView(s.DB.QueryRowContext(r.Context(), `SELECT `+viewColumns+` FROM messages WHERE id = ?`, id))
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "forward message")
+		return
+	}
+	_ = audit.Write(r.Context(), s.DB, caller, "message.send", "message", strconv.FormatInt(id, 10), roomID, "ok",
+		`{"room_id":`+strconvQuote(roomID)+`}`)
+	writeJSON(w, http.StatusCreated, mv)
+}
+
+// viewColumns are the columns scanView reads.
+const viewColumns = `id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator`
+
+// scanView reads a message's viewColumns.
+func scanView(row interface{ Scan(...any) error }) (messageView, error) {
+	var (
+		mv                     messageView
+		mtype, meta, deletedAt sql.NullString
+	)
+	if err := row.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &mv.ContentType, &mv.Content, &mtype, &meta, &deletedAt,
+		&mv.TrustOrigin, &mv.Operator); err != nil {
+		return mv, err
+	}
+	// Size is computed at response time (SPEC-0002 §3.5.1: derived
+	// from len(content), not stored).
+	mv.Size = len(mv.Content)
+	mv.MessageType, mv.DeletedAt = mtype.String, deletedAt.String
+	if meta.String != "" {
+		mv.Metadata = json.RawMessage(meta.String)
+	}
+	return mv, nil
 }
 
 // stamp returns the timestamp of the next message: now, or just after
@@ -498,7 +570,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	)
 	if trustOrigin != "" {
 		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator
+			`SELECT `+viewColumns+`
 			 FROM messages
 			 WHERE room_id = ? AND ts > ? AND deleted_at IS NULL AND trust_origin = ?
 			 ORDER BY ts ASC, id ASC
@@ -507,7 +579,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		)
 	} else {
 		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator
+			`SELECT `+viewColumns+`
 			 FROM messages
 			 WHERE room_id = ? AND ts > ? AND deleted_at IS NULL
 			 ORDER BY ts ASC, id ASC
@@ -523,34 +595,11 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 
 	var out []messageView
 	for rows.Next() {
-		var (
-			mv        messageView
-			ctype     string
-			content   string
-			mtype     sql.NullString
-			meta      sql.NullString
-			deletedAt sql.NullString
-			trustOrig string
-		)
-		if err := rows.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &ctype, &content, &mtype, &meta, &deletedAt, &trustOrig, &mv.Operator); err != nil {
+		mv, err := scanView(rows)
+		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
-		mv.ContentType = ctype
-		mv.Content = content
-		// Size is computed at response time (SPEC-0002
-		// §3.5.1: derived from len(content), not stored).
-		mv.Size = len(content)
-		if mtype.Valid && mtype.String != "" {
-			mv.MessageType = mtype.String
-		}
-		if meta.Valid && meta.String != "" {
-			mv.Metadata = json.RawMessage(meta.String)
-		}
-		if deletedAt.Valid {
-			mv.DeletedAt = deletedAt.String
-		}
-		mv.TrustOrigin = trustOrig
 		out = append(out, mv)
 	}
 	// next_since is the ISO-8601 ts of the last message we

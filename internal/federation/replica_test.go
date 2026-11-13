@@ -2,8 +2,10 @@ package federation
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,6 +18,7 @@ import (
 	"github.com/oklog/ulid/v2"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 )
 
@@ -27,6 +30,11 @@ type fakeHost struct {
 	mu    sync.Mutex
 	log   map[string][]fedrooms.Event // per room
 	pulls []string                    // "room since" of each pull
+	// answer answers every other request, without a check of its
+	// signature; a status of 0 drops the connection. Without it they
+	// get 404.
+	answer func(body []byte) (int, string)
+	got    []string // "method uri body" of every other request
 }
 
 func newFakeHost(t *testing.T, g *roomRig) *fakeHost {
@@ -39,8 +47,12 @@ func newFakeHost(t *testing.T, g *roomRig) *fakeHost {
 	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rest, _ := strings.CutPrefix(r.URL.Path, "/fed/v1/rooms/")
 		room, ok := strings.CutSuffix(rest, "/events")
+		if r.Method != http.MethodGet || !ok {
+			h.other(w, r)
+			return
+		}
 		since, err := strconv.ParseInt(r.URL.Query().Get("since"), 10, 64)
-		if r.Method != http.MethodGet || !ok || err != nil {
+		if err != nil {
 			http.NotFound(w, r)
 			return
 		}
@@ -64,6 +76,58 @@ func newFakeHost(t *testing.T, g *roomRig) *fakeHost {
 }
 
 func (h *fakeHost) addr(name string) string { return name + "@" + h.id.Domain }
+
+func (h *fakeHost) other(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	h.mu.Lock()
+	h.got = append(h.got, r.Method+" "+r.URL.RequestURI()+" "+string(body))
+	answer := h.answer
+	h.mu.Unlock()
+	if answer == nil {
+		http.NotFound(w, r)
+		return
+	}
+	status, out := answer(body)
+	if status == 0 {
+		conn, _, _ := w.(http.Hijacker).Hijack()
+		_ = conn.Close()
+		return
+	}
+	w.WriteHeader(status)
+	_, _ = io.WriteString(w, out)
+}
+
+func (h *fakeHost) setAnswer(f func(body []byte) (int, string)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.answer = f
+}
+
+func (h *fakeHost) received() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]string(nil), h.got...)
+}
+
+// answerWith is a fake host's answer: status and body.
+func answerWith(status int, body string) func([]byte) (int, string) {
+	return func([]byte) (int, string) { return status, body }
+}
+
+// echo is the event a host logs for a message proposal: the proposed
+// message with host id id.
+func echo(seq, id int64, proposal []byte) fedrooms.Event {
+	var p struct {
+		Author, Content, Sig string
+		ContentType          string `json:"content_type"`
+		MessageType          string `json:"message_type"`
+		Metadata             json.RawMessage
+		ReplyTo              *int64 `json:"reply_to"`
+	}
+	_ = json.Unmarshal(proposal, &p)
+	return event(seq, fedrooms.EventMessage, fedrooms.MessagePayload{ID: id, Author: p.Author, TS: "2026-11-13T00:00:00.000000000Z",
+		ContentType: p.ContentType, MessageType: p.MessageType, Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo, OriginSig: p.Sig})
+}
 
 func (h *fakeHost) setLog(room string, evs ...fedrooms.Event) {
 	h.mu.Lock()
@@ -681,6 +745,39 @@ func TestFederatedRoom_TwoServers(t *testing.T) {
 			t.Fatal("message missing from b's live stream")
 		}
 	}
+
+	// b1 replies on b: a stores the reply under b1's stand-in, and b
+	// keeps the copy a answers, once, though a pushes it as well.
+	rec = b.do(auth.Claims{KeyID: b1}, http.MethodPost, "/rooms/"+room+"/messages",
+		fmt.Sprintf(`{"content":"from b","message_type":"answer","reply_to":%d}`, m0.ID))
+	var mine struct {
+		ID          int64           `json:"id"`
+		AuthorKeyID int64           `json:"author_key_id"`
+		Content     string          `json:"content"`
+		TrustOrigin string          `json:"trust_origin"`
+		Metadata    json.RawMessage `json:"metadata"`
+	}
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &mine) != nil || mine.AuthorKeyID != b1 ||
+		mine.Content != "from b" || mine.TrustOrigin != "internal" || string(mine.Metadata) != fmt.Sprintf(`{"reply_to":%d}`, m0.ID) {
+		t.Fatalf("post on b: %d %s", rec.Code, rec.Body)
+	}
+	var onA struct{ label, meta, sig string }
+	if err := a.db.QueryRow(`SELECT k.label, m.metadata, m.origin_sig FROM messages m JOIN api_keys k ON k.id = m.author_key_id
+		WHERE m.room_id = ? AND m.content = 'from b'`, room).Scan(&onA.label, &onA.meta, &onA.sig); err != nil ||
+		onA.label != "b1@"+b.svc.Domain() || onA.meta != fmt.Sprintf(`{"reply_to":%d}`, first.ID) || onA.sig == "" {
+		t.Errorf("on a: %+v %v", onA, err)
+	}
+	a.svc.deliverDue(ctx)
+	if n := count(t, b.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'from b'`, room); n != 1 {
+		t.Errorf("b has %d copies of its message", n)
+	}
+	if applied, total := appliedSeq(t, b, room), int64(len(a.events(t, room))); applied != total {
+		t.Errorf("b applied %d of %d", applied, total)
+	}
+	if n := published(sub); n != 1 {
+		t.Errorf("b's live stream got its message %d times", n)
+	}
+
 	// b catches up with what it missed.
 	if _, err := b.db.Exec(`DELETE FROM messages WHERE room_id = ?`, room); err != nil {
 		t.Fatal(err)
@@ -689,7 +786,398 @@ func TestFederatedRoom_TwoServers(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.svc.catchUp(ctx)
-	if n := len(storedMessages(t, b, room)); n != 2 {
+	if n := len(storedMessages(t, b, room)); n != 3 {
 		t.Errorf("after catch-up b has %d messages", n)
+	}
+}
+
+// published counts what sub holds. Publishing is synchronous, so it
+// holds every message published so far.
+func published(sub <-chan events.Event) int {
+	for n := 0; ; n++ {
+		select {
+		case <-sub:
+		default:
+			return n
+		}
+	}
+}
+
+// pair is server a hosting room proj and server b, whose bot b1 a
+// invited with rights; the invite is delivered.
+func pair(t *testing.T, rights string) (a, b *roomRig, room string, b1 auth.Claims) {
+	t.Helper()
+	a, b = newLiveRig(t), newLiveRig(t)
+	allow(t, a.svc, b.svc.id)
+	allow(t, b.svc, a.svc.id)
+	room = a.room(t, "proj")
+	b1 = auth.Claims{KeyID: b.bot(t, "b1")}
+	a.invite(t, room, "b1@"+b.svc.Domain(), rights)
+	a.svc.deliverDue(context.Background())
+	return a, b, room, b1
+}
+
+// post sends a message as c through g's API and returns its id.
+func post(t *testing.T, g *roomRig, c auth.Claims, room, body string) int64 {
+	t.Helper()
+	rec := g.do(c, http.MethodPost, "/rooms/"+room+"/messages", body)
+	var out struct{ ID int64 }
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+		t.Fatalf("post %s: %d %s", body, rec.Code, rec.Body)
+	}
+	return out.ID
+}
+
+// metaOf returns the stored metadata of message id.
+func metaOf(t *testing.T, g *roomRig, id int64) string {
+	t.Helper()
+	var meta sql.NullString
+	if err := g.db.QueryRow(`SELECT metadata FROM messages WHERE id = ?`, id).Scan(&meta); err != nil {
+		t.Fatal(err)
+	}
+	return meta.String
+}
+
+// reply_to crosses servers as the host's id and comes back as ours.
+func TestReplicaPost_ReplyTo(t *testing.T) {
+	a, b, room, b1 := pair(t, "read,answer")
+	ctx := context.Background()
+	a1 := a.localBot(t, room, "a1-key", "read,answer")
+	aFirst := post(t, a, a1, room, `{"content":"first","message_type":"answer"}`)
+	a.svc.deliverDue(ctx)
+	bFirst := int64(count(t, b.db, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, room, aFirst))
+
+	// b1 replies to its copy; a stores the reply to its own message.
+	bReply := post(t, b, b1, room, fmt.Sprintf(`{"content":"reply","message_type":"answer","reply_to":%d,"metadata":{"k":1}}`, bFirst))
+	if got, want := metaOf(t, b, bReply), fmt.Sprintf(`{"k":1,"reply_to":%d}`, bFirst); got != want {
+		t.Errorf("b's copy: metadata %s, want %s", got, want)
+	}
+	aReply := int64(count(t, a.db, `SELECT id FROM messages WHERE room_id = ? AND content = 'reply'`, room))
+	if got, want := metaOf(t, a, aReply), fmt.Sprintf(`{"k":1,"reply_to":%d}`, aFirst); got != want {
+		t.Errorf("on a: metadata %s, want %s", got, want)
+	}
+	// a1 answers b1's reply; b gets it with its own id of the reply.
+	back := post(t, a, a1, room, fmt.Sprintf(`{"content":"back","message_type":"answer","reply_to":%d}`, aReply))
+	a.svc.deliverDue(ctx)
+	bBack := int64(count(t, b.db, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, room, back))
+	if got, want := metaOf(t, b, bBack), fmt.Sprintf(`{"reply_to":%d}`, bReply); got != want {
+		t.Errorf("b's copy of the answer: metadata %s, want %s", got, want)
+	}
+
+	// A message of the replica that is no copy of the host's has no host
+	// id to reply to.
+	res, err := b.db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, '2026-01-01T00:00:00Z', 'local', 'text/plain')`,
+		room, b1.KeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	localOnly, _ := res.LastInsertId()
+	before := a.state(t)
+	wantErr(t, b.do(b1, http.MethodPost, "/rooms/"+room+"/messages", fmt.Sprintf(`{"content":"x","message_type":"answer","reply_to":%d}`, localOnly)),
+		http.StatusBadRequest, "bad_request")
+	if a.state(t) != before {
+		t.Error("a reply to a local message reached the host")
+	}
+}
+
+// A host that does not answer: each write is refused with 502 and
+// nothing is stored.
+func TestReplicaWrites_HostDown(t *testing.T) {
+	g, h, room, b1 := replica(t, "read", "answer", "claim")
+	h.setAnswer(answerWith(0, ""))
+	bot := auth.Claims{KeyID: b1}
+	before := g.state(t)
+	base := "/rooms/" + room
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodPost, base + "/messages", `{"content":"hi","message_type":"answer"}`},
+		{http.MethodGet, base + "/claims", ""},
+		{http.MethodPost, base + "/claims", `{"paths":["a/"]}`},
+		{http.MethodPost, base + "/claims/heartbeat", ""},
+		{http.MethodPost, base + "/claims/release", ""},
+	} {
+		wantErr(t, g.do(bot, c.method, c.path, c.body), http.StatusBadGateway, "host_unreachable")
+	}
+	if g.state(t) != before {
+		t.Error("refused writes stored something")
+	}
+	if n := len(h.received()); n != 5 {
+		t.Errorf("host got %d requests, want 5", n)
+	}
+}
+
+// The host's refusals reach the bot with their status, code and
+// message; a host that fails, refuses our signature or answers
+// something else is a 502.
+func TestReplicaPost_HostAnswers(t *testing.T) {
+	g, h, room, b1 := replica(t, "read", "answer")
+	before := g.state(t)
+	for _, c := range []struct {
+		status     int
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{403, `{"error":{"code":"missing_right","message":"missing right: answer"}}`, 403, "missing_right"},
+		{410, `{"error":{"code":"not_found","message":"room is archived"}}`, 410, "not_found"},
+		{401, `{"error":{"code":"bad_signature","message":"x"}}`, 502, "host_unreachable"},
+		{500, ``, 502, "host_unreachable"},
+		{201, `{"seq":1,"type":"room","payload":{"name":"x"}}`, 502, "host_unreachable"},
+		{201, `not json`, 502, "host_unreachable"},
+	} {
+		h.setAnswer(answerWith(c.status, c.body))
+		rec := g.do(auth.Claims{KeyID: b1}, http.MethodPost, "/rooms/"+room+"/messages", `{"content":"hi","message_type":"answer"}`)
+		wantErr(t, rec, c.wantStatus, c.wantCode)
+		if c.status == 403 && !strings.Contains(rec.Body.String(), `"missing right: answer"`) {
+			t.Errorf("host's message lost: %s", rec.Body)
+		}
+	}
+	// Another author's message is not the answer to ours.
+	h.setAnswer(func(body []byte) (int, string) {
+		ev := echo(1, 500, body)
+		ev.Payload = json.RawMessage(strings.Replace(string(ev.Payload), `"b1@`, `"b2@`, 1))
+		return http.StatusCreated, string(rawJSON(ev))
+	})
+	wantErr(t, g.do(auth.Claims{KeyID: b1}, http.MethodPost, "/rooms/"+room+"/messages", `{"content":"hi","message_type":"answer"}`),
+		http.StatusBadGateway, "host_unreachable")
+	if g.state(t) != before {
+		t.Error("refused posts stored something")
+	}
+}
+
+// What the host gets: the bot's address, the fields, and an author
+// signature by our key.
+func TestReplicaPost_Proposal(t *testing.T) {
+	g, h, room, b1 := replica(t, "read", "answer")
+	h.setAnswer(func(body []byte) (int, string) { return http.StatusCreated, string(rawJSON(echo(1, 500, body))) })
+	rec := g.do(auth.Claims{KeyID: b1}, http.MethodPost, "/rooms/"+room+"/messages",
+		`{"content":"hi <b>","content_type":"text/markdown","message_type":"answer","metadata":{"z":1,"a":"x"}}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("post: %d %s", rec.Code, rec.Body)
+	}
+	got := h.received()
+	if len(got) != 1 || !strings.HasPrefix(got[0], "POST /fed/v1/rooms/"+room+"/messages ") {
+		t.Fatalf("host got %q", got)
+	}
+	var p struct {
+		Author, Content, Sig string
+		ContentType          string `json:"content_type"`
+		MessageType          string `json:"message_type"`
+		Metadata             json.RawMessage
+		ReplyTo              *int64 `json:"reply_to"`
+	}
+	if err := json.Unmarshal([]byte(got[0][strings.Index(got[0], "{"):]), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Author != "b1@"+local || p.Content != "hi <b>" || p.ContentType != "text/markdown" || p.MessageType != "answer" ||
+		string(p.Metadata) != `{"a":"x","z":1}` || p.ReplyTo != nil {
+		t.Errorf("proposal: %+v %s", p, p.Metadata)
+	}
+	m := MessageSig{Room: room + "@" + h.id.Domain, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
+		Content: p.Content, Metadata: p.Metadata}
+	if !VerifyMessage(g.svc.id.Public, m, p.Sig) {
+		t.Error("author signature does not verify with our key")
+	}
+	ms := storedMessages(t, g, room)
+	if len(ms) != 1 || ms[0].RemoteID != 500 || ms[0].Content != "hi <b>" || ms[0].Meta != `{"a":"x","z":1}` || ms[0].OriginSig != p.Sig {
+		t.Errorf("stored: %+v", ms)
+	}
+}
+
+// The host's push of a forwarded message and its answer race: either
+// way the message is stored and published once.
+func TestReplicaPost_PushRace(t *testing.T) {
+	for _, pushFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("push first %v", pushFirst), func(t *testing.T) {
+			g, h, room, b1 := replica(t, "read", "answer")
+			sub, cancel := g.broker.Subscribe(room)
+			defer cancel()
+			evs, pushed := make(chan fedrooms.Event, 1), make(chan int64, 2)
+			h.setAnswer(func(body []byte) (int, string) {
+				ev := echo(1, 500, body)
+				evs <- ev
+				if pushFirst {
+					pushed <- h.push(t, g, room, ev)
+				}
+				return http.StatusCreated, string(rawJSON(ev))
+			})
+			id := post(t, g, auth.Claims{KeyID: b1}, room, `{"content":"hi","message_type":"answer"}`)
+			ev := <-evs
+			if !pushFirst {
+				pushed <- h.push(t, g, room, ev)
+			}
+			if got := <-pushed; got != 1 {
+				t.Errorf("push applied %d", got)
+			}
+			ms := storedMessages(t, g, room)
+			if len(ms) != 1 || ms[0].ID != id || ms[0].RemoteID != 500 || appliedSeq(t, g, room) != 1 {
+				t.Errorf("stored %+v, applied %d; answered id %d", ms, appliedSeq(t, g, room), id)
+			}
+			if n := published(sub); n != 1 {
+				t.Errorf("published %d times", n)
+			}
+		})
+	}
+}
+
+// The host's answer comes after events the replica has not seen: they
+// are pulled first, so the message is stored after them.
+func TestReplicaPost_AnswerAfterGap(t *testing.T) {
+	g, h, room, b1 := replica(t, "read", "answer")
+	host := h.id.Domain
+	h.setAnswer(func(body []byte) (int, string) {
+		ev := echo(3, 500, body)
+		h.setLog(room, roomEv(1, "proj", false), msg(2, 100, room, host, h.addr("h1"), "before", nil, "", nil), ev)
+		return http.StatusCreated, string(rawJSON(ev))
+	})
+	post(t, g, auth.Claims{KeyID: b1}, room, `{"content":"mine","message_type":"answer"}`)
+	ms := storedMessages(t, g, room)
+	if len(ms) != 2 || ms[0].Content != "before" || ms[1].Content != "mine" || appliedSeq(t, g, room) != 3 {
+		t.Errorf("stored %+v, applied %d", ms, appliedSeq(t, g, room))
+	}
+
+	// When they cannot be pulled, the message is stored out of order,
+	// and still once when they arrive.
+	g, h, room, b1 = replica(t, "read", "answer")
+	host = h.id.Domain
+	evs := make(chan fedrooms.Event, 1)
+	h.setAnswer(func(body []byte) (int, string) {
+		ev := echo(3, 500, body)
+		evs <- ev
+		return http.StatusCreated, string(rawJSON(ev))
+	})
+	id := post(t, g, auth.Claims{KeyID: b1}, room, `{"content":"mine","message_type":"answer"}`)
+	if ms := storedMessages(t, g, room); len(ms) != 1 || ms[0].ID != id || appliedSeq(t, g, room) != 0 {
+		t.Errorf("out of order: stored %+v, applied %d", ms, appliedSeq(t, g, room))
+	}
+	if got := h.push(t, g, room, roomEv(1, "proj", false), msg(2, 100, room, host, h.addr("h1"), "before", nil, "", nil), <-evs); got != 3 {
+		t.Errorf("push applied %d", got)
+	}
+	if ms := storedMessages(t, g, room); len(ms) != 2 || ms[0].ID != id || ms[1].Content != "before" {
+		t.Errorf("after the push: %+v", ms)
+	}
+}
+
+// Only a bot, a key with a handle, writes to a room hosted elsewhere.
+func TestReplicaWrites_NoHandle(t *testing.T) {
+	g, h, room, _ := replica(t, "read", "answer", "claim")
+	res, err := g.db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES ('plain', 'x', 'p-plain', '2026-01-01T00:00:00Z')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, _ := res.LastInsertId()
+	if _, err := g.db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights)
+		VALUES (?, ?, 'reader', '2026-01-01T00:00:00Z', 'read,claim,answer')`, room, plain); err != nil {
+		t.Fatal(err)
+	}
+	before := g.state(t)
+	for _, c := range []auth.Claims{{KeyID: plain}, g.admin} {
+		wantErr(t, g.do(c, http.MethodPost, "/rooms/"+room+"/messages", `{"content":"hi","message_type":"answer"}`), 403, "no_handle")
+		wantErr(t, g.do(c, http.MethodPost, "/rooms/"+room+"/claims", `{"paths":["a/"]}`), 403, "no_handle")
+	}
+	if g.state(t) != before || len(h.received()) != 0 {
+		t.Errorf("refused writes reached the host: %q", h.received())
+	}
+}
+
+// Claims of a replica are the host's: a conflict with a claim of
+// another server comes back as 409 with its conflicts.
+func TestReplicaClaims(t *testing.T) {
+	a, b, room, b1 := pair(t, "read,claim")
+	a1 := a.localBot(t, room, "a1-key", "read,claim")
+	if rec := a.do(a1, http.MethodPost, "/rooms/"+room+"/claims", `{"paths":["src/"]}`); rec.Code != http.StatusCreated {
+		t.Fatalf("claim on a: %d %s", rec.Code, rec.Body)
+	}
+	base := "/rooms/" + room + "/claims"
+	rec := b.do(b1, http.MethodPost, base, `{"paths":["src/x.go"]}`)
+	var conflict struct {
+		Error     struct{ Code string }
+		Conflicts []struct {
+			Path     string
+			HeldPath string `json:"held_path"`
+			Label    string
+		}
+	}
+	if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &conflict) != nil || conflict.Error.Code != "conflict" ||
+		len(conflict.Conflicts) != 1 || conflict.Conflicts[0].HeldPath != "src/" || conflict.Conflicts[0].Label != "a1-key" {
+		t.Errorf("overlap: %d %s", rec.Code, rec.Body)
+	}
+	if rec := b.do(b1, http.MethodPost, base, `{"paths":["doc/"]}`); rec.Code != http.StatusCreated ||
+		!strings.Contains(rec.Body.String(), `"label":"b1@`+b.svc.Domain()+`"`) {
+		t.Errorf("claim: %d %s", rec.Code, rec.Body)
+	}
+	if rec := b.do(b1, http.MethodGet, base, ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"path":"src/"`) ||
+		!strings.Contains(rec.Body.String(), `"path":"doc/"`) {
+		t.Errorf("list: %d %s", rec.Code, rec.Body)
+	}
+	if rec := b.do(b1, http.MethodPost, base+"/heartbeat", ""); rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"refreshed":1}` {
+		t.Errorf("heartbeat: %d %s", rec.Code, rec.Body)
+	}
+	if rec := b.do(b1, http.MethodPost, base+"/release", `{"paths":["doc/"]}`); rec.Code != http.StatusOK ||
+		strings.TrimSpace(rec.Body.String()) != `{"released":["doc/"]}` {
+		t.Errorf("release: %d %s", rec.Code, rec.Body)
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM claims`); n != 0 {
+		t.Errorf("b stores %d claims", n)
+	}
+}
+
+// b's operator takes b1 out of a's room: a is told first, then b1
+// leaves the replica, which is archived with no bot of b's left.
+func TestReplicaLeave(t *testing.T) {
+	a, b, room, b1 := pair(t, "read")
+	standIn := count(t, a.db, `SELECT id FROM api_keys WHERE label = ?`, "b1@"+b.svc.Domain())
+	if rec := b.do(b.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, b1.KeyID), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("leave: %d %s", rec.Code, rec.Body)
+	}
+	if n := count(t, a.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, room, standIn); n != 0 {
+		t.Error("b1's stand-in is still a member on a")
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, room, b1.KeyID); n != 0 {
+		t.Error("b1 is still a member on b")
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, room); n != 1 {
+		t.Error("replica not archived")
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.leave' AND result = 'ok'`); n != 1 {
+		t.Errorf("federation.room.leave audit rows on b: %d", n)
+	}
+	// a's member.remove reaches b and changes nothing more.
+	a.svc.deliverDue(context.Background())
+	if applied, total := appliedSeq(t, b, room), int64(len(a.events(t, room))); applied != total {
+		t.Errorf("b applied %d of %d", applied, total)
+	}
+}
+
+// A host that does not answer keeps the bot in the replica; one that no
+// longer has it in the room lets it go.
+func TestReplicaLeave_HostAnswers(t *testing.T) {
+	g, h, room, b1 := replica(t, "read")
+	leave := func() *httptest.ResponseRecorder {
+		return g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, b1), "")
+	}
+	h.setAnswer(answerWith(0, ""))
+	before := g.state(t)
+	wantErr(t, leave(), http.StatusBadGateway, "host_unreachable")
+	h.setAnswer(answerWith(403, `{"error":{"code":"peer_not_allowed","message":"peer not allowed"}}`))
+	wantErr(t, leave(), http.StatusForbidden, "peer_not_allowed")
+	if g.state(t) != before || count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, room) != 1 {
+		t.Error("a refused leave changed the replica")
+	}
+	// A key that is no member is not sent.
+	other := g.bot(t, "b2")
+	wantErr(t, g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, other), ""), http.StatusNotFound, "not_found")
+	if n := len(h.received()); n != 2 {
+		t.Errorf("host got %d requests, want 2", n)
+	}
+	h.setAnswer(answerWith(404, `{"error":{"code":"not_found","message":"not a member"}}`))
+	if rec := leave(); rec.Code != http.StatusNoContent {
+		t.Fatalf("leave: %d %s", rec.Code, rec.Body)
+	}
+	if got := h.received(); got[len(got)-1] != "POST /fed/v1/rooms/"+room+`/leave {"author":"b1@`+local+`"}`+"\n" {
+		t.Errorf("leave sent %q", got[len(got)-1])
+	}
+	if count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, room, b1) != 0 ||
+		count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, room) != 1 {
+		t.Error("b1 still in an active replica")
 	}
 }

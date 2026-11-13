@@ -677,6 +677,22 @@ func TestMessages_DeleteOnReplicaIs403(t *testing.T) {
 	}
 }
 
+// With federation off, nothing reaches a replica's host.
+func TestMessages_SendOnReplicaWithoutFederation(t *testing.T) {
+	r, db, _, roomID := setupAs(t)
+	if _, err := db.Exec(`UPDATE rooms SET home_domain = 'a.example' WHERE id = ?`, roomID); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", strings.NewReader(`{"content":"hi"}`)))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"replica_room"`) {
+		t.Errorf("send on a replica: %d %s, want 403 replica_room", rec.Code, rec.Body.String())
+	}
+	if n := count(t, db, `SELECT COUNT(*) FROM messages`); n != 0 {
+		t.Errorf("%d messages stored", n)
+	}
+}
+
 func TestMessages_StoreReplica(t *testing.T) {
 	db := setupDB(t)
 	owner := seedKey(t, db, "owner")
