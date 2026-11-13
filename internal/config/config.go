@@ -9,8 +9,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/netip"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/federation"
@@ -45,6 +47,10 @@ type Config struct {
 	FederationPort         int    // federation listener port, default 7433
 	FederationMode         string // allowlist|open, default allowlist
 	FederationInsecureHTTP bool   // contact peers over http://, for tests and local networks
+
+	// Raw environment values, converted by applyFederationEnv once the
+	// domain is known to be set.
+	fedPortEnv, fedInsecureEnv string
 }
 
 // Load builds a Config from defaults, then overlays environment
@@ -58,6 +64,9 @@ func Load(args []string) (*Config, error) {
 	}
 
 	if err := applyFlags(c, args); err != nil {
+		return nil, err
+	}
+	if err := c.applyFederationEnv(); err != nil {
 		return nil, err
 	}
 
@@ -154,17 +163,33 @@ func applyEnv(c *Config) error {
 		c.FederationHost = v
 	}
 	if v, ok := lookup("CONCLAVE_FEDERATION_PORT"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("CONCLAVE_FEDERATION_PORT: %w", err)
-		}
-		c.FederationPort = n
+		c.fedPortEnv = v
 	}
 	if v, ok := lookup("CONCLAVE_FEDERATION_MODE"); ok {
 		c.FederationMode = v
 	}
 	if v, ok := lookup("CONCLAVE_FEDERATION_INSECURE_HTTP"); ok {
-		b, err := strconv.ParseBool(v)
+		c.fedInsecureEnv = v
+	}
+	return nil
+}
+
+// applyFederationEnv parses the federation port and insecure-HTTP
+// values from the environment, only when federation is on: with an
+// empty domain they are ignored, bad or not.
+func (c *Config) applyFederationEnv() error {
+	if c.FederationDomain == "" {
+		return nil
+	}
+	if c.fedPortEnv != "" {
+		n, err := strconv.Atoi(c.fedPortEnv)
+		if err != nil {
+			return fmt.Errorf("CONCLAVE_FEDERATION_PORT: %w", err)
+		}
+		c.FederationPort = n
+	}
+	if c.fedInsecureEnv != "" {
+		b, err := strconv.ParseBool(c.fedInsecureEnv)
 		if err != nil {
 			return fmt.Errorf("CONCLAVE_FEDERATION_INSECURE_HTTP: %w", err)
 		}
@@ -266,8 +291,40 @@ func (c *Config) validateFederation() error {
 	if c.FederationPort < 1 || c.FederationPort > 65535 {
 		return fmt.Errorf("federation port %d: %w", c.FederationPort, ErrInvalidFederationPort)
 	}
-	if c.FederationHost == c.Host && c.FederationPort == c.Port {
+	if sameListener(c.Host, c.Port, c.FederationHost, c.FederationPort) {
 		return fmt.Errorf("%s:%d: %w", c.Host, c.Port, ErrFederationListener)
 	}
 	return nil
+}
+
+// sameListener reports whether two listener addresses would collide:
+// the ports are equal and the hosts are equal once normalized (IPs
+// parsed, so spellings and brackets do not matter; names compared
+// case-insensitively) or either host is unspecified.
+func sameListener(h1 string, p1 int, h2 string, p2 int) bool {
+	if p1 != p2 {
+		return false
+	}
+	a, ok1 := parseHost(h1)
+	b, ok2 := parseHost(h2)
+	if ok1 && ok2 {
+		return a == b || a.IsUnspecified() || b.IsUnspecified()
+	}
+	if ok1 != ok2 {
+		// A name and an IP: the name may resolve to it, but only an
+		// unspecified address is certain to cover it.
+		return (ok1 && a.IsUnspecified()) || (ok2 && b.IsUnspecified())
+	}
+	return strings.EqualFold(h1, h2)
+}
+
+func parseHost(h string) (netip.Addr, bool) {
+	if h == "" { // net.Listen treats an empty host as all interfaces
+		return netip.IPv6Unspecified(), true
+	}
+	a, err := netip.ParseAddr(strings.Trim(h, "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.Unmap().WithZone(""), true
 }

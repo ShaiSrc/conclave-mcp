@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -105,7 +106,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 	}
 	s.router = s.buildRouter(deps, uiSvc, fedSvc)
 	s.http = &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
 		Handler:           s.router,
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
@@ -126,7 +127,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		// timeouts (a document fetch of up to 5 s comes before the body
 		// is read) and a small header cap.
 		s.fed = &http.Server{
-			Addr:              fmt.Sprintf("%s:%d", cfg.FederationHost, cfg.FederationPort),
+			Addr:              net.JoinHostPort(cfg.FederationHost, strconv.Itoa(cfg.FederationPort)),
 			Handler:           fr,
 			ReadHeaderTimeout: cfg.ReadHeader,
 			ReadTimeout:       10 * time.Second,

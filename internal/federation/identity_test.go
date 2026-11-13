@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -56,6 +57,38 @@ func TestLoadOrCreateIdentity_StableAcrossReload(t *testing.T) {
 	msg := []byte("hello")
 	if !ed25519.Verify(again.Public, msg, again.Sign(msg)) {
 		t.Error("a reloaded identity's signature does not verify")
+	}
+}
+
+// Starts racing on one database all end with the one stored key.
+func TestLoadOrCreateIdentity_Race(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	const n = 16
+	ids := make([]*Identity, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ids[i], errs[i] = LoadOrCreateIdentity(ctx, db, "a.example")
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for i := range ids {
+		if errs[i] != nil {
+			t.Fatalf("call %d: %v", i, errs[i])
+		}
+		if ids[i].KeyID != ids[0].KeyID {
+			t.Errorf("call %d got key %s, want %s", i, ids[i].KeyID, ids[0].KeyID)
+		}
+	}
+	if got := count(t, db, `SELECT COUNT(*) FROM federation_keys`); got != 1 {
+		t.Errorf("federation_keys rows: %d, want 1", got)
 	}
 }
 

@@ -167,15 +167,18 @@ The server checks in this order and stops at the first failure.
 6. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
 7. Read the body, at most 64 KiB (413 `too_large`), and verify the
    signature. Otherwise 401 `bad_signature`.
-8. Store the nonce for (origin, nonce). A duplicate: 401 `bad_signature`.
-9. Per-peer rate limit: 429 `rate_limited` with `Retry-After`.
+8. Per-peer rate limit: 429 `rate_limited` with `Retry-After`.
+9. Store the nonce for (origin, nonce). A duplicate: 401 `bad_signature`.
 10. Record an unknown open-mode peer as `seen` with its key. If a row for
     it appeared meanwhile (a concurrent first request, an operator), that
     row decides: blocked or not allowed is 403 `peer_not_allowed`, another
     fingerprint is 401 `bad_signature`. Update `last_seen_at`.
 
 Nonces and `seen` peers are stored only after the signature verifies.
-The rate limit counts verified requests only.
+The rate limit counts verified requests only. It runs before the nonce is
+stored, so a 429 writes no row. A request refused with 429 was not
+processed, so a later copy of it within the window may be processed once;
+every signed request is still processed at most once.
 
 ## Error codes
 
@@ -232,8 +235,9 @@ link-local, multicast, unspecified and broadcast; private (RFC 1918,
 RFC 4193); CGNAT (100.64.0.0/10), 0.0.0.0/8, 192.0.0.0/24,
 198.18.0.0/15 and 240.0.0.0/4; IPv4-compatible (::/96), documentation
 (2001:db8::/32) and site-local (fec0::/10) IPv6; 6to4 (2002::/16) and
-Teredo (2001::/32). A NAT64 address (64:ff9b::/96, 64:ff9b:1::/48) is
-judged by the IPv4 address in its last 32 bits.
+Teredo (2001::/32). The local-use NAT64 range 64:ff9b:1::/48 is refused
+outright (it can embed IPv4 at other offsets). A NAT64 address
+(64:ff9b::/96) is judged by the IPv4 address in its last 32 bits.
 An `allowed` peer may be private, because the operator chose it. This
 also means a server cannot reach a peer on a private address until it is
 allowed. The operator's own lookup (`peers add`) counts as allowed for

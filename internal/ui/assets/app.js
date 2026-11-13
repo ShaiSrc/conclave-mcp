@@ -107,7 +107,7 @@ async function header() {
   }
   return [
     h('a', { href: '#/' }, 'Rooms'), h('a', { href: '#/keys' }, 'Keys'),
-    h('a', { href: '#/audit' }, 'Audit'), federation && h('a', { href: '#/federation' }, 'Federation'),
+    h('a', { href: '#/audit' }, 'Audit'), ...(federation ? [h('a', { href: '#/federation' }, 'Federation')] : []),
     h('a', { href: '#/passkeys' }, 'Passkeys'),
     h('span', { class: 'rooms' }, rooms.map(r => h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name))),
     msg,

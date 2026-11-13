@@ -312,7 +312,7 @@ func TestVerify_BadSignatureStoresNothing(t *testing.T) {
 	}
 }
 
-// Step 8.
+// Step 9.
 func TestVerify_Replay(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
@@ -326,7 +326,7 @@ func TestVerify_Replay(t *testing.T) {
 	wantErr(t, serve(svc, again), http.StatusUnauthorized, "bad_signature")
 }
 
-// Step 9.
+// Step 8: a 429 writes no nonce row.
 func TestVerify_RateLimit(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
@@ -340,6 +340,9 @@ func TestVerify_RateLimit(t *testing.T) {
 	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("no Retry-After")
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM federation_nonces`); n != 30 {
+		t.Errorf("nonce rows: %d, want 30 (the 429 writes none)", n)
 	}
 }
 

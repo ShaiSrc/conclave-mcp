@@ -303,6 +303,21 @@ func TestServer_FederationListener(t *testing.T) {
 	}
 }
 
+// Listener addresses are built with JoinHostPort, so an IPv6 host is
+// bracketed. No socket is opened.
+func TestServer_IPv6ListenerAddrs(t *testing.T) {
+	s, err := New(Config{
+		Host: "::1", Port: 7432,
+		FederationDomain: "conclave.example.org", FederationHost: "::1", FederationPort: 7433,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.http.Addr != "[::1]:7432" || s.fed.Addr != "[::1]:7433" {
+		t.Errorf("addrs: %q, %q", s.http.Addr, s.fed.Addr)
+	}
+}
+
 // Without a domain there is no second listener and no key.
 func TestServer_NoFederationWithoutDomain(t *testing.T) {
 	db := uiDB(t)

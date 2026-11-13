@@ -35,10 +35,14 @@ var errNonPublicAddr = errors.New("refusing a non-public address")
 var nonPublic = prefixes(
 	"0.0.0.0/8", "100.64.0.0/10", "192.0.0.0/24", "198.18.0.0/15", "240.0.0.0/4", "255.255.255.255/32",
 	"::/96", "2001:db8::/32", "fec0::/10", "2002::/16", "2001::/32",
+	// RFC 8215 local-use NAT64 prefixes may embed the IPv4 address at
+	// other offsets, so they are refused outright.
+	"64:ff9b:1::/48",
 )
 
-// nat64 prefixes carry an IPv4 address in their last 32 bits.
-var nat64 = prefixes("64:ff9b::/96", "64:ff9b:1::/48")
+// nat64 is the well-known NAT64 prefix; it carries an IPv4 address in
+// its last 32 bits.
+var nat64 = prefixes("64:ff9b::/96")
 
 func prefixes(ss ...string) []netip.Prefix {
 	out := make([]netip.Prefix, len(ss))

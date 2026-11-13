@@ -234,6 +234,52 @@ func TestLoad_ValidationErrors(t *testing.T) {
 	}
 }
 
+// With federation off, bad federation port and insecure-HTTP values are
+// ignored.
+func TestLoad_BadFederationEnvIgnoredWhenOff(t *testing.T) {
+	t.Setenv("CONCLAVE_FEDERATION_PORT", "x")
+	t.Setenv("CONCLAVE_FEDERATION_INSECURE_HTTP", "yes")
+	c, err := Load([]string{})
+	if err != nil {
+		t.Fatalf("Load with federation off: %v", err)
+	}
+	if c.FederationPort != 7433 || c.FederationInsecureHTTP {
+		t.Errorf("got port %d insecure %v, want the defaults", c.FederationPort, c.FederationInsecureHTTP)
+	}
+}
+
+func TestSameListener(t *testing.T) {
+	tests := []struct {
+		h1   string
+		p1   int
+		h2   string
+		p2   int
+		want bool
+	}{
+		{"127.0.0.1", 7432, "127.0.0.1", 7433, false},
+		{"127.0.0.1", 7432, "127.0.0.1", 7432, true},
+		{"127.0.0.1", 7432, "::ffff:127.0.0.1", 7432, true},
+		{"::1", 7432, "[::1]", 7432, true},
+		{"::1", 7432, "0:0:0:0:0:0:0:1", 7432, true},
+		{"::1", 7432, "127.0.0.1", 7432, false},
+		{"0.0.0.0", 7432, "127.0.0.1", 7432, true},
+		{"127.0.0.1", 7432, "0.0.0.0", 7432, true},
+		{"::", 7432, "10.0.0.5", 7432, true},
+		{"::", 7432, "::1", 7432, true},
+		{"", 7432, "10.0.0.5", 7432, true},
+		{"0.0.0.0", 7432, "127.0.0.1", 7433, false},
+		{"LocalHost", 7432, "localhost", 7432, true},
+		{"a.example", 7432, "b.example", 7432, false},
+		{"0.0.0.0", 7432, "localhost", 7432, true},
+		{"10.0.0.5", 7432, "localhost", 7432, false},
+	}
+	for _, tt := range tests {
+		if got := sameListener(tt.h1, tt.p1, tt.h2, tt.p2); got != tt.want {
+			t.Errorf("sameListener(%q:%d, %q:%d) = %v, want %v", tt.h1, tt.p1, tt.h2, tt.p2, got, tt.want)
+		}
+	}
+}
+
 func TestLoad_EnvParseErrors(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -251,6 +297,7 @@ func TestLoad_EnvParseErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("CONCLAVE_FEDERATION_DOMAIN", "a.example")
 			t.Setenv(tt.envKey, tt.envVal)
 			_, err := Load([]string{})
 			if err == nil {

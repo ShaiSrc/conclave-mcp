@@ -30,23 +30,30 @@ type Identity struct {
 // key in federation_keys, generating and storing a key if there is
 // none. The domain comes from configuration; it is not stored.
 func LoadOrCreateIdentity(ctx context.Context, db *sql.DB, domain string) (*Identity, error) {
+	const load = `SELECT private_key FROM federation_keys
+		WHERE retired_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`
 	var priv []byte
-	err := db.QueryRowContext(ctx, `SELECT private_key FROM federation_keys
-		WHERE retired_at IS NULL ORDER BY created_at DESC, rowid DESC LIMIT 1`).Scan(&priv)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		var pub ed25519.PublicKey
-		if pub, priv, err = ed25519.GenerateKey(rand.Reader); err != nil {
-			return nil, fmt.Errorf("generate federation key: %w", err)
+	err := db.QueryRowContext(ctx, load).Scan(&priv)
+	if errors.Is(err, sql.ErrNoRows) {
+		pub, gen, genErr := ed25519.GenerateKey(rand.Reader)
+		if genErr != nil {
+			return nil, fmt.Errorf("generate federation key: %w", genErr)
 		}
-		if _, err := db.ExecContext(ctx, `INSERT INTO federation_keys
-			(key_id, public_key, private_key, created_at) VALUES (?, ?, ?, ?)`,
-			KeyIDFor(pub), []byte(pub), priv, storage.FormatTS(time.Now())); err != nil {
+		// One statement, so two starts racing on one database cannot
+		// both store a key; the loser reads the winner's.
+		if _, err = db.ExecContext(ctx, `INSERT INTO federation_keys
+			(key_id, public_key, private_key, created_at)
+			SELECT ?, ?, ?, ? WHERE NOT EXISTS
+			(SELECT 1 FROM federation_keys WHERE retired_at IS NULL)`,
+			KeyIDFor(pub), []byte(pub), []byte(gen), storage.FormatTS(time.Now())); err != nil {
 			return nil, fmt.Errorf("store federation key: %w", err)
 		}
-	case err != nil:
+		err = db.QueryRowContext(ctx, load).Scan(&priv)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("load federation key: %w", err)
-	case len(priv) != ed25519.PrivateKeySize:
+	}
+	if len(priv) != ed25519.PrivateKeySize {
 		return nil, fmt.Errorf("load federation key: stored private key has %d bytes", len(priv))
 	}
 	key := ed25519.PrivateKey(priv)

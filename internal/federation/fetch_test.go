@@ -50,7 +50,7 @@ func TestRefuseNonPublic(t *testing.T) {
 		"0.1.2.3", "255.255.255.255", "192.0.0.170", "198.18.0.1", "240.0.0.1", // other special IPv4
 		"fec0::1", "::a00:1", "2001:db8::1", // site-local, IPv4-compatible, documentation
 		"2002:a00:1::", "2001::1", // 6to4, Teredo
-		"64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b:1::a00:1", // NAT64 of private and loopback
+		"64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b:1::a00:1", "64:ff9b:1:abcd:a:0:108:808", // NAT64 of private and loopback; local-use /48 refused outright
 	} {
 		if err := refuseNonPublic("tcp", net.JoinHostPort(a, "80"), nil); !errors.Is(err, errNonPublicAddr) {
 			t.Errorf("%s: %v, want refused", a, err)

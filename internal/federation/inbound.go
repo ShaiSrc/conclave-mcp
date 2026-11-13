@@ -114,7 +114,20 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "signature does not verify")
 			return
 		}
-		// 8. Nonce. The window is checked again first: a slow body
+		// 8. Per-peer rate limit, on verified requests only. It comes
+		// before the nonce so a refused request writes no row.
+		if lim := s.limiter(origin); !lim.Allow() {
+			rsv := lim.Reserve()
+			delay := rsv.Delay()
+			rsv.Cancel()
+			if delay < time.Second {
+				delay = time.Second
+			}
+			w.Header().Set("Retry-After", strconv.Itoa(int(delay.Seconds())))
+			s.refuse(w, r, origin, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
+			return
+		}
+		// 9. Nonce. The window is checked again first: a slow body
 		// could otherwise outlast the stored nonce of an earlier copy.
 		if !inWindow(p.TS) {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "clock_skew", "timestamp outside ±300 s")
@@ -128,18 +141,6 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 		}
 		if n, err := res.RowsAffected(); err != nil || n == 0 {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "nonce already used")
-			return
-		}
-		// 9. Per-peer rate limit, on verified requests only.
-		if lim := s.limiter(origin); !lim.Allow() {
-			rsv := lim.Reserve()
-			delay := rsv.Delay()
-			rsv.Cancel()
-			if delay < time.Second {
-				delay = time.Second
-			}
-			w.Header().Set("Retry-After", strconv.Itoa(int(delay.Seconds())))
-			s.refuse(w, r, origin, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
 			return
 		}
 		// 10. Record a first contact; update last seen.
