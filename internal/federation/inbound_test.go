@@ -224,7 +224,7 @@ func TestVerify_KeyChanged(t *testing.T) {
 			t.Fatalf("%s: no key_changed audit row: %v", tc.mode, err)
 		}
 		want := fmt.Sprintf(`{"presented":%q,"expected":%q}`, rm.id.KeyID, other)
-		if targetType != "peer" || targetID != rm.domain() || detail != want {
+		if targetType != "federation_peer" || targetID != rm.domain() || detail != want {
 			t.Errorf("%s: audit %s %s %s, want peer %s %s", tc.mode, targetType, targetID, detail, rm.domain(), want)
 		}
 		if n := rm.hits.Load(); n != 0 {
@@ -350,7 +350,7 @@ func TestVerify_OpenModeFirstContact(t *testing.T) {
 		WHERE action = 'federation.peer.seen'`).Scan(&targetType, &targetID, &detail); err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf(`{"fingerprint":%q}`, rm.id.Fingerprint()); targetType != "peer" || targetID != rm.domain() || detail != want {
+	if want := fmt.Sprintf(`{"fingerprint":%q}`, rm.id.Fingerprint()); targetType != "federation_peer" || targetID != rm.domain() || detail != want {
 		t.Errorf("audit %s %s %s", targetType, targetID, detail)
 	}
 	wantOK(t, serve(svc, signed(t, rm.id, local, "{}")))

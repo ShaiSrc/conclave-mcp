@@ -173,7 +173,7 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			}
 			if inserted {
 				detail, _ := json.Marshal(map[string]string{"fingerprint": fp})
-				_ = audit.Write(ctx, s.db, 0, "federation.peer.seen", "peer", origin, "", "ok", string(detail))
+				_ = audit.Write(ctx, s.db, 0, "federation.peer.seen", "federation_peer", origin, "", "ok", string(detail))
 			}
 			s.cacheKey(pub)
 		}
@@ -273,7 +273,7 @@ func (s *Service) keyChanged(ctx context.Context, domain, presented, expected st
 		Presented string `json:"presented"`
 		Expected  string `json:"expected"`
 	}{presented, expected})
-	_ = audit.Write(ctx, s.db, 0, "federation.key_changed", "peer", domain, "", "error:bad_signature", string(detail))
+	_ = audit.Write(ctx, s.db, 0, "federation.key_changed", "federation_peer", domain, "", "error:bad_signature", string(detail))
 }
 
 // refuse answers with an error and logs it at warn, at most one line

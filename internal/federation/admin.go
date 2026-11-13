@@ -80,7 +80,7 @@ func (s *Service) audit(ctx context.Context, action, domain, detail string) {
 func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.peers.List(r.Context())
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	n := map[string]int{statusAllowed: 0, statusBlocked: 0, statusSeen: 0}
@@ -94,7 +94,7 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.peers.List(r.Context())
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	out := make([]peerView, 0, len(peers))
@@ -165,13 +165,13 @@ func (s *Service) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.peers.Allow(r.Context(), domain, in.Fingerprint, in.Note); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	s.audit(r.Context(), "federation.peer.add", domain, in.Fingerprint)
 	p, err := s.peers.Get(r.Context(), domain)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusCreated, viewOf(p))
@@ -184,13 +184,13 @@ func (s *Service) handleBlockPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.peers.Block(r.Context(), domain); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	s.audit(r.Context(), "federation.peer.block", domain, "")
 	p, err := s.peers.Get(r.Context(), domain)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, viewOf(p))
@@ -206,7 +206,7 @@ func (s *Service) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, ErrPeerNotFound):
 		writeErr(w, r, http.StatusNotFound, "peer_not_found", "no such peer")
 	case err != nil:
-		writeErr(w, r, http.StatusInternalServerError, "internal", err.Error())
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 	default:
 		s.audit(r.Context(), "federation.peer.remove", domain, "")
 		w.WriteHeader(http.StatusNoContent)
