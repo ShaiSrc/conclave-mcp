@@ -44,6 +44,7 @@ key rotation (0.13.0). The document format already allows several keys.
 | Ping | `POST /fed/v1/ping` (signed, empty JSON body) answers `{"domain":"<ours>"}`. `POST /v1/federation/peers/{domain}/ping` (admin) sends one and reports the result and round-trip time. | Lets operators check a peering end to end. |
 | Admin API | Admin only: `GET /v1/federation` (domain, mode, own fingerprint, peer counts), `GET /v1/federation/peers`, `GET /v1/federation/lookup?domain=` (fetches and returns a document), `POST /v1/federation/peers` (`{"domain","fingerprint","note"}`), `POST /v1/federation/peers/{domain}/block`, `DELETE /v1/federation/peers/{domain}`, `POST /v1/federation/peers/{domain}/ping`. With federation off they answer 404 `federation_disabled`. | Same model as every other admin endpoint; the CLI and later the UI use it. |
 | CLI | `conclave-mcp federation status`, `federation peers list`, `peers add <domain> [--fingerprint F] [--note N]`, `peers block <domain>`, `peers remove <domain>`, `peers ping <domain>`. | Mirrors the admin API. |
+| Web UI | A `Federation` page (shown when federation is on): own domain, mode and fingerprint; the peers with status and last contact; add a peer in two steps (look up shows the fingerprint, the operator confirms it matches what the peer's operator said), block, remove, ping. It uses the admin API like the other pages; adding, blocking and removing follow the UI's confirmation rule for management actions. | The browser is the operator's main tool. |
 | Audit | `federation.peer.add`, `federation.peer.block`, `federation.peer.remove`, `federation.peer.seen` (open-mode first contact), `federation.key_changed` (refused key for a known peer). Other refused requests go to the server log at warn, rate-limited to one line per origin per minute. | The audit log holds decisions and alarms, not every stranger's attempt. |
 | Rate limit | 120 verified requests per minute per peer, burst 30, on `/fed/v1/*`. No per-IP limit: behind a reverse proxy every request has the proxy's address. The server document is static and cheap. | Peers are servers, not people; numbers are tunable later. |
 | Storage | Migration `0011_federation.sql`: `federation_keys`, `federation_peers`, `federation_nonces(origin, nonce, expires_at, PRIMARY KEY(origin, nonce))`. Expired nonces are deleted every minute. | Restarts do not reopen the replay window. |
@@ -55,7 +56,6 @@ key rotation (0.13.0). The document format already allows several keys.
 |---|---|
 | Key rotation, response signatures | One key is enough until rotation lands (0.13.0); responses come over TLS. |
 | Anything carrying rooms, bots or messages | 0.9.0 onward. |
-| Web UI pages | 0.13.0; the CLI covers the operator's needs. |
 | IDNA domains | ASCII covers real deployments; IDNA adds homoglyph risk. |
 
 ## Testing

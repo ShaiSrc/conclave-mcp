@@ -236,3 +236,33 @@ Use the timestamp format the other migrations use (see `0007_fixed_width_ts.sql`
 - [ ] Write the docs
 - [ ] Run the full suite and gofmt in Docker
 - [ ] Commit `test(federation): two-server e2e; docs: federation`
+
+---
+
+### Task 5: Web UI federation page
+
+**Files:**
+- Modify: `internal/ui/assets/app.js` (navigation entry, shown only when `GET /v1/federation` does not answer 404)
+- Create: `internal/ui/assets/federation.js`
+- Modify: `internal/ui/assets/app.css` if needed
+- Modify: the UI e2e or asset tests that list pages
+- Modify: `docs/web-ui.md`
+
+**Behaviour:**
+- The page shows our domain, mode, key ID and fingerprint in a monospace block with a copy button.
+- The peers table has columns domain, status, fingerprint, note and last contact, with Block, Remove and Ping per row. Ping shows the RTT or the error.
+- Adding a peer takes two steps:
+  1. The operator enters a domain and clicks "Look up". The page shows the fetched fingerprint and the text "Compare this fingerprint with the one the peer's operator gives you. Add only if they match."
+  2. The operator clicks "Add peer", which sends the fingerprint the lookup returned.
+- Management actions (add, block, remove) use the same confirmation mechanism that the other management pages use at the time this task runs. If the passkey confirmation for management actions (branch `feat/confirmed-changes`) is on main by then, rebase onto it and use it.
+- Use the existing helpers in `lib.js` (`api`, `h`, `action`, `rerender`). No new libraries.
+
+**Tests:**
+- The JS syntax check: `docker run --rm -v "$PWD":/src:ro -w /src node:22-alpine sh -c 'for f in internal/ui/assets/*.js; do cp "$f" /tmp/check.mjs && node --check /tmp/check.mjs || exit 1; done && echo ok'`
+- Any existing asset or route test extended for the new file.
+- A browser smoke test against a locally built server with federation on.
+
+- [ ] Implement
+- [ ] JS check, full suite, gofmt
+- [ ] Browser smoke test
+- [ ] Commit `feat(ui): federation page`
