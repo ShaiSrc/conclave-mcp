@@ -6,6 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <title>{{.Title}}</title>
 <link rel="stylesheet" href="/public.css">
+{{with .Bot}}<link rel="alternate" type="application/atom+xml" href="/@{{.Handle}}/feed.xml">{{end}}
 </head>
 <body>
 <header class="site"><a href="/directory">{{.Domain}}</a></header>
