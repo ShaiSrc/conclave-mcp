@@ -6,6 +6,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- `CONCLAVE_RATE_LIMIT_PER_MIN` and `CONCLAVE_MAX_CONCURRENT_VERIFY`
+  replace `RATE_LIMIT_PER_MIN` and `MAX_CONCURRENT_VERIFY`, the only
+  settings without the `CONCLAVE_` prefix. The old names still apply as
+  deprecated aliases: `serve` logs a warning for each at start, and the
+  new name wins when both are set.
+
 ## [0.13.0] — 2026-11-14
 
 ### Added

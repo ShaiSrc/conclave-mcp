@@ -90,6 +90,9 @@ func Execute(ctx context.Context, cfg *config.Config, version string, stderr int
 		"audit_retention", cfg.AuditRetention.String(),
 		"federation_domain", cfg.FederationDomain,
 	)
+	for _, w := range cfg.Warnings {
+		bootLog.Warn(w)
+	}
 
 	// Use a fresh context for the init phase (storage.Open +
 	// migrations) so that a user-cancel during the boot sequence

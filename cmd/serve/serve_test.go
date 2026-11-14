@@ -226,3 +226,30 @@ func TestNewCmd_Version(t *testing.T) {
 		t.Errorf("boot log lacks the version:\n%s", out.String())
 	}
 }
+
+// runServe runs `serve args...` with its boot cancelled at once and
+// returns the log.
+func runServe(t *testing.T, args ...string) (string, error) {
+	t.Helper()
+	var out bytes.Buffer
+	cmd := NewCmd()
+	cmd.SetArgs(args)
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // boot, then shut down at once
+	err := cmd.ExecuteContext(ctx)
+	return out.String(), err
+}
+
+// A deprecated env name in use is logged as a warning at start.
+func TestNewCmd_DeprecatedEnvWarns(t *testing.T) {
+	t.Setenv("RATE_LIMIT_PER_MIN", "60")
+	out, err := runServe(t, "--port", fmt.Sprint(freePort(t)), "--db", t.TempDir()+"/data.db")
+	if err != nil {
+		t.Fatalf("serve: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, `"level":"WARN","msg":"RATE_LIMIT_PER_MIN is deprecated`) || !strings.Contains(out, `"rate_limit_per_min":60`) {
+		t.Errorf("no deprecation warning or the old name did not apply:\n%s", out)
+	}
+}
