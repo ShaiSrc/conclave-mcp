@@ -204,7 +204,16 @@ batch stops before that event, the document is fetched, and the batch
 goes on from the event, which is then judged against it. One host's
 events cause at most 5 such fetches a minute, whatever domains their
 authors name; past that, an author signature that verifies with none of
-the stored keys is skipped as wrong.
+the stored keys is skipped as wrong (a host can spend that budget
+itself, so it must not make a forgery count). A host that relays more
+rotated servers than that in one minute can lose a message this way;
+this is a known limit.
+
+When the author's document cannot be fetched this minute (the server is
+unreachable), a well-formed signature cannot be checked: the message is
+kept, marked unverified, as for a server whose key is not known, instead
+of being lost after a rotation. A malformed or missing signature is
+still skipped.
 
 The key history keeps retired keys trusted for author signatures, so
 old messages still verify. When a retired key may have leaked, the

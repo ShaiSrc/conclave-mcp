@@ -304,23 +304,35 @@ func (e *needDocError) Error() string { return "the document of " + e.domain + "
 // verifies with none of its keys: the peer may have rotated without a
 // request to us. It adopts the current key of the peer's document from
 // the last minute (docs) and returns it, or nil when there is none to
-// adopt. It fetches nothing: without such a document it returns
-// needDocError, for the caller to fetch one outside the lock and apply the
-// event again, at most repinsPerMinute times a minute for each host;
-// past that the signature is wrong.
-func (s *Service) repinAuthor(ctx context.Context, host string, peer Peer) (ed25519.PublicKey, error) {
-	doc, ok, err := s.docs.peek(peer.Domain)
+// adopt: then the signature is wrong. It fetches nothing: without such a
+// document it returns needDocError, for the caller to fetch one outside
+// the lock and apply the event again, at most repinsPerMinute times a
+// minute for each host; past that budget the signature counts as wrong (a
+// host can spend the budget itself, so it must not make a forgery count).
+// When the document could not be fetched this minute, the signature cannot
+// be checked (unchecked): the caller keeps a well-formed one, marked
+// unverified, as for a server whose key we do not know, rather than lose a
+// message of a server that rotated while unreachable.
+func (s *Service) repinAuthor(ctx context.Context, host string, peer Peer) (pub ed25519.PublicKey, unchecked bool, err error) {
+	doc, ok, ferr := s.docs.peek(peer.Domain)
 	if !ok {
 		lims, err := s.limitersOf(ctx, host)
-		if err != nil || !lims.repins.Allow() {
-			return nil, err
+		if err != nil {
+			return nil, false, err
 		}
-		return nil, &needDocError{peer.Domain}
+		if !lims.repins.Allow() {
+			return nil, false, nil
+		}
+		return nil, false, &needDocError{peer.Domain}
 	}
-	if err != nil || doc.Keys[0].KeyID == KeyIDFor(peer.PublicKey) {
-		return nil, nil // unreachable, or no rotation: the signature is wrong
+	switch {
+	case ferr != nil: // unreachable this minute
+		return nil, true, nil
+	case doc.Keys[0].KeyID == KeyIDFor(peer.PublicKey): // no rotation
+		return nil, false, nil
 	}
-	return s.adopt(ctx, peer, doc.Keys[0]) // newest first
+	pub, err = s.adopt(ctx, peer, doc.Keys[0]) // newest first
+	return pub, false, err
 }
 
 // adopt pins k, a key of peer's document, when it is endorsed by the

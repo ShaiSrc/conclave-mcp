@@ -89,9 +89,10 @@ func (ps *Peers) List(ctx context.Context) ([]Peer, error) {
 
 // Allow makes domain an allowed peer pinned to pub, replacing any
 // earlier status, blocked included. A key it replaces goes to the
-// peer's key history. For a domain that was blocked or had no row
-// (removed, or never peered), its stand-ins, which a purge revoked, are
-// no longer revoked, except those of bots the operator blocked.
+// peer's key history. For a domain that was not allowed (blocked, seen
+// after a removal in open mode, or with no row), its stand-ins, which a
+// purge revoked, are no longer revoked, except those of bots the
+// operator blocked.
 func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey, note string) error {
 	tx, err := ps.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -109,7 +110,7 @@ func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey
 			return err
 		}
 	}
-	if status == "" || status == statusBlocked {
+	if status != statusAllowed { // blocked, seen (after a removal, a request in open mode), or no row
 		if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE remote_domain = ? AND revoked_at IS NOT NULL
 			AND label NOT IN (SELECT address FROM blocked_bots)`, domain); err != nil {
 			return err

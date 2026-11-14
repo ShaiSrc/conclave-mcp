@@ -117,8 +117,20 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 		return nil, fmt.Errorf("generate federation key: %w", err)
 	}
 	keyID := KeyIDFor(pub)
-	endorsement, _ := json.Marshal(Endorsement{KeyID: id.KeyID,
-		Sig: b64.EncodeToString(id.Sign(EndorsementString(id.Domain, id.KeyID, keyID, b64.EncodeToString(pub))))})
+	endorsedBy := Endorsement{KeyID: id.KeyID,
+		Sig: b64.EncodeToString(id.Sign(EndorsementString(id.Domain, id.KeyID, keyID, b64.EncodeToString(pub))))}
+	endorsement, _ := json.Marshal(endorsedBy)
+	until := storage.FormatTS(now.Add(keyOverlap))
+	// The new identity is built before the commit: after it, nothing that
+	// can fail stands between the stored key and the one we sign with.
+	next := &Identity{Domain: id.Domain, KeyID: keyID, Public: pub, private: priv,
+		keys: []ownKey{{keyID: keyID, public: pub, endorsedBy: &endorsedBy}}}
+	for _, k := range id.keys {
+		if k.keyID == id.KeyID {
+			k.retiredAt, _ = time.Parse(time.RFC3339Nano, until)
+		}
+		next.keys = append(next.keys, k)
+	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -126,7 +138,7 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx, `UPDATE federation_keys SET retired_at = ? WHERE key_id = ? AND retired_at IS NULL
 		AND NOT EXISTS (SELECT 1 FROM federation_keys WHERE retired_at > ?)`,
-		storage.FormatTS(now.Add(keyOverlap)), id.KeyID, storage.FormatTS(now))
+		until, id.KeyID, storage.FormatTS(now))
 	if err != nil {
 		return nil, err
 	}
@@ -142,7 +154,7 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return LoadOrCreateIdentity(ctx, db, id.Domain)
+	return next, nil
 }
 
 // EndorsementString is what a server's previous key signs for the key

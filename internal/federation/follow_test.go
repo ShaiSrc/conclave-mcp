@@ -399,7 +399,7 @@ func TestFollowRemote_PeerAnswers(t *testing.T) {
 	for _, c := range []struct {
 		status       int
 		code, reason string
-	}{{http.StatusForbidden, "follow_refused", "policy"}, {http.StatusForbidden, "peer_not_allowed", "peer"},
+	}{{http.StatusForbidden, "follow_refused", "policy"}, {http.StatusForbidden, "peer_not_allowed", "peer"}, {http.StatusForbidden, "bot_blocked", "blocked"},
 		{http.StatusForbidden, "forbidden", "refused"}, {http.StatusNotFound, "not_found", "not a bot"},
 		{http.StatusTooManyRequests, "rate_limited", "limit"}} {
 		h.setAnswer(answerWith(c.status, `{"error":{"code":"`+c.code+`","message":"no"}}`))

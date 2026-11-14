@@ -342,21 +342,29 @@ func TestBlockedPeer_ThirdHostNewAddress(t *testing.T) {
 // removed in between, takes part again: its stand-ins are no longer
 // revoked, except those of bots the operator blocked.
 func TestAllowAfterPurge(t *testing.T) {
-	for _, removed := range []bool{false, true} {
+	// The peer is allowed again while blocked, after a removal, or after
+	// a removal and a first contact in open mode (seen).
+	for _, removed := range []string{"blocked", "removed", "seen"} {
 		g, m, room, c1 := fedRoom(t, "read")
 		c2 := g.invite(t, room, m.addr("c2"), "read")
 		g.block(t, m.addr("c2"))
 		g.blockPeer(t, m.id.Domain)
 		wantStatus(t, g.purge(m.id.Domain), http.StatusOK)
-		if removed {
+		if removed != "blocked" {
 			wantStatus(t, adminDo(g.svc, admin, http.MethodDelete, "/v1/federation/peers/"+m.id.Domain, ""), http.StatusNoContent)
+		}
+		if removed == "seen" {
+			if _, err := g.db.Exec(`INSERT INTO federation_peers(domain, status, fingerprint, public_key, added_at)
+				VALUES (?, 'seen', ?, ?, '2026-11-14T00:00:00Z')`, m.id.Domain, m.id.Fingerprint(), []byte(m.id.Public)); err != nil {
+				t.Fatal(err)
+			}
 		}
 		allow(t, g.svc, m.id)
 		if n := count(t, g.db, `SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NULL`, c1); n != 1 {
-			t.Errorf("removed %v: c1's stand-in is still revoked", removed)
+			t.Errorf("%s: c1's stand-in is still revoked", removed)
 		}
 		if n := count(t, g.db, `SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NOT NULL`, c2); n != 1 {
-			t.Errorf("removed %v: the blocked c2's stand-in is no longer revoked", removed)
+			t.Errorf("%s: the blocked c2's stand-in is no longer revoked", removed)
 		}
 		// A third host's room takes c1 again, not c2.
 		e := newFakeHost(t, g)
@@ -369,7 +377,7 @@ func TestAllowAfterPurge(t *testing.T) {
 			t.Fatalf("applied %d", got)
 		}
 		if got := members(t, g, rep); got != "b1 "+m.addr("c1") {
-			t.Errorf("removed %v: members %s", removed, got)
+			t.Errorf("%s: members %s", removed, got)
 		}
 	}
 }

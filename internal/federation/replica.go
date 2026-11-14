@@ -933,9 +933,12 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 			return false, err
 		}
 		if !ok {
-			pub, err := s.repinAuthor(ctx, host, peer)
-			if err != nil {
+			pub, unchecked, err := s.repinAuthor(ctx, host, peer)
+			switch {
+			case err != nil:
 				return false, err
+			case unchecked && wellFormed(m, p.OriginSig): // kept, marked unverified, not lost
+				return true, nil
 			}
 			ok = pub != nil && VerifyMessage(pub, m, p.OriginSig)
 		}
@@ -944,6 +947,14 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 		return false, refused("the author signature of %s does not verify", p.Author)
 	}
 	return false, nil
+}
+
+// wellFormed reports whether sig and m's nonce have the form of an author
+// signature (canonical base64, the right sizes), whatever key made it.
+func wellFormed(m MessageSig, sig string) bool {
+	n, nerr := decodeB64(m.Nonce)
+	b, err := decodeB64(sig)
+	return nerr == nil && len(n) == 16 && err == nil && len(b) == ed25519.SignatureSize
 }
 
 // localMetadata is a replica message's metadata as stored here: the

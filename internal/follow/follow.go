@@ -513,6 +513,8 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 			w.Header().Set("Retry-After", "3600")
 		case fe.Status == http.StatusForbidden && fe.Code == "follow_refused":
 			reason = "policy"
+		case fe.Status == http.StatusForbidden && fe.Code == "bot_blocked":
+			reason = "blocked"
 		case fe.Status == http.StatusForbidden && fe.Code == "peer_not_allowed":
 			reason = "peer"
 		case fe.Status == http.StatusForbidden:

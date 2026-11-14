@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -553,7 +554,8 @@ func TestVerify_RepinFetchFailureGated(t *testing.T) {
 
 // A host that relays messages in the name of many third servers' bots,
 // signed with keys none of them has, causes at most 5 fetches of their
-// documents a minute; every event is still applied (refused).
+// documents a minute; every event is still applied (refused): past the
+// budget a signature counts as wrong, since the host spends the budget.
 func TestReplicaEvents_RepinFetchesPerHost(t *testing.T) {
 	g, h, room, _ := replica(t, "read")
 	var evs []fedrooms.Event
@@ -576,6 +578,33 @@ func TestReplicaEvents_RepinFetchesPerHost(t *testing.T) {
 	}
 	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, room); n != 0 {
 		t.Errorf("%d messages stored", n)
+	}
+}
+
+// A message whose author's server rotated, while its document cannot be
+// fetched, is kept, marked unverified, not lost; a malformed signature is
+// still refused.
+func TestReplicaEvents_AuthorDocumentUnreachable(t *testing.T) {
+	g, h, room, _ := replica(t, "read")
+	old, cur, _ := rotatedPeer(t, func(_, _ *Identity, _ *Document) bool { return false })
+	allow(t, g.svc, old)
+	if got := h.push(t, g, room, msg(1, 100, room, h.id.Domain, "c1@"+old.Domain, "x", nil, "", cur)); got != 1 {
+		t.Fatalf("applied %d, want 1", got)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND unverified = 1`, room); n != 1 {
+		t.Errorf("%d unverified messages, want the one", n)
+	}
+	bad := msg(2, 101, room, h.id.Domain, "c1@"+old.Domain, "y", nil, "", cur)
+	var p fedrooms.MessagePayload
+	if err := json.Unmarshal(bad.Payload, &p); err != nil {
+		t.Fatal(err)
+	}
+	p.OriginSig += "\r"
+	if got := h.push(t, g, room, event(2, bad.Type, p)); got != 2 {
+		t.Fatalf("applied %d, want 2", got)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, room); n != 1 {
+		t.Errorf("%d messages, want the malformed one refused", n)
 	}
 }
 
@@ -624,5 +653,25 @@ func TestReplicaEvents_SlowRepinFetch(t *testing.T) {
 	}
 	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'slow' AND unverified = 0`, room); n != 1 {
 		t.Errorf("%d copies of the slow message", n)
+	}
+}
+
+// Rotate returns the identity the database now holds, built before the
+// commit: what a fresh load gives, so no read after the commit can leave
+// the old key signing.
+func TestRotate_ReturnsStoredIdentity(t *testing.T) {
+	g := newRoomRig(t)
+	ctx := context.Background()
+	old := g.svc.id()
+	next, err := Rotate(ctx, g.db, old, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadOrCreateIdentity(ctx, g.db, old.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(next, loaded) {
+		t.Errorf("rotated identity differs from the stored one:\n%+v\n%+v", next, loaded)
 	}
 }

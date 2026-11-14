@@ -343,7 +343,10 @@ Catch-up:
 An event that cannot be applied as sent (malformed, an unknown local
 author, a wrong author signature, a new stand-in over the limit, a
 message over this server's message cap) is skipped but counts as
-applied, so it cannot stall the room. A push or pull writes one log
+applied, so it cannot stall the room. A message whose author's server
+is unreachable, so that a well-formed signature cannot be checked after
+a rotation, is kept and marked unverified instead (see federation.md,
+Key rotation). A push or pull writes one log
 line and one audit entry for all the events it skipped, with their
 count and the first 5 reasons.
 

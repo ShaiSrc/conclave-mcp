@@ -512,7 +512,9 @@ func TestReplicaEvents_AuthorSignatures(t *testing.T) {
 		{"host's bot, no signature", h.addr("h1"), nil, true, false, h.addr("h1")},
 		{"third server, verified", "c1@c.example", c, true, false, "c1@c.example"},
 		{"third server, key unknown", "d1@d.example", d, true, true, "d1@d.example"},
-		{"third server, wrong key", "c1@c.example", d, false, false, ""},
+		// c's document cannot be fetched here: a well-formed signature by
+		// another key may be a rotation, kept unverified.
+		{"third server, wrong key, document unreachable", "c1@c.example", d, true, true, "c1@c.example"},
 		{"third server, no signature", "c1@c.example", nil, false, false, ""},
 		{"our bot, our signature", "b1@" + local, g.svc.id(), true, false, "b1"},
 		{"our bot, forged", "b1@" + local, c, false, false, ""},
