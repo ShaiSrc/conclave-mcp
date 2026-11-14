@@ -10,9 +10,11 @@
 package messages
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -23,6 +25,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
@@ -38,6 +41,20 @@ type Service struct {
 	// sees no events. cmd/serve wires this in via
 	// NewService(db, maxBytes, broker).
 	Broker Broker
+	// FedDomain is the federation domain, "" with federation off. With
+	// it, a message in a room with remote members is written to the
+	// room's event log in the transaction that stores it.
+	FedDomain string
+	// FedNotify, when set, is called after each send: it wakes the
+	// federation delivery worker.
+	FedNotify func()
+	// Forward, when set, sends a message of key author in replica room
+	// roomID to the room's host and stores the copy the host answers,
+	// as StoreReplica does; it returns the copy's id. m's metadata is
+	// in its wire form and its reply_to is the host's id. A refusal,
+	// the host's included, is a *fedrooms.Error. Set by the server with
+	// federation on.
+	Forward func(ctx context.Context, roomID string, author int64, m fedrooms.MessagePayload) (int64, error)
 
 	// stampMu makes taking a timestamp and inserting one step, and
 	// lastTS keeps timestamps strictly increasing, so ts order is
@@ -68,7 +85,7 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.post(w, r, chi.URLParam(r, "id"), false)
+		s.post(w, r, chi.URLParam(r, "id"), false, "", "")
 	})
 	r.Get("/rooms/{id}/messages", s.list)
 	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
@@ -107,6 +124,12 @@ type messageView struct {
 	// Operator is set by the server for messages the operator sent from
 	// the web UI with a passkey; no request field can set it.
 	Operator bool `json:"operator,omitempty"`
+	// AuthorAddress is the address (name@domain) of an author on
+	// another server, its stand-in key's label.
+	AuthorAddress string `json:"author_address,omitempty"`
+	// Unverified marks a message of a replica room whose author
+	// signature could not be checked: its server's key is unknown here.
+	Unverified bool `json:"unverified,omitempty"`
 }
 
 // allowedMessageTypes is the set of intent tags from
@@ -126,13 +149,22 @@ var allowedMessageTypes = map[string]struct{}{
 // SendAsOperator stores the request body as an operator message. It is
 // for the UI's passkey-confirmed path only: nothing else may call it.
 func (s *Service) SendAsOperator(w http.ResponseWriter, r *http.Request, roomID string) {
-	s.post(w, r, roomID, true)
+	s.post(w, r, roomID, true, "", "")
+}
+
+// SendFromPeer stores the request body as a message of the stand-in key
+// in r's claims, with originSig, the author server's signature, and
+// the nonce it covers. It is for the federation listener's message
+// proposals only, after the signature was checked.
+func (s *Service) SendFromPeer(w http.ResponseWriter, r *http.Request, roomID, originSig, nonce string) {
+	s.post(w, r, roomID, false, originSig, nonce)
 }
 
 // post handles a send: validates the body and reply_to, stores the
 // message and publishes it to subscribers. operator marks the message
-// as the operator's; UI sessions may not post unmarked.
-func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool) {
+// as the operator's; UI sessions may not post unmarked. originSig and
+// nonce are stored with a remote author's message.
+func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool, originSig, nonce string) {
 	caller := callerKeyID(r)
 	if caller == 0 {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "no auth claims")
@@ -167,9 +199,7 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 	if req.ContentType == "" {
 		req.ContentType = "text/plain"
 	}
-	switch req.ContentType {
-	case "text/plain", "text/markdown", "application/json":
-	default:
+	if !contentTypes[req.ContentType] {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "unsupported content_type")
 		return
 	}
@@ -237,10 +267,11 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 			req.ReplyTo = &id
 		}
 	}
+	var hostReply *int64 // in a replica room, the host's id of the message replied to
 	if req.ReplyTo != nil {
-		var exists int
+		var remote sql.NullInt64
 		err := s.DB.QueryRowContext(r.Context(),
-			`SELECT 1 FROM messages WHERE id = ? AND room_id = ? AND deleted_at IS NULL`, *req.ReplyTo, roomID).Scan(&exists)
+			`SELECT remote_id FROM messages WHERE id = ? AND room_id = ? AND deleted_at IS NULL`, *req.ReplyTo, roomID).Scan(&remote)
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: no message "+strconv.FormatInt(*req.ReplyTo, 10)+" in this room (or it was deleted)")
 			return
@@ -248,6 +279,13 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "reply_to lookup")
 			return
+		}
+		if mem.Home != "" {
+			if !remote.Valid {
+				writeErr(w, r, http.StatusBadRequest, "bad_request", "reply_to: message "+strconv.FormatInt(*req.ReplyTo, 10)+" is not one of the host's")
+				return
+			}
+			hostReply = &remote.Int64
 		}
 		// RawMessage values keep the other fields byte for byte (no
 		// float64 rounding of big numbers).
@@ -259,42 +297,36 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 			meta = map[string]json.RawMessage{}
 		}
 		meta["reply_to"] = json.RawMessage(strconv.FormatInt(*req.ReplyTo, 10))
-		b, _ := json.Marshal(meta)
+		b, _ := fedrooms.Marshal(meta) // <, > and & as sent: the wire form of a forwarded reply is derived from it
 		metadata = sql.NullString{String: string(b), Valid: true}
 		req.Metadata = b
 	}
+	if mem.Home != "" {
+		s.forward(w, r, roomID, caller, req, messageType, metadata, hostReply)
+		return
+	}
 
 	s.stampMu.Lock()
-	if s.lastTS.IsZero() { // first send since start: continue after what is stored
-		var newest sql.NullString
-		err := s.DB.QueryRowContext(r.Context(), `SELECT MAX(ts) FROM messages`).Scan(&newest)
-		if err == nil && newest.Valid { // NULL: no messages yet
-			s.lastTS, err = time.Parse(time.RFC3339Nano, newest.String)
-		}
-		if err != nil { // lastTS stays zero, so the next send tries again
-			s.stampMu.Unlock()
-			writeErr(w, r, http.StatusInternalServerError, "internal_error", "read newest timestamp")
-			return
-		}
+	now, err := s.stamp(r.Context())
+	if err != nil {
+		s.stampMu.Unlock()
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "read newest timestamp")
+		return
 	}
-	t := clock().UTC()
-	if !t.After(s.lastTS) {
-		t = s.lastTS.Add(time.Nanosecond) // ts has nanosecond precision
-	}
-	s.lastTS = t
-	now := storage.FormatTS(t)
-	res, err := s.DB.ExecContext(r.Context(),
-		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		roomID, caller, now, req.Content, req.ContentType,
-		messageType, metadata, callerTrustOrigin, operator,
-	)
+	id, err := s.insert(r.Context(), roomID, caller, now, req.Content, req.ContentType,
+		messageType, metadata, callerTrustOrigin, operator, nullableString(originSig), nullableString(nonce))
 	s.stampMu.Unlock()
+	if errors.Is(err, fedrooms.ErrEventTooLarge) {
+		writeErr(w, r, http.StatusRequestEntityTooLarge, "payload_too_large", "message too large for the room's other servers")
+		return
+	}
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "insert message")
 		return
 	}
-	id, _ := res.LastInsertId()
+	if s.FedNotify != nil {
+		s.FedNotify()
+	}
 	detail := `{"room_id":` + strconvQuote(roomID)
 	if operator {
 		detail += `,"operator":true`
@@ -314,9 +346,10 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		Content:     req.Content,
 		// Size is computed at response time (SPEC-0002
 		// §3.5.1: derived from len(content), not stored).
-		Size:        len(req.Content),
-		TrustOrigin: callerTrustOrigin,
-		Operator:    operator,
+		Size:          len(req.Content),
+		TrustOrigin:   callerTrustOrigin,
+		Operator:      operator,
+		AuthorAddress: mem.Address,
 	}
 	if req.MessageType != "" {
 		mv.MessageType = req.MessageType
@@ -330,6 +363,163 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 		}
 	}
 	writeJSON(w, http.StatusCreated, mv)
+}
+
+// forward sends a checked message of a replica room to the room's
+// host, which checks and stores it, and answers with the copy stored
+// here, as a send answers. reply is the host's id of the message
+// replied to.
+func (s *Service) forward(w http.ResponseWriter, r *http.Request, roomID string, caller int64, req sendRequest,
+	messageType string, metadata sql.NullString, reply *int64) {
+	if s.Forward == nil {
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted on another server, and federation is off")
+		return
+	}
+	wire, _, _ := fedrooms.SplitMetadata([]byte(metadata.String)) // an object or null: checked above
+	id, err := s.Forward(r.Context(), roomID, caller, fedrooms.MessagePayload{ContentType: req.ContentType,
+		MessageType: messageType, Content: req.Content, Metadata: wire, ReplyTo: reply})
+	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
+		writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		return
+	}
+	var mv messageView
+	if err == nil {
+		mv, err = scanView(s.DB.QueryRowContext(r.Context(), `SELECT `+viewColumns+` FROM messages WHERE id = ?`, id))
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "forward message")
+		return
+	}
+	_ = audit.Write(r.Context(), s.DB, caller, "message.send", "message", strconv.FormatInt(id, 10), roomID, "ok",
+		`{"room_id":`+strconvQuote(roomID)+`}`)
+	writeJSON(w, http.StatusCreated, mv)
+}
+
+// viewColumns are the columns scanView reads.
+const viewColumns = `id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator,
+	unverified, COALESCE((SELECT k.label FROM api_keys k WHERE k.id = author_key_id AND k.remote_domain IS NOT NULL), '')`
+
+// scanView reads a message's viewColumns.
+func scanView(row interface{ Scan(...any) error }) (messageView, error) {
+	var (
+		mv                     messageView
+		mtype, meta, deletedAt sql.NullString
+	)
+	if err := row.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &mv.ContentType, &mv.Content, &mtype, &meta, &deletedAt,
+		&mv.TrustOrigin, &mv.Operator, &mv.Unverified, &mv.AuthorAddress); err != nil {
+		return mv, err
+	}
+	// Size is computed at response time (SPEC-0002 §3.5.1: derived
+	// from len(content), not stored).
+	mv.Size = len(mv.Content)
+	mv.MessageType, mv.DeletedAt = mtype.String, deletedAt.String
+	if meta.String != "" {
+		mv.Metadata = json.RawMessage(meta.String)
+	}
+	return mv, nil
+}
+
+// stamp returns the timestamp of the next message: now, or just after
+// the last one when the clock has not moved past it. The caller holds
+// stampMu until the message is stored.
+func (s *Service) stamp(ctx context.Context) (string, error) {
+	if s.lastTS.IsZero() { // first message since start: continue after what is stored
+		var newest sql.NullString
+		err := s.DB.QueryRowContext(ctx, `SELECT MAX(ts) FROM messages`).Scan(&newest)
+		if err == nil && newest.Valid { // NULL: no messages yet
+			s.lastTS, err = time.Parse(time.RFC3339Nano, newest.String)
+		}
+		if err != nil { // lastTS stays zero, so the next message tries again
+			return "", err
+		}
+	}
+	t := clock().UTC()
+	if !t.After(s.lastTS) {
+		t = s.lastTS.Add(time.Nanosecond) // ts has nanosecond precision
+	}
+	s.lastTS = t
+	return storage.FormatTS(t), nil
+}
+
+// contentTypes are the content types a message may have.
+var contentTypes = map[string]bool{"text/plain": true, "text/markdown": true, "application/json": true}
+
+// StoreReplica stores m, a message of replica room roomID that its host
+// sent, and publishes it to subscribers as a send does. It is stamped
+// with a local timestamp, so readers' since cursors see it; its trust
+// origin is its author key's. A message whose host id is stored already
+// is left as it is, and its id returned. A message a send would refuse
+// (type, content type, over the cap) is a *fedrooms.Error.
+func (s *Service) StoreReplica(ctx context.Context, roomID string, m fedrooms.ReplicaMessage) (int64, error) {
+	if _, ok := allowedMessageTypes[m.MessageType]; !ok || !contentTypes[m.ContentType] {
+		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "bad_request", Message: "message type or content type not accepted"}
+	}
+	if len(m.Content) > s.MaxMessageBytes {
+		return 0, &fedrooms.Error{Status: http.StatusRequestEntityTooLarge, Code: "payload_too_large",
+			Message: fmt.Sprintf("content of %d bytes is over the message cap of %d", len(m.Content), s.MaxMessageBytes)}
+	}
+	var id int64
+	err := s.DB.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, m.RemoteID).Scan(&id)
+	if err == nil || !errors.Is(err, sql.ErrNoRows) {
+		return id, err
+	}
+	var trust, address string
+	if err := s.DB.QueryRowContext(ctx, `SELECT trust_origin, CASE WHEN remote_domain IS NULL THEN '' ELSE label END
+		FROM api_keys WHERE id = ?`, m.Author).Scan(&trust, &address); err != nil {
+		return 0, err
+	}
+	var metadata sql.NullString
+	if len(m.Metadata) > 0 {
+		metadata = sql.NullString{String: string(m.Metadata), Valid: true}
+	}
+	s.stampMu.Lock()
+	now, err := s.stamp(ctx)
+	if err == nil {
+		var res sql.Result
+		res, err = s.DB.ExecContext(ctx, `INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type,
+			metadata, trust_origin, operator, origin_sig, remote_id, unverified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+			roomID, m.Author, now, m.Content, m.ContentType, m.MessageType, metadata, trust, nullableString(m.OriginSig), m.RemoteID, m.Unverified)
+		if err == nil {
+			id, err = res.LastInsertId()
+		}
+	}
+	s.stampMu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	if s.Broker != nil {
+		mv := messageView{ID: id, RoomID: roomID, AuthorKeyID: m.Author, TS: now, ContentType: m.ContentType,
+			Size: len(m.Content), Content: m.Content, MessageType: m.MessageType, Metadata: m.Metadata, TrustOrigin: trust,
+			AuthorAddress: address, Unverified: m.Unverified}
+		if payload, err := json.Marshal(mv); err == nil {
+			s.Broker.Publish(roomID, payload)
+		}
+	}
+	return id, nil
+}
+
+// insert stores one message, the columns after room_id in args, and
+// logs it in the same transaction. It returns the message's id.
+func (s *Service) insert(ctx context.Context, roomID string, args ...any) (int64, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO messages(room_id, author_key_id, ts, content, content_type, message_type, metadata, trust_origin, operator,
+		 origin_sig, origin_nonce) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, append([]any{roomID}, args...)...)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if err := fedrooms.LogMessage(ctx, tx, roomID, id, s.FedDomain, s.MaxMessageBytes); err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {
@@ -399,7 +589,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	)
 	if trustOrigin != "" {
 		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator
+			`SELECT `+viewColumns+`
 			 FROM messages
 			 WHERE room_id = ? AND ts > ? AND deleted_at IS NULL AND trust_origin = ?
 			 ORDER BY ts ASC, id ASC
@@ -408,7 +598,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		)
 	} else {
 		rows, err = s.DB.QueryContext(r.Context(),
-			`SELECT id, room_id, author_key_id, ts, content_type, content, message_type, metadata, deleted_at, trust_origin, operator
+			`SELECT `+viewColumns+`
 			 FROM messages
 			 WHERE room_id = ? AND ts > ? AND deleted_at IS NULL
 			 ORDER BY ts ASC, id ASC
@@ -424,34 +614,11 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 
 	var out []messageView
 	for rows.Next() {
-		var (
-			mv        messageView
-			ctype     string
-			content   string
-			mtype     sql.NullString
-			meta      sql.NullString
-			deletedAt sql.NullString
-			trustOrig string
-		)
-		if err := rows.Scan(&mv.ID, &mv.RoomID, &mv.AuthorKeyID, &mv.TS, &ctype, &content, &mtype, &meta, &deletedAt, &trustOrig, &mv.Operator); err != nil {
+		mv, err := scanView(rows)
+		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
-		mv.ContentType = ctype
-		mv.Content = content
-		// Size is computed at response time (SPEC-0002
-		// §3.5.1: derived from len(content), not stored).
-		mv.Size = len(content)
-		if mtype.Valid && mtype.String != "" {
-			mv.MessageType = mtype.String
-		}
-		if meta.Valid && meta.String != "" {
-			mv.Metadata = json.RawMessage(meta.String)
-		}
-		if deletedAt.Valid {
-			mv.DeletedAt = deletedAt.String
-		}
-		mv.TrustOrigin = trustOrig
 		out = append(out, mv)
 	}
 	// next_since is the ISO-8601 ts of the last message we
@@ -491,10 +658,10 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
 		return
 	}
-	var archived sql.NullString
+	var archived, home sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT archived_at FROM rooms WHERE id = ?`, roomID,
-	).Scan(&archived); err != nil {
+		`SELECT archived_at, home_domain FROM rooms WHERE id = ?`, roomID,
+	).Scan(&archived, &home); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
 			return
@@ -506,13 +673,24 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusGone, "not_found", "room is archived")
 		return
 	}
+	if home.Valid {
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted by "+home.String+"; change it there")
+		return
+	}
 
 	// Soft-delete. We use a subquery for the WHERE so we
 	// also confirm the message belongs to this room (defence
 	// in depth: an owner of room A cannot delete a message
-	// in room B by guessing the msgid).
+	// in room B by guessing the msgid). Its events in the room's
+	// federation log are retracted in the same transaction.
+	tx, err := s.DB.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "begin tx")
+		return
+	}
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	res, err := s.DB.ExecContext(r.Context(),
+	res, err := tx.ExecContext(r.Context(),
 		`UPDATE messages
 		 SET deleted_at = ?
 		 WHERE id = ? AND room_id = ? AND deleted_at IS NULL`,
@@ -526,6 +704,17 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 	if n == 0 {
 		writeErr(w, r, http.StatusNotFound, "not_found", "message not found")
 		return
+	}
+	if err := fedrooms.LogDelete(r.Context(), tx, roomID, msgID); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
+		return
+	}
+	if s.FedNotify != nil {
+		s.FedNotify()
 	}
 	_ = audit.Write(r.Context(), s.DB, caller, "message.delete", "message", strconv.FormatInt(msgID, 10), roomID, "ok",
 		`{"room_id":`+strconvQuote(roomID)+`}`)

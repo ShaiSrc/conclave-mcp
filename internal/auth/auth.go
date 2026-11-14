@@ -44,7 +44,9 @@ const (
 
 // KeyLookup is the minimal interface the verifier needs from the
 // storage layer: given a token prefix, return the key's id, scopes,
-// and stored argon2id PHC string, or ErrNotFound.
+// and stored argon2id PHC string, or ErrNotFound. It must never return
+// a stand-in key (api_keys.remote_domain set): those represent bots of
+// other servers and cannot authenticate.
 type KeyLookup interface {
 	LookupByPrefix(ctx context.Context, prefix string) (keyID int64, scopes []string, phc string, err error)
 }

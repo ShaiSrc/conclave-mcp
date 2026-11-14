@@ -12,10 +12,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/federation"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -413,6 +416,35 @@ func TestServer_StartFederationListener(t *testing.T) {
 	}
 }
 
+// Start returns only once the federation loops have stopped, so a
+// server started again on the same database never runs beside them.
+func TestServer_StartWaitsForFederationLoops(t *testing.T) {
+	port, fedPort := freePort(t), freePort(t)
+	s, err := New(Config{
+		Host: "127.0.0.1", Port: port, Logger: slog.New(slog.DiscardHandler),
+		FederationDomain: fmt.Sprintf("127.0.0.1:%d", fedPort), FederationHost: "127.0.0.1", FederationPort: fedPort,
+	}, Deps{DB: uiDB(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stopped atomic.Bool
+	s.fedRun = func(ctx context.Context) {
+		<-ctx.Done()
+		time.Sleep(100 * time.Millisecond)
+		stopped.Store(true)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Start(ctx) }()
+	cancel()
+	if err := <-errCh; err != nil {
+		t.Errorf("Start returned: %v", err)
+	}
+	if !stopped.Load() {
+		t.Error("Start returned before the federation loops stopped")
+	}
+}
+
 // The federation listener faces the internet: it has read and write
 // timeouts and a header cap, and a request whose body stalls is cut off.
 func TestServer_FederationSlowBody(t *testing.T) {
@@ -516,5 +548,104 @@ func TestServer_BotLookupAndDirectory(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// Federated rooms are wired: with federation off an invite by address
+// answers 404; with it on, the invite goes through the federation
+// service, and the federation listener runs a member server's message
+// and claims through the local send and claims paths.
+func TestServer_FederatedRooms(t *testing.T) {
+	ctx := context.Background()
+	db := uiDB(t)
+	token, phc, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', ?, ?, '2026-01-01T00:00:00Z', 1)`,
+		phc, token[3:11]); err != nil {
+		t.Fatal(err)
+	}
+	do := func(h http.Handler, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	off, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := do(off.Handler(), http.MethodPost, "/v1/rooms", `{"name":"proj"}`)
+	var room struct{ ID string }
+	if err := json.Unmarshal(rec.Body.Bytes(), &room); err != nil || rec.Code != http.StatusCreated {
+		t.Fatalf("create room: %d %s", rec.Code, rec.Body)
+	}
+	invite := `{"address":"c1@peer.example","rights":["read","claim","answer"]}`
+	if rec := do(off.Handler(), http.MethodPost, "/v1/rooms/"+room.ID+"/members", invite); rec.Code != http.StatusNotFound ||
+		!strings.Contains(rec.Body.String(), `"federation_disabled"`) {
+		t.Errorf("invite with federation off: %d %s", rec.Code, rec.Body)
+	}
+
+	const domain = "conclave.example.org"
+	on, err := New(Config{Host: "127.0.0.1", Port: 7432, FederationDomain: domain, FederationHost: "127.0.0.1", FederationPort: 7433},
+		Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec := do(on.Handler(), http.MethodPost, "/v1/rooms/"+room.ID+"/members", invite); rec.Code != http.StatusForbidden ||
+		!strings.Contains(rec.Body.String(), `"peer_not_allowed"`) {
+		t.Errorf("invite of a stranger's bot: %d %s", rec.Code, rec.Body)
+	}
+
+	// peer.example is an allowed peer whose bot c1 is in the room.
+	peer, err := federation.LoadOrCreateIdentity(ctx, uiDB(t), "peer.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO federation_peers(domain, status, fingerprint, public_key, added_at) VALUES (?, 'allowed', ?, ?, ?)`,
+		peer.Domain, federation.Fingerprint(peer.Public), []byte(peer.Public), storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1, err := fedrooms.StandIn(ctx, tx, "c1@peer.example")
+	if err == nil {
+		_, err = tx.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', '2026-01-01T00:00:00Z', 'read,claim,answer')`, room.ID, c1)
+	}
+	if err == nil {
+		err = fedrooms.LogJoin(ctx, tx, room.ID, c1, domain, 256<<10, 0)
+	}
+	if err != nil || tx.Commit() != nil {
+		t.Fatal(err)
+	}
+	signed := func(method, path string, body []byte) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, bytes.NewReader(body))
+		req.Host = domain
+		if err := peer.SignRequest(req, domain, body); err != nil {
+			t.Fatal(err)
+		}
+		rec := httptest.NewRecorder()
+		on.fed.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	nonce := "AAAAAAAAAAAAAAAAAAAAAA" // 16 bytes, unpadded base64url
+	sig := peer.SignMessage(federation.MessageSig{Room: room.ID + "@" + domain, Author: "c1@peer.example",
+		ContentType: "text/plain", MessageType: "answer", Content: "hello", Nonce: nonce})
+	body, _ := json.Marshal(map[string]string{"author": "c1@peer.example", "content": "hello", "message_type": "answer", "sig": sig,
+		"nonce": nonce})
+	if rec := signed(http.MethodPost, "/fed/v1/rooms/"+room.ID+"/messages", body); rec.Code != http.StatusCreated ||
+		!strings.Contains(rec.Body.String(), `"type":"message"`) {
+		t.Errorf("message from the member server: %d %s", rec.Code, rec.Body)
+	}
+	if rec := signed(http.MethodGet, "/fed/v1/rooms/"+room.ID+"/claims?author=c1@peer.example", nil); rec.Code != http.StatusOK {
+		t.Errorf("claims from the member server: %d %s", rec.Code, rec.Body)
+	}
+	if rec := signed(http.MethodGet, "/fed/v1/rooms/"+room.ID+"/events", nil); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"author":"c1@peer.example"`) {
+		t.Errorf("events: %d %s", rec.Code, rec.Body)
 	}
 }

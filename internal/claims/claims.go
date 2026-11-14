@@ -11,6 +11,10 @@
 //	POST /v1/rooms/{id}/claims            -- claim paths, all-or-nothing (409 on overlap)
 //	POST /v1/rooms/{id}/claims/heartbeat  -- extend the caller's claims
 //	POST /v1/rooms/{id}/claims/release    -- release; an admin key may release others'
+//
+// In a replica room the claims are the host's: each request is
+// forwarded to it and the answer Forward rebuilt from the host's
+// returned.
 package claims
 
 import (
@@ -30,6 +34,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/audit"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
 )
 
@@ -43,6 +48,13 @@ const (
 type Service struct {
 	DB  *sql.DB
 	Now func() time.Time // tests pin the clock
+	// Forward, when set, sends r, a claims request of key author in
+	// replica room roomID, to the room's host and returns the host's
+	// status and a body rebuilt from its answer (a 2xx or 409); claims
+	// of a replica are the host's. A refusal (no handle, host
+	// unreachable, any other answer of the host) is a *fedrooms.Error.
+	// Set by the server with federation on.
+	Forward func(r *http.Request, roomID string, author int64) (int, []byte, error)
 
 	// mu serialises claim writes so the overlap check and the insert
 	// of two requests cannot interleave.
@@ -143,14 +155,43 @@ func active(ctx context.Context, q queryer, roomID string, now time.Time) ([]Cla
 }
 
 // access answers 404 (no room, not a member, or archived) or 403
-// missing_right itself and returns ok=false.
+// missing_right itself and returns ok=false. A request of a replica
+// room that passes is answered by the room's host, through Forward,
+// and ok is false too.
 func (s *Service) access(w http.ResponseWriter, r *http.Request, roomID, need string) (rights.Member, bool) {
 	mem, ok := rights.Require(w, r, s.DB, roomID, need)
-	if ok && mem.Archived {
+	switch {
+	case !ok:
+	case mem.Archived:
 		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
-		return mem, false
+	case mem.Home != "":
+		s.forward(w, r, roomID, mem.KeyID)
+	default:
+		return mem, true
 	}
-	return mem, ok
+	return mem, false
+}
+
+// forward answers r with the answer of the replica's host, as Forward
+// rebuilt it: a 2xx or 409 with checked fields, any other answer a
+// refusal with the host's status and code and its message marked.
+func (s *Service) forward(w http.ResponseWriter, r *http.Request, roomID string, caller int64) {
+	if s.Forward == nil {
+		writeErr(w, r, http.StatusForbidden, "replica_room", "room is hosted on another server, and federation is off")
+		return
+	}
+	status, body, err := s.Forward(r, roomID, caller)
+	if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
+		writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		return
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "forward claims")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
 }
 
 func (s *Service) list(w http.ResponseWriter, r *http.Request) {

@@ -201,3 +201,41 @@ func TestAdmin_BlockRemovePing(t *testing.T) {
 		}
 	}
 }
+
+func TestAdmin_RoomDelivery(t *testing.T) {
+	g, m, room, _ := fedRoom(t, "read")
+	path := "/v1/rooms/" + room + "/delivery"
+	if _, err := g.db.Exec(`UPDATE fed_delivery SET attempts = 3, last_error = 'boom', paused = 1 WHERE room_id = ?`, room); err != nil {
+		t.Fatal(err)
+	}
+	rec := adminDo(g.svc, admin, "GET", path, "")
+	var out struct {
+		Delivery []struct {
+			Peer      string  `json:"peer"`
+			AckedSeq  int64   `json:"acked_seq"`
+			LastSeq   int64   `json:"last_seq"`
+			Attempts  int     `json:"attempts"`
+			NextTryAt *string `json:"next_try_at"`
+			LastError string  `json:"last_error"`
+			Paused    bool    `json:"paused"`
+		}
+	}
+	if rec.Code != 200 || json.Unmarshal(rec.Body.Bytes(), &out) != nil || len(out.Delivery) != 1 {
+		t.Fatalf("delivery: %d %s", rec.Code, rec.Body)
+	}
+	d := out.Delivery[0]
+	if d.Peer != m.id.Domain || d.LastSeq < 1 || d.AckedSeq > d.LastSeq || d.Attempts != 3 || d.LastError != "boom" || !d.Paused {
+		t.Errorf("row: %+v", d)
+	}
+	wantErr(t, adminDo(g.svc, []string{"read"}, "GET", path, ""), 403, "forbidden")
+	// No federation for the room, and no such room.
+	plain := g.room(t, "plain")
+	wantErr(t, adminDo(g.svc, admin, "GET", "/v1/rooms/"+plain+"/delivery", ""), 404, "not_found")
+	wantErr(t, adminDo(g.svc, admin, "GET", "/v1/rooms/nope/delivery", ""), 404, "not_found")
+	// A replica room is not hosted here.
+	rg, _, rroom, _ := replica(t, "read")
+	if _, err := rg.db.Exec(`INSERT INTO fed_delivery(room_id, peer) VALUES (?, 'x.example')`, rroom); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, adminDo(rg.svc, admin, "GET", "/v1/rooms/"+rroom+"/delivery", ""), 404, "not_found")
+}

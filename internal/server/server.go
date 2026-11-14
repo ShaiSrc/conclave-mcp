@@ -46,6 +46,7 @@ type Server struct {
 	http   *http.Server
 	fed    *http.Server // the federation listener; nil with federation off
 	fedSvc *federation.Service
+	fedRun func(context.Context) // the federation loops, fedSvc.Run; nil with federation off
 
 	mu      sync.Mutex
 	started bool
@@ -103,7 +104,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		}); err != nil {
 			return nil, fmt.Errorf("federation: %w", err)
 		}
-		s.fedSvc = fedSvc
+		s.fedSvc, s.fedRun = fedSvc, fedSvc.Run
 	}
 	s.router = s.buildRouter(deps, uiSvc, fedSvc)
 	s.http = &http.Server{
@@ -224,6 +225,27 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	auditSvc := audit.NewService(deps.DB)
 	claimsSvc := claims.NewService(deps.DB)
 	botsStore := bots.NewStore(deps.DB)
+	// Federated rooms: rooms and messages log changes of rooms with
+	// remote members, invite by address through the federation service
+	// and wake its delivery worker after each change; the federation
+	// listener runs member servers' messages and claims through the same
+	// send and claims paths, as the bots' stand-in keys, and stores the
+	// messages of replica rooms through the messages service, which
+	// publishes them like sent ones. In replica rooms, our bots' messages,
+	// claims and leaving go to the host through the federation service.
+	// Functions and a handler are passed in here, so rooms, messages and
+	// claims never import federation.
+	if fedSvc != nil {
+		roomsSvc.FedDomain, messagesSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain()
+		roomsSvc.MaxMessageBytes = messagesSvc.MaxMessageBytes
+		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
+		roomsSvc.FedNotify, messagesSvc.FedNotify = fedSvc.DeliverSoon, fedSvc.DeliverSoon
+		messagesSvc.Forward, claimsSvc.Forward = fedSvc.ForwardMessage, fedSvc.ForwardClaims
+		claimsLocal := chi.NewRouter()
+		claimsSvc.Routes(claimsLocal)
+		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,
+			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica}
+	}
 
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.
@@ -319,7 +341,8 @@ func (s *Server) Handler() http.Handler {
 
 // Start binds the listeners (the main one and, with federation on,
 // the federation one) and serves until ctx is cancelled or a listener
-// fails, then shuts both down with a 10s drain.
+// fails, then shuts both down with a 10s drain and stops the federation
+// loops; it returns once they have stopped.
 func (s *Server) Start(ctx context.Context) error {
 	servers := []*http.Server{s.http}
 	if s.fed != nil {
@@ -340,11 +363,16 @@ func (s *Server) Start(ctx context.Context) error {
 	s.started = true
 	s.mu.Unlock()
 
-	// The federation nonce pruning stops when Start returns.
+	// The federation loops (nonce pruning, directory refresh, room
+	// delivery and catch-up) run until the listeners have shut down;
+	// Start returns once they have stopped too.
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
-	if s.fedSvc != nil {
-		go s.fedSvc.Run(ctx)
+	fedDone := make(chan struct{})
+	if s.fedRun != nil {
+		go func() { defer close(fedDone); s.fedRun(ctx) }()
+	} else {
+		close(fedDone)
 	}
 
 	s.logger.Info("http server listening", "addr", s.http.Addr)
@@ -380,6 +408,8 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}
 	}
+	stop()
+	<-fedDone
 	return serveErr
 }
 

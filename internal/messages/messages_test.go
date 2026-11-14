@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -22,6 +23,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
@@ -652,4 +654,146 @@ type capBroker struct{ payloads []string }
 func (b *capBroker) Publish(_ string, payload []byte) int {
 	b.payloads = append(b.payloads, string(payload))
 	return 1
+}
+
+func TestMessages_DeleteOnReplicaIs403(t *testing.T) {
+	_, db, owner, roomID := setupAs(t)
+	if _, err := db.Exec(`INSERT INTO messages(room_id, author_key_id, ts, content, content_type) VALUES (?, ?, ?, 'x', 'text/plain')`,
+		roomID, owner, storage.FormatTS(time.Now())); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE rooms SET home_domain = 'a.example' WHERE id = ?`, roomID); err != nil {
+		t.Fatal(err)
+	}
+	admin := newServer(t, db, seedKey(t, db, "admin"), auth.ScopeAdmin)
+	rec := httptest.NewRecorder()
+	admin.ServeHTTP(rec, httptest.NewRequest(http.MethodDelete, "/rooms/"+roomID+"/messages/1", nil))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"replica_room"`) {
+		t.Errorf("delete on a replica: %d %s, want 403 replica_room", rec.Code, rec.Body.String())
+	}
+	var deleted sql.NullString
+	if err := db.QueryRow(`SELECT deleted_at FROM messages WHERE id = 1`).Scan(&deleted); err != nil || deleted.Valid {
+		t.Errorf("message deleted: %v %v", deleted, err)
+	}
+}
+
+// With federation off, nothing reaches a replica's host.
+func TestMessages_SendOnReplicaWithoutFederation(t *testing.T) {
+	r, db, _, roomID := setupAs(t)
+	if _, err := db.Exec(`UPDATE rooms SET home_domain = 'a.example' WHERE id = ?`, roomID); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", strings.NewReader(`{"content":"hi"}`)))
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"replica_room"`) {
+		t.Errorf("send on a replica: %d %s, want 403 replica_room", rec.Code, rec.Body.String())
+	}
+	if n := count(t, db, `SELECT COUNT(*) FROM messages`); n != 0 {
+		t.Errorf("%d messages stored", n)
+	}
+}
+
+func TestMessages_StoreReplica(t *testing.T) {
+	db := setupDB(t)
+	owner := seedKey(t, db, "owner")
+	roomID := seedRoom(t, db, owner, "replica")
+	if _, err := db.Exec(`UPDATE rooms SET home_domain = 'a.example' WHERE id = ?`, roomID); err != nil {
+		t.Fatal(err)
+	}
+	var author int64
+	inTx := func(fn func(tx *sql.Tx) error) {
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fn(tx); err != nil {
+			t.Fatal(err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	inTx(func(tx *sql.Tx) (err error) {
+		author, err = fedrooms.StandIn(context.Background(), tx, "a1@a.example")
+		return
+	})
+	pub := &capBroker{}
+	svc := NewService(db, 16, pub)
+	notified := 0
+	svc.FedNotify = func() { notified++ }
+	m := fedrooms.ReplicaMessage{Author: author, ContentType: "text/plain", MessageType: "answer", Content: "hi <b>",
+		Metadata: []byte(`{"reply_to":7,"x":1}`), RemoteID: 41, OriginSig: "sig", Unverified: true}
+	id, err := svc.StoreReplica(context.Background(), roomID, m)
+	if err != nil || id == 0 {
+		t.Fatalf("store: %d %v", id, err)
+	}
+	var (
+		remote             int64
+		trust, sig, meta   string
+		unverified, opmark bool
+	)
+	if err := db.QueryRow(`SELECT remote_id, trust_origin, origin_sig, metadata, unverified, operator FROM messages WHERE id = ?`, id).
+		Scan(&remote, &trust, &sig, &meta, &unverified, &opmark); err != nil {
+		t.Fatal(err)
+	}
+	if remote != 41 || trust != "external" || sig != "sig" || meta != `{"reply_to":7,"x":1}` || !unverified || opmark {
+		t.Errorf("stored: remote %d trust %s sig %s meta %s unverified %v operator %v", remote, trust, sig, meta, unverified, opmark)
+	}
+	// Published like a send, with the stored view.
+	if len(pub.payloads) != 1 || !strings.Contains(pub.payloads[0], `"content":"hi \u003cb\u003e"`) ||
+		!strings.Contains(pub.payloads[0], `"trust_origin":"external"`) || !strings.Contains(pub.payloads[0], `"metadata":{"reply_to":7,"x":1}`) {
+		t.Errorf("published: %q", pub.payloads)
+	}
+	// Idempotent per host id: the same id, nothing stored or published again.
+	if again, err := svc.StoreReplica(context.Background(), roomID, m); err != nil || again != id || len(pub.payloads) != 1 {
+		t.Errorf("again: %d %v, %d publishes", again, err, len(pub.payloads))
+	}
+	// What a send refuses is refused.
+	for name, bad := range map[string]fedrooms.ReplicaMessage{
+		"message type": {Author: author, ContentType: "text/plain", MessageType: "fly", Content: "x", RemoteID: 50},
+		"content type": {Author: author, ContentType: "image/png", MessageType: "answer", Content: "x", RemoteID: 51},
+		"over the cap": {Author: author, ContentType: "text/plain", MessageType: "answer", Content: strings.Repeat("x", 17), RemoteID: 52},
+	} {
+		var fe *fedrooms.Error
+		if _, err := svc.StoreReplica(context.Background(), roomID, bad); !errors.As(err, &fe) {
+			t.Errorf("%s: %v, want a *fedrooms.Error", name, err)
+		}
+	}
+	// Replica rooms log nothing, so nothing wakes the delivery worker.
+	if n := count(t, db, `SELECT COUNT(*) FROM fed_events`); n != 0 || notified != 0 {
+		t.Errorf("%d events logged, %d notifications", n, notified)
+	}
+	// A send in a hosted room does wake it.
+	sendAs(t, newServerWith(t, db, owner, svc), seedRoom(t, db, owner, "hosted"), "local")
+	if notified != 1 {
+		t.Errorf("send: %d notifications, want 1", notified)
+	}
+	// Replica messages and sends share the timestamp order.
+	var first, second string
+	if err := db.QueryRow(`SELECT MIN(ts), MAX(ts) FROM messages`).Scan(&first, &second); err != nil || count(t, db,
+		`SELECT COUNT(*) FROM messages WHERE ts = ? AND remote_id = 41`, first) != 1 || !(first < second) {
+		t.Errorf("timestamps: %s %s %v", first, second, err)
+	}
+}
+
+func newServerWith(t *testing.T, db *sql.DB, callerID int64, svc *Service) *chi.Mux {
+	t.Helper()
+	r := chi.NewRouter()
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			ctx := context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: callerID})
+			next.ServeHTTP(w, req.WithContext(ctx))
+		})
+	})
+	svc.Routes(r)
+	return r
+}
+
+func count(t *testing.T, db *sql.DB, query string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(query, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

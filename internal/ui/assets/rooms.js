@@ -94,9 +94,23 @@ export async function roomsPage(view) {
 
 export async function roomPage(view, id) {
   const base = '/v1/rooms/' + encodeURIComponent(id);
+  // A replica's claims are its host's, which answers its member bots only
+  // (403 no_handle for the operator key): the page shows that instead.
   const [room, members, held, keys] = await Promise.all([
-    api('GET', base), api('GET', base + '/members'), api('GET', base + '/claims'), api('GET', '/v1/keys')]);
+    api('GET', base), api('GET', base + '/members'),
+    api('GET', base + '/claims').catch(err => { if (err.status === 401) throw err; return { error: err }; }),
+    api('GET', '/v1/keys')]);
   const allKeys = keys.keys || [];
+  const home = room.home || ''; // set on a replica: the room is hosted there
+  // Delivery state exists only for rooms hosted here that have remote members.
+  let delivery = [];
+  if (!home && (members.members || []).some(m => m.address)) {
+    try {
+      delivery = (await api('GET', base + '/delivery')).delivery || [];
+    } catch (err) {
+      if (err.status === 401) throw err;
+    }
+  }
   const labels = new Map(allKeys.map(k => [k.id, k.label]));
   const who = m => labels.get(m.author_key_id) || `key ${m.author_key_id}`;
   const msgs = new Map();
@@ -125,11 +139,13 @@ export async function roomPage(view, id) {
     const content = [metaText ? h('pre', { class: 'muted' }, metaText) : '', h('pre', {}, m.content)];
     return h('div', { class: 'message' },
       h('div', { class: 'meta' },
-        [`#${m.id}`, when(m.ts), who(m)].map(t => h('span', {}, t)), extMark(m.trust_origin), m.operator ? h('span', { class: 'operator' }, 'operator ✓') : '',
+        [`#${m.id}`, when(m.ts), who(m)].map(t => h('span', {}, t)),
+        m.author_address ? h('span', {}, `remote ${m.author_address}`) : '',
+        m.unverified ? h('span', { class: 'ext' }, 'unverified') : '', extMark(m.trust_origin), m.operator ? h('span', { class: 'operator' }, 'operator ✓') : '',
         m.message_type && m.message_type !== 'system' ? h('span', {}, `<${m.message_type}>`) : '',
         replyTo(m) ? h('span', {}, `re #${replyTo(m)}`) : '',
-        room.archived_at ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
-        confirmButton('Delete', 'Delete this message?', async () => {
+        room.archived_at || home ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
+        home ? '' : confirmButton('Delete', 'Delete this message?', async () => {
           await confirmed('DELETE', `${base}/messages/${m.id}`);
           msgs.delete(m.id);
           draw();
@@ -153,7 +169,9 @@ export async function roomPage(view, id) {
     replying.replaceChildren(...(id ? [`Replying to #${id} `, h('button', { type: 'button', onclick: () => reply(0) }, 'Cancel reply')] : []));
     if (id) text.focus();
   }
-  const compose = room.archived_at ? '' : h('form', { onsubmit: e => e.preventDefault() },
+  // A replica takes messages of bots only: the host knows no address for
+  // the operator key.
+  const compose = room.archived_at || home ? '' : h('form', { onsubmit: e => e.preventDefault() },
     h('label', {}, 'Type ', type), replying, h('label', { for: 'compose-text' }, 'Message'), text,
     h('button', {
       type: 'button',
@@ -206,12 +224,16 @@ export async function roomPage(view, id) {
   draw();
   view.replaceChildren(
     h('h1', {}, room.name),
+    home ? h('p', { class: 'muted' }, `hosted by ${home}`) : '',
     room.archived_at ? h('p', { class: 'muted' }, 'Archived ' + when(room.archived_at)) : '',
     h('h2', {}, 'Open requests'), requests,
     h('h2', {}, 'Messages'), live, list, compose,
-    h('h2', {}, 'Active claims'), claimsTable(held.claims || []),
-    h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys),
-    room.archived_at ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
+    h('h2', {}, 'Active claims'), !held.error ? claimsTable(held.claims || [])
+      : home ? h('p', { class: 'muted' }, `Claims are held on ${home}, which shows them to member bots only.`) : errorBox(held.error),
+    h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys, home),
+    // replaceChildren does not flatten arrays, unlike h().
+    ...(delivery.length ? [h('h2', {}, 'Delivery to member servers'), deliveryTable(delivery)] : []),
+    room.archived_at || home ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
       await confirmed('POST', base + '/archive');
       location.hash = '#/';
     })));
@@ -225,7 +247,15 @@ function claimsTable(claims) {
     h('td', {}, when(c.expires_at)), h('td', {}, c.note || ''))));
 }
 
-function membersSection(base, members, keys) {
+function deliveryTable(delivery) {
+  return table(['Server', 'Delivered', 'Attempts', 'Next try', 'Last error', 'State'], delivery.map(d => h('tr', {},
+    h('td', {}, d.peer), h('td', {}, `${d.acked_seq} of ${d.last_seq}`), h('td', {}, String(d.attempts)),
+    h('td', {}, d.next_try_at ? when(d.next_try_at) : ''), h('td', {}, d.last_error || ''),
+    h('td', {}, d.paused ? 'unreachable' : d.acked_seq >= d.last_seq ? 'up to date' : 'pending'))));
+}
+
+function membersSection(base, members, keys, home) {
+  const serverOf = m => (m.address ? m.address.slice(m.address.lastIndexOf('@') + 1) : 'this server');
   const rows = members.map(m => {
     const picker = rightsPicker(m.rights || []);
     const msg = h('span');
@@ -248,23 +278,27 @@ function membersSection(base, members, keys) {
         }
       },
     }, 'Save rights');
+    // A replica room is changed on its host: only a local bot can leave.
     return h('tr', {},
-      h('td', {}, m.label), h('td', {}, m.trust_origin, ' ', extMark(m.trust_origin)),
-      h('td', {}, picker.el, ' ', save, ' ', msg),
-      h('td', {}, confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
+      h('td', {}, m.address || m.label), h('td', {}, serverOf(m)),
+      h('td', {}, m.trust_origin, ' ', extMark(m.trust_origin)),
+      h('td', {}, home ? (m.rights || []).join(', ') : [picker.el, ' ', save, ' ', msg]),
+      h('td', {}, home && m.address ? '' : confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
         await confirmed('DELETE', `${base}/members/${m.key_id}`);
         rerender();
       })));
   });
-  const candidates = keys.filter(k => !k.revoked_at && !members.some(m => m.key_id === k.id));
+  // Stand-ins (remote set) come in by address only: the server refuses them by key.
+  const candidates = keys.filter(k => !k.revoked_at && !k.remote && !members.some(m => m.key_id === k.id));
   const key = h('select', {}, candidates.map(k => h('option', { value: k.id }, `${k.label} (${k.trust_origin})`)));
   const picker = rightsPicker();
   const multi = h('input', { type: 'checkbox' });
   const msg = h('div');
   return h('div', {},
-    members.length ? table(['Key', 'Trust', 'Rights', ''], rows) : h('p', {}, 'No members.'),
-    h('h2', {}, 'Invite a key'),
-    candidates.length
+    members.length ? table(['Member', 'Server', 'Trust', 'Rights', ''], rows) : h('p', {}, 'No members.'),
+    home ? '' : [h('h2', {}, 'Invite a bot of another server'), inviteAddress(base)],
+    home ? '' : h('h2', {}, 'Invite a key'),
+    home ? '' : candidates.length
       ? h('form', {
         onsubmit: async e => {
           e.preventDefault();
@@ -281,6 +315,27 @@ function membersSection(base, members, keys) {
       h('label', {}, multi, ' even if it is in another room'), h('button', {}, 'Invite'))
       : h('p', {}, 'Every active key is a member. Create one on the Keys page.'),
     msg);
+}
+
+// inviteAddress is the form that invites a bot of a federated server by
+// its address, name@domain. The host asks that server first.
+function inviteAddress(base) {
+  const address = h('input', { required: true, maxlength: 300, placeholder: 'name@domain', autocomplete: 'off' });
+  const picker = rightsPicker();
+  const msg = h('div');
+  return h('div', {}, h('form', {
+    onsubmit: async e => {
+      e.preventDefault();
+      msg.replaceChildren(WAITING);
+      try {
+        await confirmed('POST', `${base}/invite`, { address: address.value.trim(), rights: picker.value() });
+        rerender();
+      } catch (err) {
+        if (err.status === 401) rerender();
+        else msg.replaceChildren(errorBox(err));
+      }
+    },
+  }, h('label', {}, 'Address ', address), picker.el, h('button', {}, 'Invite')), msg);
 }
 
 // follow reads the room's event stream with fetch (EventSource cannot

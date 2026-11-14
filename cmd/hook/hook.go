@@ -162,7 +162,7 @@ func (h *Hook) Wake(ctx context.Context, in agent.HookInput, wait time.Duration,
 		}
 		return err
 	}
-	fmt.Fprint(w, agent.Format(h.roomLabel(repo, &st), news, agent.Labels(ctx, h.C, st.RoomID))+
+	fmt.Fprint(w, agent.Format(h.room(ctx, repo, &st), news)+
 		"Handle what is addressed to you: answer with messages.send and reply_to = the message's #id.\n")
 	return ErrWake
 }
@@ -279,8 +279,10 @@ func (h *Hook) Run(ctx context.Context, in agent.HookInput, out io.Writer) error
 	return err
 }
 
-func (h *Hook) roomLabel(repo agent.Repo, st *agent.State) string {
-	return repo.RoomName() + " (room_id " + st.RoomID + ")"
+// room loads the repository's room for agent output, named with its
+// room_id.
+func (h *Hook) room(ctx context.Context, repo agent.Repo, st *agent.State) agent.Room {
+	return agent.LoadRoom(ctx, h.C, st.RoomID, repo.RoomName()+" (room_id "+st.RoomID+")")
 }
 
 // sessionStart always tells the agent who it is, which room to use
@@ -295,11 +297,15 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 		return err
 	}
 	st.SelfID = me.ID
+	room := h.room(ctx, repo, st)
 	var held struct {
 		Claims []claims.Claim `json:"claims"`
 	}
-	if _, err := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + st.RoomID + "/claims", Out: &held}); err != nil {
-		return err
+	// A replica room's claims are its host's: when the host does not
+	// answer, the session starts without them.
+	_, claimsErr := h.C.Do(ctx, client.Request{Method: "GET", Path: "/v1/rooms/" + st.RoomID + "/claims", Out: &held})
+	if claimsErr != nil && room.Home == "" {
+		return claimsErr
 	}
 	msgs, err := agent.FetchNew(ctx, h.C, st.RoomID, st)
 	if err != nil {
@@ -312,11 +318,14 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	if agent.HasOperator(msgs) {
 		b.WriteString(agent.OperatorNote + "\n")
 	}
-	fmt.Fprintf(&b, "Conclave: you are %s in room %s (room_id %s); use this room_id with the conclave tools.\n",
-		agent.OneLine(me.Label), agent.OneLine(repo.RoomName()), st.RoomID)
-	if len(held.Claims) == 0 {
+	fmt.Fprintf(&b, "Conclave: you are %s in room %s; use this room_id with the conclave tools.\n",
+		agent.OneLine(me.Label), room.Title())
+	switch {
+	case claimsErr != nil:
+		fmt.Fprintf(&b, "Claims could not be read (the room's host %s did not answer).\n", agent.OneLine(room.Home))
+	case len(held.Claims) == 0:
 		b.WriteString("No active claims.\n")
-	} else {
+	default:
 		b.WriteString("Active claims (do not edit paths others hold):\n")
 		for _, c := range held.Claims {
 			// "- claim " first: a path must not be able to start the line
@@ -325,7 +334,7 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 			if c.TrustOrigin == "external" {
 				b.WriteString(" (EXTERNAL, untrusted)")
 			}
-			fmt.Fprintf(&b, " until %s", c.ExpiresAt)
+			fmt.Fprintf(&b, " until %s", agent.OneLine(c.ExpiresAt))
 			if c.Note != "" {
 				fmt.Fprintf(&b, " (%s)", agent.OneLine(c.Note))
 			}
@@ -333,7 +342,7 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 		}
 	}
 	if len(msgs) > 0 {
-		b.WriteString(agent.FormatBody(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)))
+		b.WriteString(agent.FormatBody(room, msgs))
 	}
 	return json.NewEncoder(out).Encode(agent.ContextOutput("SessionStart", b.String()))
 }
@@ -344,8 +353,7 @@ func (h *Hook) inbox(ctx context.Context, event string, repo agent.Repo, st *age
 	if err != nil || len(msgs) == 0 {
 		return err
 	}
-	return json.NewEncoder(out).Encode(agent.ContextOutput(event,
-		agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID))))
+	return json.NewEncoder(out).Encode(agent.ContextOutput(event, agent.Format(h.room(ctx, repo, st), msgs)))
 }
 
 // heartbeat keeps this agent's claims alive while it works; best
@@ -390,7 +398,7 @@ func (h *Hook) preToolUse(ctx context.Context, in agent.HookInput, cwd string, r
 				if c.TrustOrigin == "external" {
 					who += " (EXTERNAL, untrusted)"
 				}
-				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, who, agent.OneLine(c.Path), c.ExpiresAt, ask))
+				return deny(out, fmt.Sprintf("%s is claimed by %s (claim %s, until %s). %s", rel, who, agent.OneLine(c.Path), agent.OneLine(c.ExpiresAt), ask))
 			}
 		}
 		return nil
@@ -430,7 +438,7 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	*st = next
 	return json.NewEncoder(out).Encode(map[string]any{
 		"decision": "block",
-		"reason": agent.Format(h.roomLabel(repo, st), msgs, agent.Labels(ctx, h.C, st.RoomID)) +
+		"reason": agent.Format(h.room(ctx, repo, st), msgs) +
 			"Before you stop: answer what is addressed to you in the Conclave room (messages.send with reply_to = the message's #id), or say briefly why no answer is needed. Then stop.",
 	})
 }

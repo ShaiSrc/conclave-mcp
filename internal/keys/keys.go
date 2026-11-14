@@ -47,7 +47,7 @@ const ScopeAdmin = auth.ScopeAdmin
 // scopes ([ScopeAdmin] for admin keys, nil otherwise), and the
 // stored argon2id PHC string. The hash and salt are never returned
 // to the caller of the HTTP API; this method is for the in-process
-// verifier only.
+// verifier only. Stand-in keys (remote_domain set) are never found.
 func (s *Service) LookupByPrefix(ctx context.Context, prefix string) (int64, []string, string, error) {
 	var (
 		id      int64
@@ -55,7 +55,7 @@ func (s *Service) LookupByPrefix(ctx context.Context, prefix string) (int64, []s
 		isAdmin bool
 	)
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id, hash, is_admin FROM api_keys WHERE prefix = ? AND revoked_at IS NULL`,
+		`SELECT id, hash, is_admin FROM api_keys WHERE prefix = ? AND revoked_at IS NULL AND remote_domain IS NULL`,
 		prefix,
 	).Scan(&id, &phc, &isAdmin)
 	if err != nil {
@@ -131,6 +131,7 @@ type keyView struct {
 	TrustOrigin string `json:"trust_origin"`
 	Handle      string `json:"handle"` // the bot handle, empty if none
 	Admin       bool   `json:"admin"`
+	Remote      string `json:"remote,omitempty"` // a stand-in's server
 }
 
 // createKeyResponse is what POST /v1/keys returns. Note: "key" is
@@ -221,7 +222,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin, COALESCE(handle, ''), is_admin
+		`SELECT id, label, prefix, created_at, last_used_at, revoked_at, trust_origin, COALESCE(handle, ''), is_admin, COALESCE(remote_domain, '')
 		 FROM api_keys
 		 ORDER BY id`)
 	if err != nil {
@@ -239,7 +240,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			revoked   sql.NullString
 			trustOrig string
 		)
-		if err := rows.Scan(&k.ID, &k.Label, &prefix, &k.CreatedAt, &lastUsed, &revoked, &trustOrig, &k.Handle, &k.Admin); err != nil {
+		if err := rows.Scan(&k.ID, &k.Label, &prefix, &k.CreatedAt, &lastUsed, &revoked, &trustOrig, &k.Handle, &k.Admin, &k.Remote); err != nil {
 			writeJSONError(w, r, http.StatusInternalServerError, "internal_error", "scan failed")
 			return
 		}

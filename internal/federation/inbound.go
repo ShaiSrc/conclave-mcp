@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,7 +38,8 @@ var errUnknownKey = errors.New("the origin's document does not list the key")
 // Verify admits only requests signed by a peer the policy lets in. It
 // runs the spec's checks in order; nonces and seen peers are stored
 // only once the signature has verified. The handler gets the origin
-// (OriginFrom) and the body.
+// (OriginFrom) and the body, of at most 64 KiB; a message proposal's
+// may be the message cap over that.
 func (s *Service) Verify(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
@@ -101,10 +103,18 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			return
 		}
 		// 7. Body and signature.
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+		limit, tooLargeMsg := int64(maxBody), "body over 64 KiB"
+		switch {
+		case r.Method != http.MethodPost:
+		case roomPath(r.URL.Path, "/messages"):
+			limit, tooLargeMsg = limit+int64(s.Rooms.MaxMessageBytes), "body over 64 KiB and the message cap"
+		case roomPath(r.URL.Path, "/events"):
+			limit, tooLargeMsg = int64(s.eventsLimit()), "body over 64 KiB and twice the message cap"
+		}
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
 		if err != nil {
 			if tooLarge := (*http.MaxBytesError)(nil); errors.As(err, &tooLarge) {
-				s.refuse(w, r, origin, http.StatusRequestEntityTooLarge, "too_large", "body over 64 KiB")
+				s.refuse(w, r, origin, http.StatusRequestEntityTooLarge, "too_large", tooLargeMsg)
 			} else {
 				s.refuse(w, r, origin, http.StatusBadRequest, "bad_request", "cannot read body")
 			}
@@ -180,10 +190,22 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.fail(w, r, err)
 			return
 		}
+		// Contact resumes delivery to the peer if it was paused.
+		if err := s.resumeDelivery(ctx, origin); err != nil {
+			s.fail(w, r, err)
+			return
+		}
 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, originKey{}, origin)))
 	})
+}
+
+// roomPath reports whether p is /fed/v1/rooms/{id} followed by suffix.
+func roomPath(p, suffix string) bool {
+	rest, ok := strings.CutPrefix(p, "/fed/v1/rooms/")
+	id, ok2 := strings.CutSuffix(rest, suffix)
+	return ok && ok2 && id != "" && !strings.Contains(id, "/")
 }
 
 func inWindow(ts int64) bool {
@@ -344,12 +366,16 @@ func (s *Service) pruneNonces(ctx context.Context, now time.Time) error {
 }
 
 // Run deletes expired nonces every minute and runs the directory
-// refresh loop beside it, until ctx is done; it returns once both have
-// stopped.
+// refresh loop, the delivery worker and the replicas' catch-up beside
+// it, each in its own goroutine, until ctx is done; it returns once all
+// have stopped.
 func (s *Service) Run(ctx context.Context) {
-	done := make(chan struct{})
-	go func() { s.refreshLoop(ctx); close(done) }()
-	defer func() { <-done }()
+	var wg sync.WaitGroup
+	for _, loop := range []func(context.Context){s.refreshLoop, s.deliveryLoop, s.catchupLoop} {
+		wg.Add(1)
+		go func() { defer wg.Done(); loop(ctx) }()
+	}
+	defer wg.Wait()
 	t := time.NewTicker(time.Minute)
 	defer t.Stop()
 	for {

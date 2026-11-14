@@ -44,11 +44,13 @@ type testEnv struct {
 	t       *testing.T
 	dir     string
 	dbPath  string
+	db      *sql.DB
 	cfg     server.Config
 	server  *server.Server
 	addr    string
 	baseURL string
 	cancel  context.CancelFunc
+	done    chan struct{} // closed when the server has shut down
 
 	// Two distinct API keys, owned by two distinct "agents". Used
 	// by tests that simulate two callers without involving a real
@@ -508,22 +510,43 @@ func repoRoot(t *testing.T) string {
 	return ""
 }
 
-// close releases the resources held by the env without deleting the
-// underlying directory. Tests that need to re-open the same files
-// (e.g. migration-idempotency check) call this and then construct
-// a second env on the same dir.
+// close stops the server and waits until it has shut down, without
+// deleting the underlying directory or closing the database. Tests that
+// need to re-open the same files (e.g. migration-idempotency check)
+// call this and then construct a second env on the same dir.
 func (e *testEnv) close() {
-	// We use a synchronous cancel by replacing ctx with one we
-	// control. Simpler: the cleanup will run on test end, but
-	// we can mimic its effect by calling our own cancel.
-	// Because the cancel is captured in the cleanup closure
-	// defined in newTestEnv/newTestEnvWithDir, we need access
-	// to it. Store it on the env.
 	e.cancel()
-	// Best-effort wait for the goroutine that called Start to
-	// return. We do not have a handle to it, so a tiny sleep
-	// is the best we can do without exposing internals.
-	time.Sleep(50 * time.Millisecond)
+	<-e.done
+}
+
+// start runs a server for e.cfg on e.db until the test ends or close,
+// and waits until it answers. After close, it starts the server again
+// on the same database and ports, as a restarted process would be.
+func (e *testEnv) start() {
+	e.t.Helper()
+	srv, err := server.New(e.cfg, server.Deps{
+		DB:     e.db,
+		Logger: e.cfg.Logger,
+		Broker: events.NewBroker(),
+	})
+	if err != nil {
+		e.t.Fatalf("server.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	// Registered after the database's cleanup, so it runs first: the
+	// server and its federation loops stop before the database closes.
+	e.t.Cleanup(func() { cancel(); <-done })
+	go func() {
+		defer close(done)
+		if err := srv.Start(ctx); err != nil && !isShutdownErr(err) {
+			e.t.Logf("server.Start returned: %v", err)
+		}
+	}()
+	e.server, e.cancel, e.done = srv, cancel, done
+	if err := e.waitReady(5 * time.Second); err != nil {
+		e.t.Fatalf("server did not become ready: %v", err)
+	}
 }
 
 // newTestEnvWithDir is like newTestEnv but uses an explicit directory
@@ -564,7 +587,6 @@ func newTestEnvCfg(t *testing.T, dir string, edit func(*server.Config)) *testEnv
 		t.Fatalf("listen for free port: %v", err)
 	}
 	addr := ln.Addr().String()
-	_ = ln.Close()
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cfg := server.Config{
@@ -575,8 +597,11 @@ func newTestEnvCfg(t *testing.T, dir string, edit func(*server.Config)) *testEnv
 		Logger:      logger,
 	}
 	if edit != nil {
+		// ln still holds the main port, so a port edit picks cannot be
+		// the same one.
 		edit(&cfg)
 	}
+	_ = ln.Close()
 
 	db, cleanup, err := storage.Open(context.Background(), dbPath)
 	if err != nil {
@@ -589,41 +614,17 @@ func newTestEnvCfg(t *testing.T, dir string, edit func(*server.Config)) *testEnv
 		t.Fatalf("storage.Migrate: %v", err)
 	}
 
-	srv, err := server.New(cfg, server.Deps{
-		DB:     db,
-		Logger: logger,
-		Broker: events.NewBroker(),
-	})
-	if err != nil {
-		t.Fatalf("server.New: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() {
-		cancel()
-	})
-
-	go func() {
-		if err := srv.Start(ctx); err != nil && !isShutdownErr(err) {
-			t.Logf("server.Start returned: %v", err)
-		}
-	}()
-
 	env := &testEnv{
 		t:          t,
 		dir:        dir,
 		dbPath:     dbPath,
+		db:         db,
 		cfg:        cfg,
-		server:     srv,
 		addr:       addr,
 		baseURL:    "http://" + addr,
-		cancel:     cancel,
 		httpClient: &http.Client{Timeout: 5 * time.Second},
 	}
-
-	if err := env.waitReady(5 * time.Second); err != nil {
-		t.Fatalf("server did not become ready: %v", err)
-	}
+	env.start()
 
 	// keyA is an admin key (it creates rooms); keyB is an agent key.
 	env.keyA = env.createKey("key-a", true)

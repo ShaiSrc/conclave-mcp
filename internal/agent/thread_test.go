@@ -57,7 +57,7 @@ func TestReplyTo(t *testing.T) {
 }
 
 func TestFormatThread_DropsControlCharsKeepsLines(t *testing.T) {
-	out := FormatThread("r", []Msg{{ID: 1, Author: 2, Content: "a\x1b[31mb\x07\nc\td"}}, nil, 0)
+	out := FormatThread(Room{Name: "r"}, []Msg{{ID: 1, Author: 2, Content: "a\x1b[31mb\x07\nc\td"}}, 0)
 	if strings.ContainsAny(out, "\x1b\x07") {
 		t.Errorf("control characters in output: %q", out)
 	}

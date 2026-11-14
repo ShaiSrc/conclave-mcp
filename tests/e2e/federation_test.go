@@ -20,13 +20,15 @@ type fedEnv struct {
 
 func newFedEnv(t *testing.T) *fedEnv {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	domain := ln.Addr().String()
-	_ = ln.Close()
+	var domain string
 	env := newTestEnvCfg(t, t.TempDir(), func(c *server.Config) {
+		// Picked while the main port is still held, so the two differ.
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("listen: %v", err)
+		}
+		domain = ln.Addr().String()
+		_ = ln.Close()
 		c.FederationDomain = domain
 		c.FederationHost = "127.0.0.1"
 		c.FederationPort = portFromAddr(domain)

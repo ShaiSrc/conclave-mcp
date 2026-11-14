@@ -18,9 +18,10 @@ import (
 )
 
 const (
-	maxBody          = 64 << 10 // request and response bodies
-	fetchTimeout     = 5 * time.Second
-	fetchesPerMinute = 10 // documents of domains that are not allowed, server-wide
+	maxBody          = 64 << 10         // request and response bodies
+	fetchTimeout     = 5 * time.Second  // documents, pings, bot lookups; dialing and TLS of every request
+	roomTimeout      = 30 * time.Second // room requests: invites, pushes, pulls, forwarded writes, leaves
+	fetchesPerMinute = 10               // documents of domains that are not allowed, server-wide
 )
 
 // ErrFetchLimited is returned when the fetch budget for domains that
@@ -67,7 +68,8 @@ type Fetcher struct {
 	insecureHTTP bool
 	isAllowed    func(domain string) bool
 	limit        *rate.Limiter
-	client       *http.Client
+	client       *http.Client // fetchTimeout
+	roomClient   *http.Client // roomTimeout, the same transport
 }
 
 type allowPrivateKey struct{}
@@ -75,7 +77,7 @@ type allowPrivateKey struct{}
 // NewFetcher returns a Fetcher that uses http:// with insecureHTTP and
 // lets isAllowed domains have private addresses.
 func NewFetcher(insecureHTTP bool, isAllowed func(domain string) bool) *Fetcher {
-	return &Fetcher{
+	f := &Fetcher{
 		insecureHTTP: insecureHTTP,
 		isAllowed:    isAllowed,
 		limit:        rate.NewLimiter(rate.Every(time.Minute/fetchesPerMinute), fetchesPerMinute),
@@ -93,6 +95,10 @@ func NewFetcher(insecureHTTP bool, isAllowed func(domain string) bool) *Fetcher 
 			},
 		},
 	}
+	room := *f.client
+	room.Timeout = roomTimeout
+	f.roomClient = &room
+	return f
 }
 
 func dial(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -144,7 +150,7 @@ func (f *Fetcher) document(ctx context.Context, domain string, allowPrivate bool
 	if err != nil {
 		return Document{}, err
 	}
-	status, body, err := f.send(req, allowPrivate, maxBody)
+	status, body, err := f.send(f.client, req, allowPrivate, maxBody)
 	if err != nil {
 		return Document{}, err
 	}
@@ -180,10 +186,11 @@ func (f *Fetcher) newRequest(ctx context.Context, method, domain, path string, b
 	return http.NewRequestWithContext(ctx, method, scheme+"://"+domain+path, bytes.NewReader(body))
 }
 
-// send does req and returns the status and body, read up to limit bytes.
-func (f *Fetcher) send(req *http.Request, allowPrivate bool, limit int) (int, []byte, error) {
+// send does req with client and returns the status and body, read up
+// to limit bytes.
+func (f *Fetcher) send(client *http.Client, req *http.Request, allowPrivate bool, limit int) (int, []byte, error) {
 	req = req.WithContext(context.WithValue(req.Context(), allowPrivateKey{}, allowPrivate))
-	resp, err := f.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -210,7 +217,7 @@ func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error
 		return 0, err
 	}
 	start := time.Now()
-	status, resp, err := s.fetch.send(req, s.fetch.isAllowed(domain), maxBody)
+	status, resp, err := s.fetch.send(s.fetch.client, req, s.fetch.isAllowed(domain), maxBody)
 	rtt := time.Since(start)
 	if err != nil {
 		return 0, err

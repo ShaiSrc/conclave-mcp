@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/cli/client"
 )
 
@@ -305,5 +306,19 @@ func TestSend_ReplyTo(t *testing.T) {
 	send(map[string]string{"content": "plain"})
 	if _, ok := gotBody["reply_to"]; ok {
 		t.Errorf("no --reply-to: body has reply_to: %v", gotBody)
+	}
+}
+
+func TestRenderMessageList_RemoteAuthors(t *testing.T) {
+	msgs := []agent.Msg{{ID: 1, Author: 7, TS: "t1", TrustOrigin: "external", AuthorAddress: "c1@c.example", Unverified: true, Content: "hi"}}
+	var out bytes.Buffer
+	if err := renderMessageList("table", msgs, nil, &out); err != nil || !strings.Contains(out.String(), "c1@c.example") ||
+		!strings.Contains(out.String(), "external,unverified") {
+		t.Errorf("table: %q %v", out.String(), err)
+	}
+	out.Reset()
+	if err := renderMessageList("json", msgs, nil, &out); err != nil || !strings.Contains(out.String(), `"author_address": "c1@c.example"`) ||
+		!strings.Contains(out.String(), `"unverified": true`) {
+		t.Errorf("json: %q %v", out.String(), err)
 	}
 }

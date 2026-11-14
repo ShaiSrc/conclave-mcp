@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -560,5 +561,138 @@ func TestRooms_MembersHideAdminKeysFromNonAdmins(t *testing.T) {
 	body = do(r, http.MethodGet, "/rooms/"+room.ID+"/members", "").Body.String()
 	if !strings.Contains(body, "k-"+t.Name()) || !strings.Contains(body, `"label":"agent"`) {
 		t.Errorf("admin sees every member: %s", body)
+	}
+}
+
+func TestRooms_ReplicaRefusesWrites(t *testing.T) {
+	h, db, _ := setupAs(t)
+	room := createRoom(t, h, "replica")
+	local := createRoom(t, h, "local")
+	bot := seedKey(t, db, "bot") // this server's own bot
+	other := seedKey(t, db, "other")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := fedrooms.StandIn(context.Background(), tx, "a1@a.example")
+	if err != nil || tx.Commit() != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES ('` + room.ID + `', ` + itoa(bot) + `, 'reader', '2026-01-01T00:00:00Z', 'read')`,
+		`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES ('` + room.ID + `', ` + itoa(remote) + `, 'reader', '2026-01-01T00:00:00Z', 'read')`,
+		`UPDATE rooms SET home_domain = 'a.example' WHERE id = '` + room.ID + `'`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	base := "/rooms/" + room.ID
+	for _, c := range []struct{ method, path, body string }{
+		{http.MethodPost, base + "/members", `{"key_id":` + itoa(other) + `,"rights":["read"]}`},
+		{http.MethodPost, base + "/invite", `{"key_id":` + itoa(other) + `,"rights":["read"]}`},
+		{http.MethodPatch, base + "/members/" + itoa(bot), `{"rights":["read","claim"]}`},
+		{http.MethodPatch, base + "/members/" + itoa(remote), `{"rights":["read","claim"]}`},
+		{http.MethodDelete, base + "/members/" + itoa(remote), ""},
+		{http.MethodPost, base + "/archive", ""},
+	} {
+		if rec := do(h, c.method, c.path, c.body); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"replica_room"`) {
+			t.Errorf("%s %s: %d %s, want 403 replica_room", c.method, c.path, rec.Code, rec.Body.String())
+		}
+	}
+	var members int
+	var archived sql.NullString
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM room_members WHERE room_id = r.id AND rights = 'read'), archived_at FROM rooms r WHERE id = ?`, room.ID).
+		Scan(&members, &archived); err != nil || members != 2 || archived.Valid {
+		t.Errorf("replica changed: %d read members, archived %v, err %v", members, archived, err)
+	}
+	// Room JSON names the home of a replica, and only of a replica.
+	home := func(path string) any {
+		var v map[string]any
+		_ = json.Unmarshal(do(h, http.MethodGet, path, "").Body.Bytes(), &v)
+		return v["home"]
+	}
+	if got := home(base); got != "a.example" {
+		t.Errorf("replica home: %v", got)
+	}
+	if got := home("/rooms/" + local.ID); got != nil {
+		t.Errorf("local room home: %v", got)
+	}
+	if body := do(h, http.MethodGet, "/rooms", "").Body.String(); strings.Count(body, `"home":"a.example"`) != 1 {
+		t.Errorf("list: %s", body)
+	}
+	// This server's own bot may leave the replica.
+	if rec := do(h, http.MethodDelete, base+"/members/"+itoa(bot), ""); rec.Code != http.StatusNoContent {
+		t.Errorf("own bot leaves: %d %s", rec.Code, rec.Body.String())
+	}
+	// A room hosted here takes every write as before.
+	if rec := do(h, http.MethodPost, "/rooms/"+local.ID+"/members", `{"key_id":`+itoa(other)+`,"rights":["read"]}`); rec.Code != http.StatusCreated {
+		t.Errorf("local invite: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// Remote bots come in by address only, and only with federation on.
+func TestRooms_RemoteMembersByAddressOnly(t *testing.T) {
+	h, db, _ := setupAs(t)
+	room := createRoom(t, h, "fed")
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	remote, err := fedrooms.StandIn(context.Background(), tx, "a1@a.example")
+	if err != nil || tx.Commit() != nil {
+		t.Fatal(err)
+	}
+	base := "/rooms/" + room.ID + "/members"
+	for _, c := range []struct {
+		body, code string
+		status     int
+	}{
+		{`{"key_id":` + itoa(remote) + `,"rights":["read"]}`, `"bad_request"`, http.StatusBadRequest},
+		{`{"address":"a1@a.example","rights":["read"]}`, `"federation_disabled"`, http.StatusNotFound},
+		{`{"address":"a1@a.example","key_id":` + itoa(remote) + `}`, `"bad_request"`, http.StatusBadRequest},
+	} {
+		if rec := do(h, http.MethodPost, base, c.body); rec.Code != c.status || !strings.Contains(rec.Body.String(), c.code) {
+			t.Errorf("%s: %d %s, want %d %s", c.body, rec.Code, rec.Body.String(), c.status, c.code)
+		}
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM room_members WHERE key_id = ?`, remote).Scan(&n); err != nil || n != 0 {
+		t.Errorf("stand-in memberships: %d %v", n, err)
+	}
+}
+
+// Once the bot's server accepted the invite it has an active replica:
+// the host stores the stand-in's membership even when the request is
+// cancelled right then.
+func TestRooms_RemoteInviteOutlivesCancel(t *testing.T) {
+	db := setupDB(t)
+	admin := seedKey(t, db, "admin")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	svc := NewService(db)
+	svc.FedDomain = "b.example"
+	svc.InviteRemote = func(context.Context, string, string, string, []string) (int, error) {
+		cancel()
+		return 0, nil
+	}
+	h := chi.NewRouter()
+	h.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			next.ServeHTTP(w, req.WithContext(context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: admin, Scopes: []string{auth.ScopeAdmin}})))
+		})
+	})
+	svc.Routes(h)
+	room := createRoom(t, h, "fed")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+room.ID+"/members",
+		strings.NewReader(`{"address":"a1@a.example","rights":["read"]}`)).WithContext(ctx))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body.String())
+	}
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM room_members m JOIN api_keys k ON k.id = m.key_id
+		WHERE m.room_id = ? AND k.label = 'a1@a.example'`, room.ID).Scan(&n); err != nil || n != 1 {
+		t.Errorf("stand-in memberships: %d %v", n, err)
 	}
 }

@@ -4,7 +4,7 @@
 //	conclave-mcp rooms create --name <name> [--description ...]           (admin key)
 //	conclave-mcp rooms get <id>
 //	conclave-mcp rooms archive <id>                                       (admin key)
-//	conclave-mcp rooms invite <room-id> <api-key-id> [--rights a,b] [--allow-multi-room]  (admin key)
+//	conclave-mcp rooms invite <room-id> <api-key-id|name@domain> [--rights a,b] [--allow-multi-room]  (admin key)
 //	conclave-mcp rooms rights <room-id> <api-key-id> <rights>             (admin key)
 //	conclave-mcp rooms members [room]
 //	conclave-mcp rooms remove <room-id> <api-key-id>                      (admin key)
@@ -14,6 +14,7 @@
 package rooms
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -61,6 +62,8 @@ type roomView struct {
 	ArchivedAt  string `json:"archived_at,omitempty"`
 	// MyRights is the caller's own rights (GET /v1/rooms/{id} only).
 	MyRights []string `json:"my_rights,omitempty"`
+	// Home is the host of a room hosted on another server.
+	Home string `json:"home,omitempty"`
 }
 
 type listResponse struct {
@@ -148,10 +151,10 @@ func renderRooms(format string, rooms []roomView, out io.Writer) error {
 		return enc.Encode(rooms)
 	case "table", "":
 		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "ID\tNAME\tOWNER\tCREATED\tARCHIVED")
+		_, _ = fmt.Fprintln(tw, "ID\tNAME\tOWNER\tCREATED\tARCHIVED\tHOME")
 		for _, r := range rooms {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
-				r.ID, r.Name, r.OwnerKeyID, r.CreatedAt, r.ArchivedAt)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
+				r.ID, agent.OneLine(r.Name), r.OwnerKeyID, r.CreatedAt, r.ArchivedAt, cmp.Or(agent.OneLine(r.Home), "-"))
 		}
 		return tw.Flush()
 	default:
@@ -253,21 +256,41 @@ func newInviteCmd() *cobra.Command {
 	var flagRights string
 	var flagMulti bool
 	cmd := &cobra.Command{
-		Use:   "invite <room-id> <api-key-id>",
-		Short: "Add an API key to a room with the given rights (admin key only)",
+		Use:   "invite <room-id> <api-key-id|name@domain>",
+		Short: "Add an API key, or a bot of a peer server, to a room with the given rights (admin key only)",
 		Long: `Adds an API key to a room (admin key only). --rights is a
 comma-separated list of read, claim and message types (question, answer,
 decision, handoff, status_update, task_assignment, alert, system), or
 all / none. Without --rights the key gets no rights. A key that is
-already in another room is refused unless --allow-multi-room is given.`,
+already in another room is refused unless --allow-multi-room is given.
+
+With name@domain it invites the bot with that handle on a peer server
+(an allowed peer; federation must be on). That server is asked first;
+the room is then hosted here and replicated there.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roomID := args[0]
+			list := rights.Split(flagRights)
+			if strings.Contains(args[1], "@") {
+				return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+					var resp struct {
+						KeyID   int64    `json:"key_id"`
+						Address string   `json:"address"`
+						Rights  []string `json:"rights"`
+					}
+					if _, err := c.Do(ctx, client.Request{Method: "POST", Path: "/v1/rooms/" + roomID + "/members",
+						Body: map[string]any{"address": args[1], "rights": list}, Out: &resp}); err != nil {
+						return err
+					}
+					_, _ = fmt.Fprintf(out, "invited %s (key %d) to room %s with rights %s\n",
+						agent.OneLine(resp.Address), resp.KeyID, roomID, rightsText(resp.Rights))
+					return nil
+				})
+			}
 			keyIDInt, err := parseInt64(args[1])
 			if err != nil {
 				return &exitError{Code: 2, Err: fmt.Errorf("api-key-id: %w", err)}
 			}
-			list := rights.Split(flagRights)
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				_, err := c.Do(ctx, client.Request{
 					Method: "POST",
@@ -330,7 +353,8 @@ func newMembersCmd() *cobra.Command {
 		Use:   "members [room]",
 		Short: "List a room's members (needs read; rights shown to admin keys)",
 		Long: `Lists a room's members: key id, label, internal/external, and each
-member's rights when the caller is an admin key. ROOM is a room id or
+member's rights when the caller is an admin key. A bot of another
+server is listed by its address, name@domain, marked (remote). ROOM is a room id or
 name; without it: $CONCLAVE_ROOM, then the room in the .conclave.json of
 the repository you are in.`,
 		Args: cobra.MaximumNArgs(1),
@@ -348,6 +372,7 @@ the repository you are in.`,
 					Members []struct {
 						KeyID       int64  `json:"key_id"`
 						Label       string `json:"label"`
+						Address     string `json:"address"` // a bot of another server
 						TrustOrigin string `json:"trust_origin"`
 						// Only admin keys get rights; JSON [] decodes to an
 						// empty non-nil slice, a missing field to nil.
@@ -365,7 +390,11 @@ the repository you are in.`,
 				}
 				_, _ = fmt.Fprintln(tw, header)
 				for _, m := range resp.Members {
-					line := fmt.Sprintf("%d\t%s\t%s", m.KeyID, m.Label, m.TrustOrigin)
+					label := agent.OneLine(m.Label)
+					if m.Address != "" {
+						label = agent.OneLine(m.Address) + " (remote)"
+					}
+					line := fmt.Sprintf("%d\t%s\t%s", m.KeyID, label, m.TrustOrigin)
 					if admin {
 						line += "\t" + rightsText(m.Rights)
 					}

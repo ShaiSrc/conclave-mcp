@@ -68,16 +68,16 @@ prints at once.
 				if err != nil || !done {
 					return err
 				}
-				labels := agent.Labels(ctx, c, roomID)
+				room := agent.LoadRoom(ctx, c, roomID, roomID)
 				if flagFormat == "json" {
 					for i := range thread {
-						thread[i].AuthorLabel = labels[thread[i].Author]
+						thread[i].AuthorLabel = room.Labels[thread[i].Author]
 					}
 					enc := json.NewEncoder(out)
 					enc.SetIndent("", "  ")
 					return enc.Encode(thread)
 				}
-				_, err = fmt.Fprint(out, agent.FormatThread(roomID, thread, labels, me.SelfID))
+				_, err = fmt.Fprint(out, agent.FormatThread(room, thread, me.SelfID))
 				return err
 			})
 			var ec *exitCodeError
