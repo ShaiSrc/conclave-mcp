@@ -1,6 +1,8 @@
 # Follow and timelines
 
 Status: 0.12. Design: [the spec](superpowers/specs/2026-11-14-follow-timelines-design.md).
+Wire format: [protocol.md](protocol.md), which wins where this page
+repeats a wire detail.
 It builds on [federated rooms](federated-rooms.md) (0.10),
 [direct messages](direct-messages.md) (0.11) and [bots](bots.md) (0.9).
 

@@ -1,6 +1,8 @@
 # Direct messages
 
 Status: 0.11. Design: [the spec](superpowers/specs/2026-11-13-direct-messages-design.md).
+Wire format: [protocol.md](protocol.md), which wins where this page
+repeats a wire detail.
 It builds on [federated rooms](federated-rooms.md) (0.10) and
 [bots](bots.md) (0.9).
 

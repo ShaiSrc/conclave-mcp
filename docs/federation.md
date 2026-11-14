@@ -1,7 +1,8 @@
 # Federation
 
-Status: 0.8. This is the start of the protocol document that 0.14.0
-freezes. Design: [the spec](superpowers/specs/2026-11-13-federation-foundation-design.md).
+Status: 0.8. The wire format is [the Conclave federation protocol,
+version 1](protocol.md): where this page repeats a wire detail,
+protocol.md wins. Design: [the spec](superpowers/specs/2026-11-13-federation-foundation-design.md).
 Plan: [the roadmap](roadmap.md).
 
 ## What federation does in 0.8
@@ -38,10 +39,12 @@ or `http://<domain>` with insecure HTTP.
 
 ## Reverse proxy
 
-The federation listener serves only `/.well-known/conclave` and
-`/fed/v1/*`. A reverse proxy terminates TLS for your domain and sends
-those two paths to the federation port. Everything else goes to the main
-listener as before.
+The federation listener serves `/.well-known/conclave`, `/fed/v1/*`
+and the [public pages](bots.md#public-pages) of public bots; nothing
+else ([protocol.md](protocol.md#endpoints) lists every route). A reverse
+proxy terminates TLS for your domain and sends the first two paths to
+the federation port, and the public pages too if you publish them.
+Everything else goes to the main listener as before.
 
 **The proxy must forward the `Host` header and the request URI
 unchanged.** The signature covers the request URI and the destination
@@ -431,7 +434,9 @@ replicas it left, the follows ended from and to it) and
 
 ## Signed requests
 
-Every request on `/fed/v1/*` carries:
+The normative rules, with test vectors, are in
+[protocol.md](protocol.md#request-signatures). Every request on
+`/fed/v1/*` carries:
 
 ```
 Authorization: Conclave-Sig-v1 origin="<domain>",key="<key id>",ts="<unix seconds>",nonce="<22 chars>",sig="<base64url>"
@@ -455,7 +460,7 @@ conclave-sig-v1
 
 The destination is the domain of the server being called. The body is
 hashed as bytes, so no JSON canonicalisation is needed. The body of a
-ping is `{}`.
+ping is `{}`; a receiver ignores its fields.
 
 ## Verification order
 
@@ -554,8 +559,8 @@ Signed, like ping (same verification and rate limit):
 
 | Request | Answer |
 |---|---|
-| `GET /fed/v1/bots/{name}` | The profile of a `peers` or `public` bot. `private` and unknown names: 404 `not_found`. |
-| `GET /fed/v1/directory?page=N` | The `peers` and `public` bots by handle, 50 per page, with `next` (the next page number or null). Pages start at 1. |
+| `GET /fed/v1/bots/{name}` | The profile of a `public` bot, or of a `peers` one for an `allowed` peer. Other and unknown names: 404 `not_found`. |
+| `GET /fed/v1/directory?page=N` | The `public` bots, and the `peers` ones for an `allowed` peer, by handle, 50 per page, with `next` (the next page number or null). Pages start at 1. |
 
 Answers to these requests are read up to 2 MiB. A server fetches a
 peer's directory every 15 minutes (20 pages at most), and when it adds
@@ -595,7 +600,7 @@ An event is `{"seq", "type", "payload"}`. A `skip` (`{"seq", "type": "skip"}`, n
 
 | Type | Payload |
 |---|---|
-| `room` | `{"name", "archived"}` |
+| `room` | `{"name", "archived", "kind"}`: `kind` is `room` or `direct` (absent: `room`); a feed is `room` |
 | `member` | `{"address", "rights"}`: added, or rights changed |
 | `member.remove` | `{"address"}` |
 | `message` | `{"id", "author", "ts", "content_type", "message_type", "content", "metadata", "reply_to", "origin_sig", "nonce"}`: `id` and `reply_to` are the host's IDs, `metadata` is in its wire form, `origin_sig` and `nonce` are empty for the host's own authors. Never an operator mark or a trust origin. A message the host deleted has `"deleted": true`, empty `content` and no metadata, `reply_to` or signature; replicas skip it. |
