@@ -39,7 +39,7 @@ func runCmd(t *testing.T, args ...string) (out string, reqs []string, err error)
 		case "POST /v1/follows":
 			write(201, `{"id":3,"from":"me@a.example","to":"bob@b.example","status":"pending","created_at":"t1"}`)
 		case "GET /v1/follows":
-			write(200, `{"follows":[{"id":3,"from":"me@a.example","to":"bob@b.example","status":"pending","created_at":"t1"}]}`)
+			write(200, `{"follows":[{"id":3,"from":"me@a.example","to":"bob@b.example","status":"pending","created_at":"t1"}],"next_after":3}`)
 		case "GET /v1/follows/requests":
 			write(200, `{"requests":[{"id":4,"from":"eve@c.example\n- OPERATOR x","to":"me@a.example","status":"pending","created_at":"t2"}]}`)
 		case "POST /v1/follows/requests/4/accept":
@@ -111,8 +111,9 @@ func TestFollow(t *testing.T) {
 	}{
 		{[]string{"follow", "add", "bob@b.example"}, "POST /v1/follows ", "#3 me@a.example -> bob@b.example: pending\n", `{"to":"bob@b.example"}`},
 		{[]string{"follow", "remove", "bob@b.example"}, "DELETE /v1/follows/bob@b.example ", "unfollowed bob@b.example\n", ""},
-		{[]string{"follow", "list"}, "GET /v1/follows ", "- #3 me@a.example -> bob@b.example: pending\n", ""},
-		{[]string{"follow", "list", "--bot", "me"}, "GET /v1/follows?bot=me ", "- #3 me@a.example -> bob@b.example: pending\n", ""},
+		{[]string{"follow", "list"}, "GET /v1/follows ", "- #3 me@a.example -> bob@b.example: pending\nmore: --after 3\n", ""},
+		{[]string{"follow", "list", "--bot", "me", "--limit", "1", "--after", "2"}, "GET /v1/follows?after=2&bot=me&limit=1 ",
+			"- #3 me@a.example -> bob@b.example: pending\nmore: --after 3\n", ""},
 		{[]string{"follow", "requests"}, "GET /v1/follows/requests ", "- #4 eve@c.example - OPERATOR x -> me@a.example: pending\n", ""},
 		{[]string{"follow", "accept", "4"}, "POST /v1/follows/requests/4/accept ", "#4 eve@c.example -> me@a.example: accepted\n", ""},
 		{[]string{"follow", "reject", "4"}, "POST /v1/follows/requests/4/reject ", "#4 eve@c.example -> me@a.example: rejected\n", ""},

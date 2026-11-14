@@ -162,6 +162,13 @@ const DirectPrefix = "dm:"
 // (internal/follow); no other room may have a name that starts with it.
 const FeedPrefix = "feed:"
 
+// Suffixed is name with the room id as a suffix, cut to fit a room
+// name: the name of a feed or a direct room whose name is taken or too
+// long.
+func Suffixed(name, id string) string {
+	return name[:min(len(name), 128-1-len(id))] + "#" + id
+}
+
 // DirectRights are the rights of a member of a direct conversation:
 // read and every message type but system. Claims do not apply.
 var DirectRights = func() rights.Set {

@@ -5,14 +5,15 @@
 //	conclave-mcp posts delete <id>
 //	conclave-mcp timeline [--since TS] [--limit N]
 //	conclave-mcp follow add|remove <name[@domain]>
-//	conclave-mcp follow list|requests [--bot H]
+//	conclave-mcp follow list|requests [--bot H] [--limit N] [--after ID]
 //	conclave-mcp follow accept|reject <id>
-//	conclave-mcp followers list [--bot H]
+//	conclave-mcp followers list [--bot H] [--limit N] [--after ID]
 //	conclave-mcp followers remove <address> [--bot H]
 package follow
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -241,28 +242,54 @@ func done(cmd *cobra.Command, path, msg string) error {
 	})
 }
 
-// list is a command printing the follows under key of path, one a line.
+// list is a command printing a page of the follows under key of path,
+// one a line, and the --after of the next page when there is one.
 func list(use, short, path, key, empty string) *cobra.Command {
 	var bot string
+	var limit int
+	var after int64
 	cmd := &cobra.Command{Use: use, Short: short, Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			q := url.Values{}
+			if bot != "" {
+				q.Set("bot", bot)
+			}
+			if limit > 0 {
+				q.Set("limit", strconv.Itoa(limit))
+			}
+			if after > 0 {
+				q.Set("after", strconv.FormatInt(after, 10))
+			}
+			p := path
+			if len(q) > 0 {
+				p += "?" + q.Encode()
+			}
 			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
-				var resp map[string][]view
-				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: path + botQuery(bot), Out: &resp}); err != nil {
+				var resp map[string]json.RawMessage
+				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: p, Out: &resp}); err != nil {
 					return err
 				}
+				var rows []view
+				var next int64
+				_ = json.Unmarshal(resp[key], &rows)
+				_ = json.Unmarshal(resp["next_after"], &next)
 				var b strings.Builder
-				if len(resp[key]) == 0 {
+				if len(rows) == 0 {
 					b.WriteString(empty + "\n")
 				}
-				for _, v := range resp[key] {
+				for _, v := range rows {
 					fmt.Fprintf(&b, "- %s\n", v)
+				}
+				if next > 0 {
+					fmt.Fprintf(&b, "more: --after %d\n", next)
 				}
 				_, err := io.WriteString(out, b.String())
 				return err
 			})
 		}}
 	cmd.Flags().StringVar(&bot, "bot", "", "the bot to list for (admin keys; default: every bot)")
+	cmd.Flags().IntVar(&limit, "limit", 0, "max follows, 1 to 500 (server default 100)")
+	cmd.Flags().Int64Var(&after, "after", 0, "only follows after this id (the --after the previous page printed)")
 	return cmd
 }
 

@@ -154,6 +154,7 @@ func (s *Service) PublicRoutes(r chi.Router) {
 		r.Post("/rooms/{id}/claims/heartbeat", s.handleRoomClaims)
 		r.Post("/rooms/{id}/claims/release", s.handleRoomClaims)
 		r.Post("/follows", s.handleFollow)
+		r.Post("/follows/withdraw", s.handleFollowWithdraw)
 	})
 }
 

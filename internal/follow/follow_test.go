@@ -44,7 +44,7 @@ func newEnv(t *testing.T, domain string) *env {
 	e.admin = e.key("root", "", true)
 	msgs := messages.NewService(db, 1024, nil)
 	msgs.FedDomain = domain
-	svc := &Service{DB: db, FedDomain: domain, MaxMessageBytes: msgs.MaxMessageBytes, Send: msgs.Send, Delete: msgs.Delete}
+	svc := &Service{DB: db, FedDomain: domain, MaxMessageBytes: msgs.MaxMessageBytes, Send: msgs.SendPost, Delete: msgs.Delete}
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -421,6 +421,15 @@ func TestPost_FollowersCannotPost(t *testing.T) {
 		http.StatusForbidden, "missing_right")
 	wantErr(t, e.do(bob, http.MethodPost, "/rooms/"+feed+"/messages", `{"content":"x","message_type":"question"}`),
 		http.StatusForbidden, "missing_right")
+	// The owner and admin keys post through /posts only: the send route
+	// would skip its limit and checks.
+	for _, k := range []int64{bob, e.admin} {
+		wantErr(t, e.do(k, http.MethodPost, "/rooms/"+feed+"/messages", `{"content":"x","message_type":"status_update"}`),
+			http.StatusForbidden, "feed_room")
+	}
+	if n := e.count(`SELECT COUNT(*) FROM messages`); n != 0 {
+		t.Errorf("%d messages in the feed", n)
+	}
 	// A follower's own post goes to its own feed.
 	id := e.post(alice, "mine", "")
 	if n := e.count(`SELECT COUNT(*) FROM messages WHERE id = ? AND room_id = ?`, id, e.feed(alice)); n != 1 {
@@ -680,4 +689,125 @@ func TestPost_RateLimit(t *testing.T) {
 		t.Error("no Retry-After")
 	}
 	e.post(e.bot("bob", ""), "x", "") // per bot
+}
+
+// A feed's members are its followers: a follower sees only the feed's
+// bot and itself, the bot and admin keys see every follower.
+func TestRooms_FeedMembersPrivate(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob, carol := e.bot("alice", ""), e.bot("bob", "open"), e.bot("carol", "")
+	e.follow(alice, "bob")
+	e.follow(carol, "bob")
+	feed := e.feed(bob)
+	members := func(key int64) []int64 {
+		t.Helper()
+		rec := e.do(key, http.MethodGet, "/rooms/"+feed+"/members", "")
+		var out struct {
+			Members []struct {
+				KeyID int64 `json:"key_id"`
+			} `json:"members"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("members: %d %s", rec.Code, rec.Body)
+		}
+		var ids []int64
+		for _, m := range out.Members {
+			ids = append(ids, m.KeyID)
+		}
+		return ids
+	}
+	if got := fmt.Sprint(members(alice)); got != fmt.Sprint([]int64{alice, bob}) {
+		t.Errorf("alice sees %s", got)
+	}
+	if got := fmt.Sprint(members(carol)); got != fmt.Sprint([]int64{bob, carol}) {
+		t.Errorf("carol sees %s", got)
+	}
+	for _, k := range []int64{bob, e.admin} {
+		if got := fmt.Sprint(members(k)); got != fmt.Sprint([]int64{alice, bob, carol}) {
+			t.Errorf("key %d sees %s", k, got)
+		}
+	}
+}
+
+// A bot takes at most 1000 pending requests: the next is 429, also for
+// a bot that follows it for the first time; a decided one makes room.
+func TestFollow_PendingCap(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "approve")
+	e.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+		INSERT INTO api_keys(label, hash, prefix, created_at, handle) SELECT 'k' || i, 'x', 'p' || i, '2026-01-01T00:00:00Z', 'k' || i FROM n`)
+	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		SELECT id, 'bob', ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE label LIKE 'k%'`, bob)
+	rec := e.do(alice, http.MethodPost, "/follows", `{"to":"bob"}`)
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if rec.Header().Get("Retry-After") != "3600" {
+		t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+	if n := e.count(`SELECT COUNT(*) FROM audit WHERE action = 'follow.refused' AND detail LIKE '%"reason":"limit"%'`); n != 1 {
+		t.Errorf("%d limit refusals audited, want 1", n)
+	}
+	e.exec(`UPDATE follows SET status = 'rejected' WHERE id = (SELECT MIN(id) FROM follows)`)
+	if f := e.follow(alice, "bob"); f.Status != "pending" {
+		t.Errorf("after a rejection: %+v", f)
+	}
+}
+
+// The lists page by id: ?limit= (1 to 500, default 100) and ?after=,
+// with next_after while more follow.
+func TestFollow_ListPaging(t *testing.T) {
+	e := newEnv(t, "x.example")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "")
+	for i := range 3 {
+		e.bot(fmt.Sprintf("b%d", i), "")
+		e.follow(alice, fmt.Sprintf("b%d", i))
+	}
+	page := func(key int64, path string) (ids []int64, next int64) {
+		t.Helper()
+		rec := e.do(key, http.MethodGet, path, "")
+		var out map[string]json.RawMessage
+		var rows []follow
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+		for k, v := range out {
+			if k == "next_after" {
+				_ = json.Unmarshal(v, &next)
+			} else if json.Unmarshal(v, &rows) != nil {
+				t.Fatalf("%s: %s", path, rec.Body)
+			}
+		}
+		for _, f := range rows {
+			if f.From == "" || f.To == "" {
+				t.Errorf("%s: %+v", path, f)
+			}
+			ids = append(ids, f.ID)
+		}
+		return ids, next
+	}
+	all, next := page(alice, "/follows")
+	if len(all) != 3 || next != 0 {
+		t.Fatalf("all: %v next %d", all, next)
+	}
+	if ids, next := page(alice, "/follows?limit=2"); fmt.Sprint(ids) != fmt.Sprint(all[:2]) || next != all[1] {
+		t.Errorf("first page: %v next %d", ids, next)
+	}
+	if ids, next := page(alice, fmt.Sprintf("/follows?limit=2&after=%d", all[1])); fmt.Sprint(ids) != fmt.Sprint(all[2:]) || next != 0 {
+		t.Errorf("second page: %v next %d", ids, next)
+	}
+	for _, q := range []string{"limit=0", "limit=501", "limit=x", "after=-1", "after=x"} {
+		wantErr(t, e.do(alice, http.MethodGet, "/follows?"+q, ""), http.StatusBadRequest, "bad_request")
+	}
+	e.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 101)
+		INSERT INTO api_keys(label, hash, prefix, created_at, handle) SELECT 'k' || i, 'x', 'p' || i, '2026-01-01T00:00:00Z', 'k' || i FROM n`)
+	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		SELECT id, 'bob@x.example', ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE label LIKE 'k%'`, bob)
+	if ids, next := page(bob, "/follows/requests"); len(ids) != 100 || next != ids[99] {
+		t.Errorf("requests: %d next %d", len(ids), next)
+	}
+	if ids, next := page(e.admin, "/follows/requests?bot=bob&limit=500"); len(ids) != 101 || next != 0 {
+		t.Errorf("admin requests: %d next %d", len(ids), next)
+	}
+	if ids, _ := page(bob, "/followers?limit=1"); len(ids) != 0 {
+		t.Errorf("followers: %v", ids)
+	}
 }

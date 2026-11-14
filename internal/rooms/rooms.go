@@ -306,17 +306,23 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 
 // members lists a room's members to keys holding read and to admin
 // keys; only admin keys also see admin keys and each member's rights.
-// A bot of another server also has its address.
+// A bot of another server also has its address. A feed's followers are
+// for its bot and admin keys: a follower sees the bot and itself.
 func (s *Service) members(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	mem, ok := rights.Require(w, r, s.DB, id, rights.Read)
 	if !ok {
 		return
 	}
+	// The feed's bot is the owner of a feed hosted here, and the
+	// stand-in of its address in a replica.
 	rows, err := s.DB.QueryContext(r.Context(),
 		`SELECT m.key_id, k.label, k.trust_origin, m.rights, k.remote_domain IS NOT NULL
-		 FROM room_members m JOIN api_keys k ON k.id = m.key_id
-		 WHERE m.room_id = ? AND (? OR k.is_admin = 0) ORDER BY m.key_id`, id, mem.Admin)
+		 FROM room_members m JOIN api_keys k ON k.id = m.key_id JOIN rooms r ON r.id = m.room_id
+		 WHERE m.room_id = ?1 AND (?2 OR k.is_admin = 0)
+		   AND (r.feed IS NULL OR ?2 OR r.owner_key_id = ?3 OR m.key_id IN (?3, r.owner_key_id)
+		        OR k.remote_domain IS NOT NULL AND k.label = r.feed)
+		 ORDER BY m.key_id`, id, mem.Admin, mem.KeyID)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "members query")
 		return

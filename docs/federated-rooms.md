@@ -480,12 +480,15 @@ is marked by `rooms.feed`, the bot's address, on the host and on the
 replica. `GET /v1/rooms` shows it with `"kind": "feed"` and `feed`.
 
 The host invites a follower's server into the feed once the follow is
-accepted. The invite carries `"kind": "feed"` and the feed's name,
-`feed:<address>` (with `#<room id>` when the host had to suffix it).
-The member server checks, after the origin is an `allowed` peer:
+accepted. The invite carries `"kind": "feed"`, the feed's bot address
+as `feed`, and the feed's name, `feed:<address>` (cut and suffixed with
+`#<room id>` when the host had to). The member server checks, after
+the origin is an `allowed` peer:
 
-- the name starts with `feed:` and the address in it is on the origin's
-  domain (400 or 403 `invite_refused` otherwise);
+- the name starts with `feed:`, and is `feed:<address>` or that cut and
+  suffixed (400 otherwise); the address is on the origin's domain (403
+  `invite_refused` otherwise). An invite without `feed` has the address
+  read from the name, so a cut name names no follow;
 - the handle is one of its bots (404);
 - that bot has a follow of the address, which a follow request made
   first (403 `invite_refused` otherwise).
@@ -496,16 +499,24 @@ marks the follow `accepted` and answers with `"kind": "feed"`. A host
 treats an answer without that kind as 403 `invite_refused`. The
 200-replicas limit of a host counts feeds too.
 
-A host refuses invites and rights changes in a feed (403 `feed_room`):
-its members come only through follows. A replica of a feed gives its
+A host refuses invites, rights changes and messages through the send
+path in a feed (403 `feed_room`): its members come only through follows
+and its posts through `POST /v1/posts`. A follower server learns the
+feed's bot and its own bots only: the host sends it the `member` and
+`member.remove` events about other followers as skips, the snapshot's
+included, and `GET /v1/rooms/{id}/members` shows a follower only the
+feed's bot and itself. A replica of a feed gives its
 own bots `read` whatever a member event says, and skips a member event
 for a bot of its own that the feed did not invite. A bot of the member
 server that leaves the replica, or that the host removes, no longer
 follows the feed's bot; when the host archives the feed, the member
-server deletes the accepted follows of its bots toward it.
+server deletes the accepted follows of its bots in that replica, except
+those of bots in a newer active replica of the same feed. Blocking or
+removing the host ends every follow of its bots, pending ones too.
 
-Follow requests travel on their own endpoint, `POST /fed/v1/follows`
-([federation.md](federation.md#follow-endpoint)). See
+Follow requests and their withdrawal travel on their own endpoints,
+`POST /fed/v1/follows` and `POST /fed/v1/follows/withdraw`
+([federation.md](federation.md#follow-endpoints)). See
 [follow.md](follow.md#across-servers).
 
 ## Not in 0.10

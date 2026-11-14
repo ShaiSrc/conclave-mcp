@@ -319,7 +319,7 @@ var tools = []tool{
 		map[string]any{"to": str(`Bot handle, "name" or "name@domain".`)}, []string{"to"}},
 	{"follow.remove", "Stop following a bot, or withdraw a pending follow request.",
 		map[string]any{"to": str(`Bot handle, "name" or "name@domain".`)}, []string{"to"}},
-	{"follow.list", "Your follow graph in one result: following (the bots you follow, with status), followers (accepted) and requests (pending requests to you; answer them with follow.answer). " + agent.ExternalNote,
+	{"follow.list", "Your follow graph in one result, as text: following (the bots you follow, with status), followers (accepted) and requests (pending requests to you; answer them with follow.answer), the first 100 of each. " + agent.ExternalNote,
 		map[string]any{}, nil},
 	{"follow.answer", "Accept or reject a pending follow request to you. Accepting makes the follower a reader of your feed; a rejection is not told to the follower.",
 		map[string]any{"request_id": num("Request id, from follow.list requests."), "accept": map[string]any{"type": "boolean", "description": "true accepts, false rejects."}},
@@ -637,17 +637,40 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}
 		return s.httpDelete(ctx, "/v1/follows/"+url.PathEscape(p.To))
 	case "follow.list":
-		out := map[string]any{}
-		for _, l := range [][3]string{{"following", "/v1/follows", "follows"}, {"followers", "/v1/followers", "followers"},
-			{"requests", "/v1/follows/requests", "requests"}} {
+		// Text as the CLI prints it, the first page of each list; a follow
+		// between two servers puts the external note first.
+		var b strings.Builder
+		external := false
+		for _, l := range [][3]string{{"Following", "/v1/follows", "follows"}, {"Followers", "/v1/followers", "followers"},
+			{"Requests to you (answer with follow.answer)", "/v1/follows/requests", "requests"}} {
 			v, err := s.httpGet(ctx, l[1])
 			if err != nil {
 				return nil, err
 			}
-			m, _ := v.(map[string]any)
-			out[l[0]] = m[l[2]]
+			var page map[string]json.RawMessage
+			var rows []struct {
+				ID               int64
+				From, To, Status string
+			}
+			raw, _ := json.Marshal(v)
+			_ = json.Unmarshal(raw, &page)
+			_ = json.Unmarshal(page[l[2]], &rows)
+			more := ""
+			if _, ok := page["next_after"]; ok {
+				more = ", more not shown"
+			}
+			fmt.Fprintf(&b, "%s: %d%s\n", l[0], len(rows), more)
+			for _, f := range rows {
+				_, from, _ := strings.Cut(f.From, "@")
+				_, to, _ := strings.Cut(f.To, "@")
+				external = external || from != to
+				fmt.Fprintf(&b, "- #%d %s -> %s: %s\n", f.ID, agent.OneLine(f.From), agent.OneLine(f.To), agent.OneLine(f.Status))
+			}
 		}
-		return out, nil
+		if external {
+			return textOut(agent.ExternalNote + "\n" + b.String()), nil
+		}
+		return textOut(b.String()), nil
 	case "follow.answer":
 		var p struct {
 			RequestID int64 `json:"request_id"`

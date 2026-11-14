@@ -147,15 +147,24 @@ var allowedMessageTypes = map[string]struct{}{
 }
 
 // Send stores the request body as a message of the caller in roomID,
-// as POST /v1/rooms/{id}/messages does.
+// as POST /v1/rooms/{id}/messages does. Like every send but SendPost,
+// it refuses a feed hosted here (403 feed_room).
 func (s *Service) Send(w http.ResponseWriter, r *http.Request, roomID string) {
-	s.post(w, r, roomID, false, "", "")
+	s.post(w, r, roomID, false, "", "", false)
+}
+
+// SendPost stores the request body as a post of the caller in roomID,
+// its feed: the one way into a feed hosted here. It is for POST
+// /v1/posts (internal/follow) only, which checks the caller, its limit
+// and the post first.
+func (s *Service) SendPost(w http.ResponseWriter, r *http.Request, roomID string) {
+	s.post(w, r, roomID, false, "", "", true)
 }
 
 // SendAsOperator stores the request body as an operator message. It is
 // for the UI's passkey-confirmed path only: nothing else may call it.
 func (s *Service) SendAsOperator(w http.ResponseWriter, r *http.Request, roomID string) {
-	s.post(w, r, roomID, true, "", "")
+	s.post(w, r, roomID, true, "", "", false)
 }
 
 // SendFromPeer stores the request body as a message of the stand-in key
@@ -163,14 +172,15 @@ func (s *Service) SendAsOperator(w http.ResponseWriter, r *http.Request, roomID 
 // the nonce it covers. It is for the federation listener's message
 // proposals only, after the signature was checked.
 func (s *Service) SendFromPeer(w http.ResponseWriter, r *http.Request, roomID, originSig, nonce string) {
-	s.post(w, r, roomID, false, originSig, nonce)
+	s.post(w, r, roomID, false, originSig, nonce, false)
 }
 
 // post handles a send: validates the body and reply_to, stores the
 // message and publishes it to subscribers. operator marks the message
 // as the operator's; UI sessions may not post unmarked. originSig and
-// nonce are stored with a remote author's message.
-func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool, originSig, nonce string) {
+// nonce are stored with a remote author's message. Only a post (SendPost)
+// goes into a feed hosted here.
+func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, operator bool, originSig, nonce string, feedPost bool) {
 	caller := callerKeyID(r)
 	if caller == 0 {
 		writeErr(w, r, http.StatusUnauthorized, "unauthenticated", "no auth claims")
@@ -251,6 +261,10 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, roomID string, op
 	}
 	mem, ok := rights.Require(w, r, s.DB, roomID, messageType)
 	if !ok {
+		return
+	}
+	if mem.Feed && mem.Home == "" && !feedPost { // its bot posts through POST /v1/posts, within its limit
+		writeErr(w, r, http.StatusForbidden, "feed_room", "a feed takes posts of its bot through POST /v1/posts only")
 		return
 	}
 	if mem.Archived {

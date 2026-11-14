@@ -485,3 +485,38 @@ func TestSetHandle_RefusesStandIn(t *testing.T) {
 		t.Fatalf("SetHandle on a stand-in: %v, want ErrNotFound", err)
 	}
 }
+
+// A bot's feed and follows name it by its address: its handle neither
+// changes nor goes while it has an active feed here or any follow, as
+// follower or as target. The same handle again changes nothing.
+func TestHandle_FeedAndFollowsKeepIt(t *testing.T) {
+	s, db := testStore(t)
+	admin, k, other := addKey(t, db, "root", true), addKey(t, db, "agent", false), addKey(t, db, "other", false)
+	want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent"}`), 200, "")
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := func(what string) {
+		t.Helper()
+		want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent2"}`), 409, "conflict")
+		want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 409, "conflict")
+		want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent"}`), 200, "")
+		if p, err := s.ByKey(context.Background(), k); err != nil || p.Handle != "agent" {
+			t.Errorf("%s: the handle changed: %+v %v", what, p, err)
+		}
+	}
+	exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, feed) VALUES ('F1', 'feed:agent', ?, '2026-01-01T00:00:00Z', 'agent')`, k)
+	refused("feed")
+	exec(`UPDATE rooms SET archived_at = '2026-01-02T00:00:00Z' WHERE id = 'F1'`)
+	exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at) VALUES (?, 'other', ?, 'pending', '2026-01-01T00:00:00Z')`,
+		k, other)
+	refused("follow as follower")
+	exec(`UPDATE follows SET follower_key_id = ?, target = 'agent', target_key_id = ?`, other, k)
+	refused("follow as target")
+	exec(`DELETE FROM follows`)
+	want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent2"}`), 200, "")
+	want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 204, "")
+}

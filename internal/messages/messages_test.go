@@ -648,6 +648,57 @@ func TestMessages_OperatorMark(t *testing.T) {
 	}
 }
 
+// A feed hosted here takes messages through SendPost only (POST
+// /v1/posts): the send route, the operator's send and a member server's
+// proposal are refused with 403 feed_room, whatever the key's rights.
+func TestMessages_FeedOnlyThroughPosts(t *testing.T) {
+	db := setupDB(t)
+	owner, admin := seedKey(t, db, "owner"), seedKey(t, db, "admin")
+	feed := seedRoom(t, db, owner, "feed")
+	if _, err := db.Exec(`UPDATE rooms SET feed = 'owner' WHERE id = ?`, feed); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewService(db, 262144, nil)
+	send := func(f func(http.ResponseWriter, *http.Request, string), key int64, body string, scopes ...string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), auth.ClaimsKey{}, auth.Claims{KeyID: key, Scopes: scopes}))
+		rec := httptest.NewRecorder()
+		f(rec, req, feed)
+		return rec
+	}
+	post := `{"content":"x","message_type":"status_update","metadata":{"visibility":"public"}}`
+	fromPeer := func(w http.ResponseWriter, r *http.Request, room string) {
+		svc.SendFromPeer(w, r, room, "sig", "nonce")
+	}
+	for name, rec := range map[string]*httptest.ResponseRecorder{
+		"owner":         send(svc.Send, owner, post),
+		"owner, json":   send(svc.Send, owner, `{"content":"{}","content_type":"application/json","message_type":"status_update"}`),
+		"admin":         send(svc.Send, admin, post, auth.ScopeAdmin),
+		"operator":      send(svc.SendAsOperator, admin, post, auth.ScopeAdmin),
+		"member server": send(fromPeer, owner, post),
+		"route as owner": func() *httptest.ResponseRecorder {
+			rec := httptest.NewRecorder()
+			newServer(t, db, owner).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/rooms/"+feed+"/messages", strings.NewReader(post)))
+			return rec
+		}(),
+	} {
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"feed_room"`) {
+			t.Errorf("%s: %d %s, want 403 feed_room", name, rec.Code, rec.Body)
+		}
+	}
+	if n := count(t, db, `SELECT COUNT(*) FROM messages`); n != 0 {
+		t.Fatalf("%d messages stored", n)
+	}
+	if rec := send(svc.SendPost, owner, post); rec.Code != http.StatusCreated {
+		t.Errorf("SendPost: %d %s", rec.Code, rec.Body)
+	}
+	// A room that is no feed takes the send route.
+	other := seedRoom(t, db, owner, "other")
+	if rec := send(func(w http.ResponseWriter, r *http.Request, _ string) { svc.Send(w, r, other) }, owner, post); rec.Code != http.StatusCreated {
+		t.Errorf("a room: %d %s", rec.Code, rec.Body)
+	}
+}
+
 // capBroker records published payloads.
 type capBroker struct{ payloads []string }
 

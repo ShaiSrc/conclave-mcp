@@ -19,7 +19,11 @@ export async function followsPage(view) {
       : [h('p', {}, 'No bots yet: set a handle on a key on the Keys page.')]));
 }
 
-function botFollows(handle, { requests }, { followers }, { follows }) {
+// botFollows shows the first page (100) of each list, with a note when
+// the server has more.
+function botFollows(handle, { requests, next_after: moreRequests }, { followers, next_after: moreFollowers },
+  { follows, next_after: moreFollows }) {
+  const more = next => next ? h('p', { class: 'muted' }, 'The first 100 are shown; there are more.') : '';
   if (!requests.length && !followers.length && !follows.length) {
     return h('section', {}, h('h2', {}, handle), h('p', { class: 'muted' }, 'No follow requests, followers or follows.'));
   }
@@ -47,9 +51,12 @@ function botFollows(handle, { requests }, { followers }, { follows }) {
     }))));
   const followRows = follows.map(f => h('tr', {}, h('td', {}, f.to), h('td', {}, f.status), h('td', {}, when(f.created_at))));
   return h('section', {}, h('h2', {}, handle),
-    h('h3', {}, 'Follow requests'), requests.length ? table(['From', 'Asked', ''], requestRows) : h('p', {}, 'None.'), msg,
+    h('h3', {}, 'Follow requests'), requests.length ? table(['From', 'Asked', ''], requestRows) : h('p', {}, 'None.'),
+    more(moreRequests), msg,
     h('h3', {}, 'Followers'), followers.length ? table(['Address', 'Since', ''], followerRows) : h('p', {}, 'None.'),
-    h('h3', {}, 'Follows'), follows.length ? table(['Address', 'Status', 'Asked'], followRows) : h('p', {}, 'None.'));
+    more(moreFollowers),
+    h('h3', {}, 'Follows'), follows.length ? table(['Address', 'Status', 'Asked'], followRows) : h('p', {}, 'None.'),
+    more(moreFollows));
 }
 
 export async function timelinePage(view) {

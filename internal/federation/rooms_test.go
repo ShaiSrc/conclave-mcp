@@ -152,10 +152,10 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	cs.Routes(cl)
 	ds := &direct.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.Send,
 		InviteRemote: svc.InviteRemote, FedNotify: svc.DeliverSoon}
-	fs := &follow.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.Send, Delete: ms.Delete,
-		InviteRemote: svc.InviteRemote, Request: svc.FollowRemote, Leave: svc.LeaveRemote, FedNotify: svc.DeliverSoon}
+	fs := &follow.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.SendPost, Delete: ms.Delete,
+		InviteRemote: svc.InviteRemote, Request: svc.FollowRemote, Leave: svc.LeaveRemote, Withdraw: svc.WithdrawFollow, FedNotify: svc.DeliverSoon}
 	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica,
-		Follow: fs.Remote}
+		Follow: fs.Remote, Withdraw: fs.RemoteWithdraw}
 	fed := chi.NewRouter()
 	svc.PublicRoutes(fed)
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', 'x', 'p-root', '2026-01-01T00:00:00Z', 1)`)

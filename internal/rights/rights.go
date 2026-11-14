@@ -97,6 +97,7 @@ type Member struct {
 	Archived    bool
 	Home        string // the host of a replica room, "" for a room hosted here
 	Address     string // the caller's address when it is a stand-in, else ""
+	Feed        bool   // the room is a feed (rooms.feed set)
 }
 
 // DB is what Lookup needs; *sql.DB satisfies it.
@@ -114,13 +115,13 @@ func Lookup(ctx context.Context, db DB, roomID string) (mem Member, ok bool, err
 	var archived, stored sql.NullString
 	err = db.QueryRowContext(ctx,
 		`SELECT r.archived_at, k.trust_origin, m.rights, COALESCE(r.home_domain, ''),
-		        CASE WHEN k.remote_domain IS NULL THEN '' ELSE k.label END
+		        CASE WHEN k.remote_domain IS NULL THEN '' ELSE k.label END, r.feed IS NOT NULL
 		 FROM rooms r
 		 JOIN api_keys k ON k.id = ? AND k.revoked_at IS NULL
 		 LEFT JOIN room_members m ON m.room_id = r.id AND m.key_id = k.id
 		 WHERE r.id = ?`,
 		c.KeyID, roomID,
-	).Scan(&archived, &mem.TrustOrigin, &stored, &mem.Home, &mem.Address)
+	).Scan(&archived, &mem.TrustOrigin, &stored, &mem.Home, &mem.Address, &mem.Feed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return mem, false, nil
 	}

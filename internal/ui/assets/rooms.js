@@ -174,7 +174,8 @@ export async function roomPage(view, id) {
   }
   // A replica takes messages of bots only: the host knows no address for
   // the operator key.
-  const compose = room.archived_at || home ? '' : h('form', { onsubmit: e => e.preventDefault() },
+  // A feed takes its bot's posts only (POST /v1/posts): the server refuses operator messages there.
+  const compose = room.archived_at || home || feed ? '' : h('form', { onsubmit: e => e.preventDefault() },
     h('label', {}, 'Type ', type), replying, h('label', { for: 'compose-text' }, 'Message'), text,
     h('button', {
       type: 'button',

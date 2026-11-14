@@ -117,11 +117,13 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // and max_events_bytes.
 //
 // A feed invite (kind feed) brings our bot into the feed of a bot of the
-// origin, named feed:<address> (with #<suffix> when its host had to
-// suffix it): it needs a follow of our bot toward that address, on the
-// origin's domain (403 invite_refused otherwise), which it makes
-// accepted. The bot gets read, whatever the host sent, and the replica
-// keeps the address in rooms.feed.
+// origin, whose address it carries as feed, named feed:<address> or that
+// cut and suffixed with #<room id> by its host (400 otherwise); from a
+// host that sends no feed, the address is read from the name. It needs a
+// follow of our bot toward that address, on the origin's domain (403
+// invite_refused otherwise), which it makes accepted. The bot gets read,
+// whatever the host sent, and the replica keeps the address in
+// rooms.feed.
 //
 // A direct invite (kind direct) starts a conversation with our bot: it
 // takes one only from an allowed peer (seen ones get 403 dm_refused,
@@ -140,11 +142,15 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
 		Kind   string   `json:"kind"`
+		Feed   string   `json:"feed"` // a feed's bot
 	}
 	derr := json.NewDecoder(r.Body).Decode(&in)
 	in.Kind = cmp.Or(in.Kind, "room")
 	direct, feed := in.Kind == kindDirect, in.Kind == kindFeed
-	feedOf, _, _ := strings.Cut(strings.TrimPrefix(in.Name, fedrooms.FeedPrefix), "#") // a feed's bot
+	feedOf := in.Feed
+	if feedOf == "" { // a host that does not send it: the name holds it, unless it was cut
+		feedOf, _, _ = strings.Cut(strings.TrimPrefix(in.Name, fedrooms.FeedPrefix), "#")
+	}
 	switch allowed, err := s.originAllowed(ctx); {
 	case err != nil:
 		s.fail(w, r, err)
@@ -204,6 +210,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	case feed != strings.HasPrefix(in.Name, fedrooms.FeedPrefix):
 		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.FeedPrefix+" are reserved for feeds, and a feed's starts with it")
+		return
+	case feed && in.Feed != "" && in.Name != fedrooms.FeedPrefix+in.Feed && in.Name != fedrooms.Suffixed(fedrooms.FeedPrefix+in.Feed, roomID):
+		refuse(http.StatusBadRequest, "bad_request", "a feed's name is "+fedrooms.FeedPrefix+"<address>, or that cut with #<room id>")
 		return
 	case feed && !strings.HasSuffix(feedOf, "@"+origin):
 		refuse(http.StatusForbidden, "invite_refused", "a feed is the feed of a bot of its host")
@@ -574,7 +583,9 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 }
 
 // applyRoom renames the replica, and archives it when the host did. Its
-// kind is the invite's: a room event of another kind is refused.
+// kind is the invite's: a room event of another kind is refused. An
+// archived feed ends the accepted follows of our bots in it, but not of
+// those in a newer active replica of the same feed from that host.
 func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.RoomPayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.Name == "" || len(p.Name) > 128 {
@@ -592,7 +603,9 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 			p.Name, storage.FormatTS(time.Now()), roomID)
 		if err == nil { // as on its host, an archived feed ends its accepted follows
 			_, err = tx.ExecContext(ctx, `DELETE FROM follows WHERE status = 'accepted' AND target_key_id IS NULL
-				AND target = (SELECT feed FROM rooms WHERE id = ?)`, roomID)
+				AND target = (SELECT feed FROM rooms WHERE id = ?1)
+				AND NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = follows.follower_key_id
+					WHERE o.feed = follows.target AND o.home_domain = ?2 AND o.id != ?1 AND o.archived_at IS NULL)`, roomID, host)
 		}
 		return err
 	}
@@ -976,8 +989,9 @@ func (s *Service) catchUp(ctx context.Context) {
 
 // dropPeer cuts the rooms shared with domain once it is blocked or
 // removed: its bots' stand-ins leave the rooms hosted here, with
-// member.remove events, delivery to it pauses, and our replicas of its
-// rooms are archived.
+// member.remove events, delivery to it pauses, our replicas of its
+// rooms are archived, and our bots' follows of its bots, pending and
+// accepted, end.
 func (s *Service) dropPeer(ctx context.Context, domain string) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT m.room_id, m.key_id FROM room_members m JOIN api_keys k ON k.id = m.key_id
 		JOIN rooms r ON r.id = m.room_id WHERE k.remote_domain = ? AND r.home_domain IS NULL`, domain)
@@ -1010,6 +1024,10 @@ func (s *Service) dropPeer(ctx context.Context, domain string) error {
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE rooms SET archived_at = ? WHERE home_domain = ? AND archived_at IS NULL`,
 		storage.FormatTS(time.Now()), domain); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM follows WHERE target_key_id IS NULL
+		AND substr(target, instr(target, '@') + 1) = ?`, domain); err != nil {
 		return err
 	}
 	s.DeliverSoon()

@@ -743,6 +743,15 @@ func TestServer_Follows(t *testing.T) {
 	if rec := do("bob", http.MethodDelete, "/v1/posts/"+strconv.FormatInt(post.ID, 10), ""); rec.Code != http.StatusNoContent {
 		t.Errorf("delete: %d %s", rec.Code, rec.Body)
 	}
+	// The feed takes posts through /v1/posts only.
+	var feeds struct{ Rooms []struct{ ID string } }
+	if rec := do("bob", http.MethodGet, "/v1/rooms?kind=feed", ""); json.Unmarshal(rec.Body.Bytes(), &feeds) != nil || len(feeds.Rooms) != 1 {
+		t.Fatalf("feeds: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do("bob", http.MethodPost, "/v1/rooms/"+feeds.Rooms[0].ID+"/messages", `{"content":"x","message_type":"status_update"}`); rec.Code != http.StatusForbidden ||
+		!strings.Contains(rec.Body.String(), `"feed_room"`) {
+		t.Errorf("send into the feed: %d %s", rec.Code, rec.Body)
+	}
 	if rec := do("alice", http.MethodPost, "/v1/follows", `{"to":"bob@peer.example"}`); rec.Code != http.StatusNotFound ||
 		!strings.Contains(rec.Body.String(), `"federation_disabled"`) {
 		t.Errorf("remote with federation off: %d %s", rec.Code, rec.Body)
@@ -757,9 +766,11 @@ func TestServer_Follows(t *testing.T) {
 		!strings.Contains(rec.Body.String(), `"peer_not_allowed"`) {
 		t.Errorf("remote with federation on: %d %s", rec.Code, rec.Body)
 	}
-	rec = httptest.NewRecorder()
-	s.fed.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/fed/v1/follows", strings.NewReader(`{}`)))
-	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("unsigned follow request: %d, want 401", rec.Code)
+	for _, path := range []string{"/fed/v1/follows", "/fed/v1/follows/withdraw"} {
+		rec = httptest.NewRecorder()
+		s.fed.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("unsigned %s: %d, want 401", path, rec.Code)
+		}
 	}
 }

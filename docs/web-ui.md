@@ -194,8 +194,9 @@ its followers and the bots it follows with the status of each follow
 passkey. A follower of another server shows as `name@domain`; accepting
 it invites that server into the bot's feed first, and its refusal shows
 as an error. The page reads `GET /v1/follows/requests`, `/v1/followers`
-and `/v1/follows` with `?bot=<handle>` for each bot. See
-[follow.md](follow.md).
+and `/v1/follows` with `?bot=<handle>` for each bot: the first 100 of
+each, with a note when there are more (the CLI's `--after` pages
+through them). See [follow.md](follow.md).
 
 ## Timeline
 
@@ -211,9 +212,11 @@ other servers, which bots here follow, are not listed: they are changed
 on their host.
 
 A feed's room page says "feed of <address>" and shows no invite forms,
-no rights editing and no claims: its members are its bot and its
-followers, with fixed rights. Removing a follower there ends its follow;
-removing the bot itself is refused.
+no rights editing, no claims and no message form: its members are its
+bot and its followers, with fixed rights, and its posts come from its
+bot only (the server refuses operator messages there with 403
+`feed_room`). Removing a follower there ends its follow; removing the
+bot itself is refused.
 
 ## Operator messages
 

@@ -23,6 +23,9 @@
 //	GET    /v1/timeline?since=&limit=&order= -- the posts of the feeds the caller is a member of
 //	                                            (admin keys too: every feed hosted here)
 //
+// The three lists page by id: ?limit= (1 to 500, default 100) and
+// ?after=<id>, answering next_after while more follow.
+//
 // Posts are stored through the send path of internal/messages, passed in
 // as Send, and deleted through its Delete, so this package does not
 // import it. A rejected request reads as pending to its follower: a
@@ -35,7 +38,9 @@
 // follower of another server is its stand-in key: its requests come
 // through Remote, and accepting one invites its server into the feed
 // (InviteRemote) before the stand-in joins. Unfollowing a bot of
-// another server leaves the feed's replica through its host (Leave).
+// another server leaves the feed's replica through its host (Leave);
+// withdrawing a pending follow of one tells its server (Withdraw, and
+// RemoteWithdraw on that side).
 package follow
 
 import (
@@ -65,10 +70,13 @@ import (
 )
 
 // FollowsPerHour is how many new follow requests a bot may make an
-// hour; PostsPerHour how many posts it may make.
+// hour; PostsPerHour how many posts it may make. MaxPending is how many
+// pending follow requests a bot takes; beyond it a new one is refused
+// with 429, Retry-After an hour.
 const (
 	FollowsPerHour = 30
 	PostsPerHour   = 60
+	MaxPending     = 1000
 )
 
 // Post visibilities.
@@ -91,8 +99,9 @@ type Service struct {
 	// addresses are bare handles and bots of other servers answer 404.
 	FedDomain       string
 	MaxMessageBytes int
-	// Send stores the request body as the caller's message in roomID,
-	// as POST /v1/rooms/{id}/messages does.
+	// Send stores the request body as the caller's post in roomID, its
+	// feed, through the send path of POST /v1/rooms/{id}/messages:
+	// messages.Service.SendPost, the one way into a feed.
 	Send func(w http.ResponseWriter, r *http.Request, roomID string)
 	// Delete soft-deletes message msgID of roomID, as DELETE
 	// /v1/rooms/{id}/messages/{msgid} does.
@@ -111,6 +120,10 @@ type Service struct {
 	// Leave tells the host of replica roomID that our bot keyID leaves
 	// it; nil with federation off. A refusal is a *fedrooms.Error.
 	Leave func(ctx context.Context, roomID string, keyID int64) error
+	// Withdraw tells the server of address (name@domain) that follower,
+	// our bot's address, withdraws its pending follow request; nil with
+	// federation off.
+	Withdraw func(ctx context.Context, follower, address string) error
 	// FedNotify, when set, wakes the federation delivery worker after a
 	// feed's members changed.
 	FedNotify func()
@@ -337,6 +350,15 @@ func (s *Service) follow(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, r, caller, toAddr, "policy", http.StatusForbidden, "follow_refused", toAddr+" takes no followers")
 		return
 	}
+	if full, err := s.full(ctx, to); err != nil || full {
+		if err != nil {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "request count")
+			return
+		}
+		w.Header().Set("Retry-After", "3600")
+		s.refuse(w, r, caller, toAddr, "limit", http.StatusTooManyRequests, "rate_limited", toAddr+" has too many pending follow requests, try again later")
+		return
+	}
 	if lim := s.limiter(false, caller); !lim.Allow() {
 		w.Header().Set("Retry-After", retryAfter(lim))
 		s.refuse(w, r, caller, toAddr, "limit", http.StatusTooManyRequests, "rate_limited", "too many follow requests, try again later")
@@ -450,7 +472,22 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 		err = s.Request(ctx, from, address)
 	}
 	var fe *fedrooms.Error
-	reason := map[int]string{http.StatusForbidden: "policy", http.StatusNotFound: "not a bot", http.StatusTooManyRequests: "limit"}
+	reason := "" // of an audited refusal
+	if errors.As(err, &fe) {
+		switch {
+		case fe.Status == http.StatusNotFound:
+			reason = "not a bot"
+		case fe.Status == http.StatusTooManyRequests: // the peer's limits are hourly
+			reason = "limit"
+			w.Header().Set("Retry-After", "3600")
+		case fe.Status == http.StatusForbidden && fe.Code == "follow_refused":
+			reason = "policy"
+		case fe.Status == http.StatusForbidden && fe.Code == "peer_not_allowed":
+			reason = "peer"
+		case fe.Status == http.StatusForbidden:
+			reason = "refused"
+		}
+	}
 	switch {
 	case err == nil:
 	case errors.As(err, &fe) && fe.Status == http.StatusBadGateway: // the peer may have taken it: it stays pending
@@ -459,8 +496,8 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 	case errors.As(err, &fe):
 		_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM follows WHERE follower_key_id = ? AND target = ? AND status = 'pending'`,
 			caller, address)
-		if reason[fe.Status] != "" {
-			s.refuse(w, r, caller, address, reason[fe.Status], fe.Status, fe.Code, fe.Message)
+		if reason != "" {
+			s.refuse(w, r, caller, address, reason, fe.Status, fe.Code, fe.Message)
 		} else {
 			writeErr(w, r, fe.Status, fe.Code, fe.Message)
 		}
@@ -519,8 +556,17 @@ func (s *Service) Remote(ctx context.Context, follower, handle string) (string, 
 		s.refused(ctx, key, follower, toAddr, "policy", "follow_refused")
 		return "", &fedrooms.Error{Status: http.StatusForbidden, Code: "follow_refused", Message: toAddr + " takes no followers"}
 	case len(existing) == 0:
+		var full bool
 		var created int64
-		if key, created, err = s.store(ctx, follower, toAddr, to); err != nil {
+		if full, err = s.full(ctx, to); err == nil && full {
+			err = &fedrooms.Error{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: toAddr + " has too many pending follow requests"}
+		} else if err == nil {
+			key, created, err = s.store(ctx, follower, toAddr, to)
+		}
+		if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) && fe.Status == http.StatusTooManyRequests {
+			s.refused(ctx, key, follower, toAddr, "limit", fe.Code)
+		}
+		if err != nil {
 			return "", err
 		}
 		if existing, err = pair(); err != nil || len(existing) == 0 {
@@ -552,7 +598,8 @@ func (s *Service) Remote(ctx context.Context, follower, handle string) (string, 
 
 // store stores a pending follow of follower, a bot of another server,
 // toward to, our bot at toAddr, and returns its stand-in and whether it
-// stored one (1) or found one (0).
+// stored one (1) or found one (0). A follower whose server has all the
+// stand-ins it may have here is 429.
 func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) (int64, int64, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -560,7 +607,10 @@ func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) 
 	}
 	defer tx.Rollback()
 	key, err := fedrooms.StandIn(ctx, tx, follower)
-	if errors.Is(err, fedrooms.ErrAddress) {
+	switch {
+	case errors.Is(err, fedrooms.ErrStandInLimit): // an ErrAddress too
+		return 0, 0, &fedrooms.Error{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: err.Error()}
+	case errors.Is(err, fedrooms.ErrAddress):
 		return 0, 0, &fedrooms.Error{Status: http.StatusConflict, Code: "conflict", Message: err.Error()}
 	}
 	var res sql.Result
@@ -576,6 +626,16 @@ func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) 
 		err = tx.Commit()
 	}
 	return key, created, err
+}
+
+// full reports whether bot, a bot of ours, has MaxPending pending
+// requests. ponytail: counts by scanning follows; an index on
+// (target_key_id, status) if that shows.
+func (s *Service) full(ctx context.Context, bot int64) (bool, error) {
+	var full bool
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) >= ? FROM follows WHERE target_key_id = ? AND status = 'pending'`,
+		MaxPending, bot).Scan(&full)
+	return full, err
 }
 
 // accept makes follow id, a pending request to a bot of ours, accepted:
@@ -690,14 +750,14 @@ func (s *Service) feed(ctx context.Context, bot int64) (string, error) {
 	}
 	name := fedrooms.FeedPrefix + addr
 	if len(name) > 128 {
-		name = suffixed(name, id)
+		name = fedrooms.Suffixed(name, id)
 	}
 	err = insert(name)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		if other, err := find(); err != nil || other != "" { // made meanwhile
 			return other, err
 		}
-		err = insert(suffixed(name, id)) // another room has the name
+		err = insert(fedrooms.Suffixed(name, id)) // another room has the name
 	}
 	if err == nil {
 		// The owner role keeps the bot in its feed: a room keeps an owner.
@@ -710,21 +770,32 @@ func (s *Service) feed(ctx context.Context, bot int64) (string, error) {
 	return id, err
 }
 
-// suffixed is name with the room id as a suffix, cut to fit a room name.
-func suffixed(name, id string) string {
-	return name[:min(len(name), 128-1-len(id))] + "#" + id
-}
-
-// list answers the follows of where, which takes the request's bot as
-// ?1 (0: every bot, for an admin key), under name. With hide, a bot
-// sees its rejected follows as pending.
+// list answers a page of the follows of where, which takes the
+// request's bot as ?1 (0: every bot, for an admin key), under name: at
+// most ?limit= (1 to 500, default 100) after id ?after=, with
+// next_after while more follow. With hide, a bot sees its rejected
+// follows as pending.
 func (s *Service) list(name, where string, hide bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bot, ok := s.subject(w, r)
 		if !ok {
 			return
 		}
-		out, err := s.views(r.Context(), where, bot)
+		limit, after := 100, int64(0)
+		var err error
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > 500 {
+				writeErr(w, r, http.StatusBadRequest, "bad_request", "limit must be 1 to 500")
+				return
+			}
+		}
+		if v := r.URL.Query().Get("after"); v != "" {
+			if after, err = strconv.ParseInt(v, 10, 64); err != nil || after < 0 {
+				writeErr(w, r, http.StatusBadRequest, "bad_request", "after must be a follow id")
+				return
+			}
+		}
+		out, err := s.page(r.Context(), where, after, limit+1, bot)
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "list query")
 			return
@@ -734,7 +805,13 @@ func (s *Service) list(name, where string, hide bool) http.HandlerFunc {
 				out[i] = hidden(out[i])
 			}
 		}
-		writeJSON(w, http.StatusOK, map[string]any{name: out})
+		body := map[string]any{}
+		if len(out) > limit {
+			out = out[:limit]
+			body["next_after"] = out[limit-1].ID
+		}
+		body[name] = out
+		writeJSON(w, http.StatusOK, body)
 	}
 }
 
@@ -785,7 +862,7 @@ func (s *Service) decide(accept bool) http.HandlerFunc {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "answer request")
 			return
 		}
-		v, err := s.views(ctx, `id = ?`, id)
+		v, err := s.views(ctx, `f.id = ?`, id)
 		if err != nil || len(v) == 0 {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow lookup")
 			return
@@ -857,6 +934,11 @@ func (s *Service) end(w http.ResponseWriter, r *http.Request, follower int64, ta
 		}
 		return
 	}
+	// A pending follow of a bot of another server is withdrawn there too,
+	// best effort: it is gone here either way.
+	if _, domain, _ := strings.Cut(v[0].To, "@"); v[0].Status == "pending" && domain != "" && domain != s.FedDomain && s.Withdraw != nil {
+		_ = s.Withdraw(context.WithoutCancel(r.Context()), v[0].From, v[0].To)
+	}
 	s.audit(r, "follow.remove", v[0])
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -916,6 +998,35 @@ func (s *Service) remove(ctx context.Context, id, follower int64, target string)
 	return nil
 }
 
+// RemoteWithdraw deletes the pending or rejected follow request of
+// follower, a bot of another server (name@domain, its domain the
+// signing server's: the federation listener checks it), toward our bot
+// handle, and reports whether there was one. An accepted follow is left
+// to the leave of its replica.
+func (s *Service) RemoteWithdraw(ctx context.Context, follower, handle string) (bool, error) {
+	h, err := bots.NormalizeHandle(handle)
+	if err != nil {
+		return false, nil
+	}
+	v, err := s.views(ctx, `k.label = ? AND k.remote_domain IS NOT NULL AND f.target = ? AND f.status != 'accepted'`,
+		follower, h+"@"+s.FedDomain)
+	if err != nil || len(v) == 0 {
+		return false, err
+	}
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM follows WHERE id = ? AND status != 'accepted'`, v[0].ID)
+	var n int64
+	if err == nil {
+		n, err = res.RowsAffected()
+	}
+	if err != nil || n == 0 {
+		return false, err
+	}
+	var key int64
+	_ = s.DB.QueryRowContext(ctx, `SELECT id FROM api_keys WHERE label = ? AND remote_domain IS NOT NULL`, follower).Scan(&key)
+	s.auditAs(ctx, key, "follow.remove", v[0])
+	return true, nil
+}
+
 // keyOf returns the key of the bot at address: one of ours by its name
 // or address, one of another server by its stand-in; 0 for none.
 func (s *Service) keyOf(ctx context.Context, address string) (int64, error) {
@@ -946,10 +1057,20 @@ type followView struct {
 	DecidedAt string `json:"decided_at,omitempty"`
 }
 
-// views returns the follows matching where with args, oldest first.
+// views returns the follows matching where with args, oldest first;
+// where names the follow f and its follower's key k.
 func (s *Service) views(ctx context.Context, where string, args ...any) ([]followView, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id, follower_key_id, target, status, created_at, COALESCE(decided_at, '')
-		FROM follows WHERE (`+where+`) ORDER BY id`, args...)
+	return s.page(ctx, where, 0, -1, args...)
+}
+
+// page returns at most limit (-1: all) follows matching where with args
+// after id after, oldest first. The follower's address comes from the
+// join: a stand-in's label, a bot's handle@domain.
+func (s *Service) page(ctx context.Context, where string, after int64, limit int, args ...any) ([]followView, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT f.id, f.target, f.status, f.created_at, COALESCE(f.decided_at, ''), k.id,
+		k.remote_domain IS NOT NULL, CASE WHEN k.remote_domain IS NOT NULL THEN k.label ELSE COALESCE(k.handle, '') END
+		FROM follows f JOIN api_keys k ON k.id = f.follower_key_id
+		WHERE (`+where+`) AND f.id > ? ORDER BY f.id LIMIT ?`, append(args, after, limit)...)
 	if err != nil {
 		return nil, err
 	}
@@ -957,23 +1078,25 @@ func (s *Service) views(ctx context.Context, where string, args ...any) ([]follo
 	for rows.Next() {
 		var v followView
 		var k int64
-		if err := rows.Scan(&v.ID, &k, &v.To, &v.Status, &v.CreatedAt, &v.DecidedAt); err != nil {
+		var remote bool
+		if err := rows.Scan(&v.ID, &v.To, &v.Status, &v.CreatedAt, &v.DecidedAt, &k, &remote, &v.From); err != nil {
 			rows.Close()
 			return nil, err
+		}
+		if !remote && v.From != "" { // a bot of ours: handle@domain
+			v.From = strings.TrimSuffix(v.From+"@"+s.FedDomain, "@")
 		}
 		out, keys = append(out, v), append(keys, k)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	addrs := map[int64]string{}
 	for i, k := range keys {
-		if _, ok := addrs[k]; !ok {
-			if addrs[k], err = s.address(ctx, k); err != nil {
+		if out[i].From == "" { // a key without a handle: no bot follows as one, but its address is known
+			if out[i].From, err = s.address(ctx, k); err != nil {
 				return nil, err
 			}
 		}
-		out[i].From = addrs[k]
 	}
 	return out, nil
 }

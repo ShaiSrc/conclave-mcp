@@ -14,6 +14,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 )
 
 // The feed: prefix is the feeds': a room invite with such a name is
@@ -176,6 +177,8 @@ func TestFollowRemote_SeenPeer(t *testing.T) {
 	b.followBot(t, "b1", "open")
 	wantErr(t, a.followTo(a1, "b1@"+b.svc.Domain()), http.StatusForbidden, "peer_not_allowed")
 	wantErr(t, a.followTo(a1, "b1@c.example"), http.StatusForbidden, "peer_not_allowed")
+	wantErr(t, b.fedDo(signedReq(t, a.svc.id, b.svc.Domain(), http.MethodPost, "/fed/v1/follows/withdraw",
+		map[string]string{"follower": "a1@" + a.svc.Domain(), "handle": "b1"})), http.StatusForbidden, "peer_not_allowed")
 	for _, g := range []*roomRig{a, b} {
 		if n := count(t, g.db, `SELECT COUNT(*) FROM follows`) + count(t, g.db, `SELECT COUNT(*) FROM rooms`); n != 0 {
 			t.Errorf("%s keeps %d follows and rooms", g.svc.Domain(), n)
@@ -249,7 +252,8 @@ func TestFollowRemote_Receiver(t *testing.T) {
 	}
 	invites := 0
 	for _, r := range h.received() {
-		if strings.Contains(r, "/invite ") && strings.Contains(r, `"kind":"feed"`) && strings.Contains(r, `"handle":"y"`) {
+		if strings.Contains(r, "/invite ") && strings.Contains(r, `"kind":"feed"`) && strings.Contains(r, `"handle":"y"`) &&
+			strings.Contains(r, `"feed":"b1@`+g.svc.Domain()+`"`) {
 			invites++
 		}
 	}
@@ -373,14 +377,38 @@ func TestFollowRemote_PeerAnswers(t *testing.T) {
 	if len(got) != 2 || strings.TrimSpace(got[1]) != "POST /fed/v1/follows "+`{"follower":"a1@`+a.svc.Domain()+`","handle":"x"}` {
 		t.Errorf("the host got %q", got)
 	}
+	// Withdrawing the pending follow tells the peer; without an answer
+	// the follow goes all the same.
+	h.setAnswer(answerWith(0, ""))
+	if rec := a.do(a1, http.MethodDelete, "/follows/"+h.addr("x"), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("withdraw: %d %s", rec.Code, rec.Body)
+	}
+	if got := h.received(); len(got) != 3 ||
+		strings.TrimSpace(got[2]) != "POST /fed/v1/follows/withdraw "+`{"follower":"a1@`+a.svc.Domain()+`","handle":"x"}` {
+		t.Errorf("the host got %q", got)
+	}
+	if pending() != 0 {
+		t.Fatal("the withdrawn follow is kept")
+	}
+	// A refusal is audited by its code: policy for follow_refused, peer
+	// for peer_not_allowed, refused for any other 403.
 	for _, c := range []struct {
-		status int
-		code   string
-	}{{http.StatusForbidden, "follow_refused"}, {http.StatusNotFound, "not_found"}, {http.StatusTooManyRequests, "rate_limited"}} {
+		status       int
+		code, reason string
+	}{{http.StatusForbidden, "follow_refused", "policy"}, {http.StatusForbidden, "peer_not_allowed", "peer"},
+		{http.StatusForbidden, "forbidden", "refused"}, {http.StatusNotFound, "not_found", "not a bot"},
+		{http.StatusTooManyRequests, "rate_limited", "limit"}} {
 		h.setAnswer(answerWith(c.status, `{"error":{"code":"`+c.code+`","message":"no"}}`))
-		wantErr(t, a.followTo(a1, h.addr("x")), c.status, c.code)
+		rec := a.followTo(a1, h.addr("x"))
+		wantErr(t, rec, c.status, c.code)
+		if c.status == http.StatusTooManyRequests && rec.Header().Get("Retry-After") != "3600" {
+			t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
+		}
 		if pending() != 0 {
 			t.Errorf("%d: the follow is kept", c.status)
+		}
+		if n := audited(t, a, "follow.refused", c.reason); n != 1 {
+			t.Errorf("%s: %d refusals audited as %s, want 1", c.code, n, c.reason)
 		}
 	}
 }
@@ -518,4 +546,311 @@ func TestFollowRemote_RejectedStaysPending(t *testing.T) {
 	if n := count(t, a.db, `SELECT COUNT(*) FROM follows WHERE status = 'rejected'`); n != 1 {
 		t.Error("a's rejection changed")
 	}
+}
+
+// A follower server's bots hold read only in the feed: the host refuses
+// their proposals, so forwarding is no way around POST /v1/posts.
+func TestFollowRemote_FollowerProposalRefused(t *testing.T) {
+	a, b := dmPair(t)
+	_, _, feed := openFollow(t, a, b)
+	author := "b1@" + b.svc.Domain()
+	for _, typ := range []string{"status_update", "question"} {
+		nonce := newNonce()
+		sig := b.svc.id.SignMessage(MessageSig{Room: feed + "@" + a.svc.Domain(), Author: author, ContentType: "text/plain",
+			MessageType: typ, Content: "hi", Nonce: nonce})
+		wantErr(t, a.fedDo(signedReq(t, b.svc.id, a.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+feed+"/messages",
+			map[string]any{"author": author, "content": "hi", "content_type": "text/plain", "message_type": typ, "sig": sig, "nonce": nonce})),
+			http.StatusForbidden, "missing_right")
+	}
+	if n := count(t, a.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, feed); n != 0 {
+		t.Errorf("%d messages in the feed", n)
+	}
+}
+
+// A follower server learns the feed's bot and its own bots, never the
+// other followers: member events about the host's followers or other
+// servers' bots, the snapshot's included, reach it as skips.
+func TestFollowRemote_FollowersPrivate(t *testing.T) {
+	ctx := context.Background()
+	a, b := dmPair(t)
+	c := newLiveRig(t)
+	allow(t, a.svc, c.svc.id)
+	allow(t, c.svc, a.svc.id)
+	a1, a2 := a.followBot(t, "a1", "open"), a.followBot(t, "a2", "")
+	b1, c1 := b.followBot(t, "b1", ""), c.followBot(t, "c1", "")
+	to := "a1@" + a.svc.Domain()
+	for _, f := range []struct {
+		g *roomRig
+		c auth.Claims
+	}{{a, a2}, {b, b1}, {c, c1}} {
+		if v := followOf(t, f.g.followTo(f.c, to)); v.Status != "accepted" {
+			t.Fatalf("follow: %+v", v)
+		}
+	}
+	if rec := a.do(a1, http.MethodPost, "/posts", `{"content":"hi"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("post: %d %s", rec.Code, rec.Body)
+	}
+	a.svc.deliverDue(ctx)
+	if rec := c.do(c1, http.MethodDelete, "/follows/"+to, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("unfollow: %d %s", rec.Code, rec.Body)
+	}
+	a.svc.deliverDue(ctx)
+	var feed string
+	if err := a.db.QueryRow(`SELECT id FROM rooms WHERE feed = ?`, to).Scan(&feed); err != nil {
+		t.Fatal(err)
+	}
+	addrs := []string{to, "a2@" + a.svc.Domain(), "b1@" + b.svc.Domain(), "c1@" + c.svc.Domain()}
+	for _, x := range []struct {
+		g       *roomRig
+		members string
+		unknown []string
+	}{{b, to + " b1", []string{addrs[1], addrs[3]}}, {c, to, []string{addrs[1], addrs[2]}}} {
+		if got := members(t, x.g, feed); got != x.members {
+			t.Errorf("%s's replica: %q, want %q", x.g.svc.Domain(), got, x.members)
+		}
+		for _, addr := range x.unknown {
+			if n := count(t, x.g.db, `SELECT COUNT(*) FROM api_keys WHERE label = ?`, addr); n != 0 {
+				t.Errorf("%s knows %s", x.g.svc.Domain(), addr)
+			}
+		}
+		if n := count(t, x.g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.event_refused'`); n != 0 {
+			t.Errorf("%s refused %d batches", x.g.svc.Domain(), n)
+		}
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'hi'`, feed); n != 1 {
+		t.Error("b lacks the post")
+	}
+}
+
+// members lists the members of room on g: stand-ins by address, our
+// bots by handle, sorted.
+func members(t *testing.T, g *roomRig, room string) string {
+	t.Helper()
+	rows, err := g.db.Query(`SELECT CASE WHEN k.remote_domain IS NULL THEN k.handle ELSE k.label END AS a
+		FROM room_members m JOIN api_keys k ON k.id = m.key_id WHERE m.room_id = ? ORDER BY a`, room)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, a)
+	}
+	return strings.Join(out, " ")
+}
+
+// A bot takes at most 1000 pending requests: a request of a bot of
+// another server beyond that is 429 with Retry-After 3600, and so is one
+// whose stand-in the server cannot make.
+func TestFollowRemote_PendingCap(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1 := g.followBot(t, "b1", "approve")
+	g.followBot(t, "b2", "approve")
+	if _, err := g.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+		INSERT INTO api_keys(label, hash, prefix, created_at) SELECT 'k' || i, 'x', 'p' || i, '2026-01-01T00:00:00Z' FROM n`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.db.Exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		SELECT id, ?, ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE label LIKE 'k%'`, "b1@"+g.svc.Domain(), b1.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	rec := h.follow(t, g, h.addr("x"), "b1")
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if rec.Header().Get("Retry-After") != "3600" {
+		t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+	if n := audited(t, g, "follow.refused", "limit"); n != 1 {
+		t.Errorf("%d limit refusals audited, want 1", n)
+	}
+	if _, err := g.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO api_keys(label, hash, prefix, created_at, trust_origin, remote_domain)
+		SELECT 's' || i || '@' || ?2, '', '', '2026-01-01T00:00:00Z', 'external', ?2 FROM n`, fedrooms.MaxStandIns, h.id.Domain); err != nil {
+		t.Fatal(err)
+	}
+	rec = h.follow(t, g, h.addr("y"), "b2")
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if rec.Header().Get("Retry-After") != "3600" {
+		t.Errorf("stand-in limit: Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+}
+
+// An archived replica of a feed ends the follows of our bots in it,
+// not those of bots in a newer replica of the same feed.
+func TestFollowRemote_OldReplicaArchived(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1, b2 := g.followBot(t, "b1", ""), g.followBot(t, "b2", "")
+	for _, c := range []auth.Claims{b1, b2} {
+		if _, err := g.db.Exec(`INSERT INTO follows(follower_key_id, target, status, created_at) VALUES (?, ?, 'pending', '2026-11-14T00:00:00Z')`,
+			c.KeyID, h.addr("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old, newer, name := ulid.Make().String(), ulid.Make().String(), "feed:"+h.addr("x")
+	for _, inv := range [][2]string{{old, "b1"}, {old, "b2"}, {newer, "b1"}} {
+		if rec := h.feedInvite(t, g, inv[0], name, inv[1]); rec.Code != http.StatusCreated {
+			t.Fatalf("invite %v: %d %s", inv, rec.Code, rec.Body)
+		}
+	}
+	h.push(t, g, old, roomEv(1, name, true))
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, old); n != 1 {
+		t.Fatal("the old replica is not archived")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ? AND status = 'accepted'`, b1.KeyID); n != 1 {
+		t.Error("b1's follow, accepted into the newer replica, ended")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ?`, b2.KeyID); n != 0 {
+		t.Error("b2's follow, in the archived replica only, is kept")
+	}
+}
+
+// The feed's address travels in the invite: a long one, whose feed name
+// its host cut, is followed all the same. The name must be the feed's,
+// the address on the origin's domain; without the field the name is
+// read as before.
+func TestFollowRemote_LongFeedAddress(t *testing.T) {
+	g := newRoomRig(t)
+	long := testIdentity(t, strings.Repeat("d", 60)+"."+strings.Repeat("e", 40)+".example")
+	allow(t, g.svc, long)
+	b1 := g.followBot(t, "b1", "")
+	addr := strings.Repeat("x", 32) + "@" + long.Domain
+	if _, err := g.db.Exec(`INSERT INTO follows(follower_key_id, target, status, created_at) VALUES (?, ?, 'pending', '2026-11-14T00:00:00Z')`,
+		b1.KeyID, addr); err != nil {
+		t.Fatal(err)
+	}
+	room := ulid.Make().String()
+	name := fedrooms.Suffixed(fedrooms.FeedPrefix+addr, room)
+	if len(name) != 128 || strings.Contains(name, addr) {
+		t.Fatalf("name %q is not cut", name)
+	}
+	invite := func(name, feed string) *httptest.ResponseRecorder {
+		body := map[string]any{"name": name, "handle": "b1", "rights": []string{"read"}, "kind": "feed"}
+		if feed != "" {
+			body["feed"] = feed
+		}
+		return g.fedDo(signedReq(t, long, g.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+room+"/invite", body))
+	}
+	wantErr(t, invite(name, ""), http.StatusForbidden, "invite_refused")
+	wantErr(t, invite("feed:other", addr), http.StatusBadRequest, "bad_request")
+	wantErr(t, invite(fedrooms.FeedPrefix+addr+"x", addr), http.StatusBadRequest, "bad_request")
+	wantErr(t, invite("feed:y@c.example", "y@c.example"), http.StatusForbidden, "invite_refused")
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms`); n != 0 {
+		t.Fatalf("%d rooms after the refusals", n)
+	}
+	if rec := invite(name, addr); rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"kind":"feed"`) {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND feed = ? AND archived_at IS NULL`, room, addr); n != 1 {
+		t.Error("the replica is not the feed of the long address")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE target = ? AND status = 'accepted'`, addr); n != 1 {
+		t.Error("the follow is not accepted")
+	}
+}
+
+// Blocking or removing a peer ends our bots' follows of its bots,
+// pending and accepted; other follows stay.
+func TestFollowRemote_PeerDropEndsFollows(t *testing.T) {
+	for _, op := range []string{"block", "remove"} {
+		t.Run(op, func(t *testing.T) {
+			g := newRoomRig(t)
+			h := newFakeHost(t, g)
+			b1, b2 := g.followBot(t, "b1", ""), g.followBot(t, "b2", "")
+			for _, f := range []struct {
+				c      auth.Claims
+				target string
+				key    any
+				status string
+			}{{b1, h.addr("x"), nil, "accepted"}, {b1, h.addr("y"), nil, "pending"}, {b1, "b2@" + g.svc.Domain(), b2.KeyID, "pending"},
+				{b2, "z@c.example", nil, "pending"}} {
+				if _, err := g.db.Exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+					VALUES (?, ?, ?, ?, '2026-11-14T00:00:00Z')`, f.c.KeyID, f.target, f.key, f.status); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if op == "block" {
+				wantStatus(t, adminDo(g.svc, admin, http.MethodPost, "/v1/federation/peers/"+h.id.Domain+"/block", ""), http.StatusOK)
+			} else {
+				wantStatus(t, adminDo(g.svc, admin, http.MethodDelete, "/v1/federation/peers/"+h.id.Domain, ""), http.StatusNoContent)
+			}
+			if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE target LIKE ?`, "%@"+h.id.Domain); n != 0 {
+				t.Errorf("%d follows of the peer's bots are kept", n)
+			}
+			if n := count(t, g.db, `SELECT COUNT(*) FROM follows`); n != 2 {
+				t.Errorf("%d follows, want the 2 others", n)
+			}
+		})
+	}
+}
+
+// Withdrawing a pending follow of a bot of another server deletes the
+// request there too.
+func TestFollowRemote_Withdraw(t *testing.T) {
+	a, b := dmPair(t)
+	a1 := a.followBot(t, "a1", "approve")
+	b1 := b.followBot(t, "b1", "")
+	to := "a1@" + a.svc.Domain()
+	if v := followOf(t, b.followTo(b1, to)); v.Status != "pending" {
+		t.Fatalf("follow: %+v", v)
+	}
+	if got := a.follows(t, a1, "/follows/requests", "requests"); len(got) != 1 {
+		t.Fatalf("a1's requests: %+v", got)
+	}
+	if rec := b.do(b1, http.MethodDelete, "/follows/"+to, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("unfollow: %d %s", rec.Code, rec.Body)
+	}
+	for _, g := range []*roomRig{a, b} {
+		if n := count(t, g.db, `SELECT COUNT(*) FROM follows`); n != 0 {
+			t.Errorf("%s keeps %d follows", g.svc.Domain(), n)
+		}
+	}
+	if n := count(t, a.db, `SELECT COUNT(*) FROM audit WHERE action = 'follow.remove'`); n != 1 {
+		t.Errorf("a audited %d removals, want 1", n)
+	}
+}
+
+// The receiver deletes a pending or rejected request of a bot of the
+// signing server, never an accepted follow, within the peer's follow
+// request limit.
+func TestFollowRemote_WithdrawReceiver(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1 := g.followBot(t, "b1", "")
+	withdraw := func(follower string) *httptest.ResponseRecorder {
+		return g.fedDo(signedReq(t, h.id, g.svc.Domain(), http.MethodPost, "/fed/v1/follows/withdraw",
+			map[string]string{"follower": follower, "handle": "b1"}))
+	}
+	for _, x := range []string{"x", "y", "z"} {
+		if rec := h.follow(t, g, h.addr(x), "b1"); rec.Code != http.StatusCreated {
+			t.Fatalf("follow %s: %d %s", x, rec.Code, rec.Body)
+		}
+	}
+	reqs := g.follows(t, b1, "/follows/requests", "requests")
+	if rec := g.do(b1, http.MethodPost, fmt.Sprintf("/follows/requests/%d/reject", reqs[1].ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("reject: %d %s", rec.Code, rec.Body)
+	}
+	h.setAnswer(answerWith(http.StatusCreated, `{"max_events_bytes":100000,"kind":"feed"}`))
+	if rec := g.do(b1, http.MethodPost, fmt.Sprintf("/follows/requests/%d/accept", reqs[2].ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("accept: %d %s", rec.Code, rec.Body)
+	}
+	wantErr(t, withdraw("x@c.example"), http.StatusBadRequest, "bad_request")
+	for _, x := range []string{"x", "y"} {
+		if rec := withdraw(h.addr(x)); rec.Code != http.StatusNoContent {
+			t.Errorf("withdraw %s: %d %s", x, rec.Code, rec.Body)
+		}
+	}
+	wantErr(t, withdraw(h.addr("x")), http.StatusNotFound, "not_found")
+	wantErr(t, withdraw(h.addr("z")), http.StatusNotFound, "not_found")
+	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE status = 'accepted'`); n != 1 || count(t, g.db, `SELECT COUNT(*) FROM follows`) != 1 {
+		t.Errorf("follows left: %d accepted", n)
+	}
+	g.svc.mu.Lock()
+	g.svc.followLimits[h.id.Domain] = rate.NewLimiter(0, 0)
+	g.svc.mu.Unlock()
+	wantErr(t, withdraw(h.addr("z")), http.StatusTooManyRequests, "rate_limited")
 }

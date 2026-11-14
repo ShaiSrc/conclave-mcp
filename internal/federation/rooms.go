@@ -52,6 +52,10 @@ type RoomHooks struct {
 	// server, toward our bot handle and returns the follow's status as the
 	// follower sees it; a refusal is a *fedrooms.Error (internal/follow).
 	Follow func(ctx context.Context, follower, handle string) (string, error)
+	// Withdraw deletes the pending or rejected follow request of follower,
+	// a bot of the signing server, toward our bot handle, and reports
+	// whether there was one (internal/follow).
+	Withdraw func(ctx context.Context, follower, handle string) (bool, error)
 }
 
 // Domain returns this server's federation domain.
@@ -122,7 +126,8 @@ func (s *Service) authorSigned(ctx context.Context, m MessageSig, sig string) (b
 // rooms service calls it before it adds the bot's stand-in. Only
 // allowed peers are asked. The invite names the room's kind: direct,
 // feed for a feed, else room; an answer that does not name it back is
-// a refusal (403). A refusal is a *fedrooms.Error.
+// a refusal (403). A feed's invite carries its bot's address too, which
+// its name may hold cut. A refusal is a *fedrooms.Error.
 func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string, set []string) (int, error) {
 	handle, domain, _ := strings.Cut(address, "@")
 	h, herr := bots.NormalizeHandle(handle)
@@ -140,9 +145,9 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	if peer.Status != statusAllowed {
 		return 0, &fedrooms.Error{Status: http.StatusForbidden, Code: "peer_not_allowed", Message: d + " is not an allowed peer"}
 	}
-	var kind string
-	if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END FROM rooms WHERE id = ?`,
-		roomID).Scan(&kind); err != nil {
+	var kind, feed string
+	if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(feed, '') FROM rooms WHERE id = ?`,
+		roomID).Scan(&kind, &feed); err != nil {
 		return 0, err
 	}
 	body, _ := json.Marshal(struct {
@@ -150,7 +155,8 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
 		Kind   string   `json:"kind"`
-	}{name, h, set, kind})
+		Feed   string   `json:"feed,omitempty"`
+	}{name, h, set, kind, feed})
 	status, out, err := s.sendSigned(ctx, http.MethodPost, d, "/fed/v1/rooms/"+roomID+"/invite", body, maxBody)
 	var refusal *fedrooms.Error
 	switch {
@@ -495,7 +501,7 @@ func (s *Service) handleRoomLeave(w http.ResponseWriter, r *http.Request) {
 // within the events budget and M, what the origin reads the answer up
 // to (ours without it), and with <, > and & as stored; message events
 // are skips unless the origin has a reader in the room, and so is an
-// event over M.
+// event over M and a feed's member event about another follower.
 func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	roomID, ok := s.roomPeer(w, r)
 	if !ok {

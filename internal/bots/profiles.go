@@ -45,6 +45,9 @@ var (
 	ErrTaken     = errors.New("handle already taken")
 	ErrAdminKey  = errors.New("admin keys cannot have a handle")
 	ErrForbidden = errors.New("only an admin key changes the visibility, the DM policy or the follow policy")
+	// ErrInUse is the error of a handle change or removal of a bot whose
+	// feed or follows name it by its address.
+	ErrInUse = errors.New("the bot has an active feed or follows, which name it by its address: archive its feed and end its follows, followers and follow requests first")
 )
 
 // Skill is one thing a bot can do.
@@ -310,9 +313,18 @@ func truncate(s string, n int) string {
 
 // SetHandle gives the active non-admin local key keyID the handle, which
 // must be normalized; stand-ins of remote bots are not found. A handle in use, even by a revoked key, is ErrTaken.
+// A bot whose feed or follows hold its address keeps its handle
+// (ErrInUse); the same handle again changes nothing.
 func (s *Store) SetHandle(ctx context.Context, keyID int64, handle string) error {
-	var admin bool
-	err := s.db.QueryRowContext(ctx, `SELECT is_admin FROM api_keys WHERE id = ? AND revoked_at IS NULL AND remote_domain IS NULL`, keyID).Scan(&admin)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var admin, inUse bool
+	var current string
+	err = tx.QueryRowContext(ctx, `SELECT is_admin, COALESCE(handle, ''), `+addressInUse+`
+		FROM api_keys WHERE id = ? AND revoked_at IS NULL AND remote_domain IS NULL`, keyID).Scan(&admin, &current, &inUse)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("%w (no active key %d)", ErrNotFound, keyID)
@@ -320,16 +332,31 @@ func (s *Store) SetHandle(ctx context.Context, keyID int64, handle string) error
 		return err
 	case admin:
 		return ErrAdminKey
+	case current == handle:
+		return nil
+	case inUse:
+		return ErrInUse
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE api_keys SET handle = ? WHERE id = ?`, handle, keyID)
+	_, err = tx.ExecContext(ctx, `UPDATE api_keys SET handle = ? WHERE id = ?`, handle, keyID)
 	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
 		return ErrTaken
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
 }
+
+// addressInUse is whether api_keys.id has an active feed hosted here
+// or a follow, as follower or as target: they name the bot by its
+// address, which a handle change would leave behind.
+const addressInUse = `(EXISTS (SELECT 1 FROM rooms r WHERE r.owner_key_id = api_keys.id AND r.feed IS NOT NULL
+	AND r.home_domain IS NULL AND r.archived_at IS NULL)
+	OR EXISTS (SELECT 1 FROM follows f WHERE f.follower_key_id = api_keys.id OR f.target_key_id = api_keys.id))`
 
 // RemoveHandle takes the handle from the active key keyID, deletes its
 // profile so a later handle starts private, and returns the old handle.
+// A bot whose feed or follows hold its address keeps it (ErrInUse).
 func (s *Store) RemoveHandle(ctx context.Context, keyID int64) (string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -337,13 +364,17 @@ func (s *Store) RemoveHandle(ctx context.Context, keyID int64) (string, error) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	var handle string
-	err = tx.QueryRowContext(ctx, `SELECT handle FROM api_keys
-		WHERE id = ? AND revoked_at IS NULL AND handle IS NOT NULL`, keyID).Scan(&handle)
+	var inUse bool
+	err = tx.QueryRowContext(ctx, `SELECT handle, `+addressInUse+` FROM api_keys
+		WHERE id = ? AND revoked_at IS NULL AND handle IS NOT NULL`, keyID).Scan(&handle, &inUse)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w (no active key %d with a handle)", ErrNotFound, keyID)
 	}
 	if err != nil {
 		return "", err
+	}
+	if inUse {
+		return "", ErrInUse
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET handle = NULL WHERE id = ?`, keyID); err != nil {
 		return "", err

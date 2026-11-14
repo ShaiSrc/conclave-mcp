@@ -188,6 +188,8 @@ func fail(w http.ResponseWriter, r *http.Request, err error) {
 		status, code = http.StatusBadRequest, "bad_request"
 	case errors.Is(err, ErrTaken):
 		status, code = http.StatusConflict, "handle_taken"
+	case errors.Is(err, ErrInUse):
+		status, code = http.StatusConflict, "conflict"
 	case errors.Is(err, ErrAdminKey):
 		status, code = http.StatusBadRequest, "admin_key"
 	case errors.Is(err, ErrForbidden):

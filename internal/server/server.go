@@ -229,9 +229,9 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	botsStore := bots.NewStore(deps.DB)
 	// Direct conversations post through the messages service's send path.
 	directSvc := &direct.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.Send}
-	// Posts are messages: stored through the send path, deleted through
-	// the message delete.
-	followSvc := &follow.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.Send,
+	// Posts are messages: stored through the send path's post entry, the
+	// one way into a feed, deleted through the message delete.
+	followSvc := &follow.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.SendPost,
 		Delete: messagesSvc.Delete}
 	// Federated rooms: rooms and messages log changes of rooms with
 	// remote members, invite by address through the federation service
@@ -250,6 +250,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		// invite to bring in a follower of a peer; unfollowing leaves the
 		// replica through its host.
 		followSvc.Request, followSvc.InviteRemote, followSvc.Leave = fedSvc.FollowRemote, fedSvc.InviteRemote, fedSvc.LeaveRemote
+		followSvc.Withdraw = fedSvc.WithdrawFollow
 		roomsSvc.MaxMessageBytes = messagesSvc.MaxMessageBytes
 		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		// Direct conversations with bots of peers start with a direct
@@ -260,7 +261,8 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		claimsLocal := chi.NewRouter()
 		claimsSvc.Routes(claimsLocal)
 		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,
-			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica, Follow: followSvc.Remote}
+			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica, Follow: followSvc.Remote,
+			Withdraw: followSvc.RemoteWithdraw}
 	}
 
 	r.Route("/v1", func(r chi.Router) {
