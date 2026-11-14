@@ -74,10 +74,11 @@ systemd, with a reverse proxy in front of it for TLS.
 ## Upgrade
 
 Follow [the upgrade guide](upgrading.md): read the notes of every
-version you skip, back up with `conclave-mcp backup <file>`, stop the
-service, replace the binary or image, start it (migrations run at
-start, forward only), and check `conclave-mcp server`. There is no
-downgrade: roll back by restoring the backup with the old binary.
+version you skip, take an online backup (below, with `--db`) and go on
+only if it succeeds, stop the service, replace the binary or image,
+start it (migrations run at start, forward only), and check
+`conclave-mcp server`. There is no downgrade: roll back by restoring
+the backup with the old binary.
 
 ## Backup and restore
 
@@ -107,6 +108,13 @@ rm -rf /var/lib/conclave-mcp
 cp -a /var/backups/conclave-YYYY-MM-DD /var/lib/conclave-mcp
 chown -R conclave:conclave /var/lib/conclave-mcp
 systemctl start conclave-mcp
+```
+
+From an online backup file, run these between stop and start instead:
+
+```sh
+rm -f /var/lib/conclave-mcp/data.db-wal /var/lib/conclave-mcp/data.db-shm
+install -o conclave -g conclave -m 0600 /var/backups/conclave-YYYY-MM-DD.db /var/lib/conclave-mcp/data.db
 ```
 
 Downgrading the binary after upgrading the DB is not detected:
