@@ -1073,8 +1073,12 @@ func (s *Service) leaveHosted(ctx context.Context, roomID string, keyID int64) (
 	if err := fedrooms.LogRemove(ctx, tx, roomID, keyID, s.id.Domain); err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ? AND target = (SELECT feed FROM rooms WHERE id = ?)`,
-		keyID, roomID); err != nil {
+	// Out of an archived feed, the follow ends only when no active feed of
+	// the same address holds the bot, as a member removal does.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ?1 AND target = (SELECT feed FROM rooms WHERE id = ?2)
+		AND (EXISTS (SELECT 1 FROM rooms WHERE id = ?2 AND archived_at IS NULL)
+		  OR NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = ?1
+		    WHERE o.feed = follows.target AND o.archived_at IS NULL))`, keyID, roomID); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()

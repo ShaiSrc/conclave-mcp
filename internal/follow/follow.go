@@ -513,8 +513,10 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 		writeErr(w, r, fe.Status, fe.Code, fe.Message)
 		return
 	case errors.As(err, &fe):
-		_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM follows WHERE follower_key_id = ? AND target = ? AND status = 'pending'`,
-			caller, address)
+		if created == 1 { // a refused resend keeps the request the peer still holds
+			_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM follows WHERE follower_key_id = ? AND target = ? AND status = 'pending'`,
+				caller, address)
+		}
 		if reason != "" {
 			s.refuse(w, r, caller, address, reason, fe.Status, fe.Code, fe.Message)
 		} else {

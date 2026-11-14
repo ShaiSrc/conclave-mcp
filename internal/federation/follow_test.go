@@ -411,6 +411,51 @@ func TestFollowRemote_PeerAnswers(t *testing.T) {
 			t.Errorf("%s: %d refusals audited as %s, want 1", c.code, n, c.reason)
 		}
 	}
+	// A refused request sent again keeps the pending follow it found: the
+	// peer still holds that request.
+	h.setAnswer(answerWith(http.StatusCreated, `{"status":"pending"}`))
+	if v := followOf(t, a.followTo(a1, h.addr("x"))); v.Status != "pending" {
+		t.Fatalf("follow: %+v", v)
+	}
+	h.setAnswer(answerWith(http.StatusTooManyRequests, `{"error":{"code":"rate_limited","message":"later"}}`))
+	wantErr(t, a.followTo(a1, h.addr("x")), http.StatusTooManyRequests, "rate_limited")
+	if pending() != 1 {
+		t.Error("a refused resend dropped the pending follow")
+	}
+}
+
+// A leave from an archived feed does not end the follow its bot holds
+// through the active feed of the same address.
+func TestFollowRemote_LeaveArchivedFeedKeepsFollow(t *testing.T) {
+	g, m, _, c1 := fedRoom(t, "read")
+	x := g.followBot(t, "x", "")
+	addr := "x@" + g.svc.Domain()
+	feed := func(archived any) string {
+		t.Helper()
+		id := ulid.Make().String()
+		if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, feed, archived_at)
+			VALUES (?, ?, ?, '2026-11-14T00:00:00Z', 'private', ?, ?)`, id, "feed:"+addr+"#"+id, x.KeyID, addr, archived); err != nil {
+			t.Fatal(err)
+		}
+		for _, k := range []int64{x.KeyID, c1} {
+			if _, err := g.db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights)
+				VALUES (?, ?, 'reader', '2026-11-14T00:00:00Z', 'read')`, id, k); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return id
+	}
+	old, _ := feed("2026-11-14T01:00:00Z"), feed(nil)
+	if _, err := g.db.Exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		VALUES (?, ?, ?, 'accepted', '2026-11-14T00:00:00Z')`, c1, addr, x.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := g.fedDo(m.req(t, http.MethodPost, "/fed/v1/rooms/"+old+"/leave", map[string]string{"author": m.addr("c1")})); rec.Code != http.StatusNoContent {
+		t.Fatalf("leave: %d %s", rec.Code, rec.Body)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ? AND target = ?`, c1, addr); n != 1 {
+		t.Error("the leave from the archived feed ended the follow of the active one")
+	}
 }
 
 // B's bot follows A's bot, A's bot accepts and posts: the post is in B's

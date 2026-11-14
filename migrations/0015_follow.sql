@@ -28,3 +28,5 @@ CREATE TABLE follows (
   admitted_seq INTEGER,
   UNIQUE(follower_key_id, target)
 );
+CREATE INDEX follows_target_key_status ON follows(target_key_id, status);
+CREATE INDEX follows_target_status ON follows(target, status);
