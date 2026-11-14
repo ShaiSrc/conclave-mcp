@@ -206,7 +206,7 @@ func TestVerify_AllowedPeer(t *testing.T) {
 	}
 }
 
-// Step 4: a key other than the stored one, without an endorsement by
+// Step 6: a key other than the stored one, without an endorsement by
 // it, is refused. The peer's document lists the presented key, which is
 // evidence of a key change: audited, once per peer a minute.
 func TestVerify_KeyChanged(t *testing.T) {
@@ -243,7 +243,7 @@ func TestVerify_KeyChanged(t *testing.T) {
 	}
 }
 
-// Step 4: a known peer's stored key verifies its requests, whatever its
+// Step 6: a known peer's stored key verifies its requests, whatever its
 // document serves now; nothing is fetched.
 func TestVerify_UsesStoredKey(t *testing.T) {
 	svc := newLocal(t, "allowlist")
@@ -259,7 +259,7 @@ func TestVerify_UsesStoredKey(t *testing.T) {
 	}
 }
 
-// Step 5.
+// Step 4.
 func TestVerify_WrongDestination(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
@@ -271,7 +271,7 @@ func TestVerify_WrongDestination(t *testing.T) {
 	wantErr(t, serve(svc, req), http.StatusUnauthorized, "bad_signature")
 }
 
-// Step 6.
+// Step 5.
 func TestVerify_ClockSkew(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
@@ -364,7 +364,7 @@ func TestVerify_RateLimit(t *testing.T) {
 	}
 }
 
-// Steps 3 and 10, open mode: an unknown origin's document is fetched,
+// Steps 6 and 10, open mode: an unknown origin's document is fetched,
 // the request verified, and the origin recorded as seen and audited.
 func TestVerify_OpenModeFirstContact(t *testing.T) {
 	svc := newLocal(t, "open")
@@ -473,7 +473,7 @@ func TestVerify_LogsRefusalsOncePerOriginAndCode(t *testing.T) {
 	}
 }
 
-// Step 4: a request naming a key other than the stored one is refused.
+// Step 6: a request naming a key other than the stored one is refused.
 // Anyone can send one, so it is audited only when the peer's own
 // document lists that key, and the document is fetched at most once
 // per peer a minute.
