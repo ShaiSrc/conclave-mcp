@@ -15,6 +15,7 @@ import (
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/messages"
 	"github.com/hermes/conclave-mcp/internal/rooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
@@ -944,5 +945,31 @@ func TestFollow_ListPaging(t *testing.T) {
 	}
 	if ids, _ := page(bob, "/followers?limit=1"); len(ids) != 0 {
 		t.Errorf("followers: %v", ids)
+	}
+}
+
+// A refusal that arrives after the bot unfollowed and followed again
+// removes only the row its own request made, not the new one.
+func TestFollowRemote_LateRefusalKeepsNewRow(t *testing.T) {
+	e := newEnv(t, "")
+	svc := e.serve("a.example")
+	if _, err := e.db.Exec(`INSERT INTO federation_peers(domain, status, added_at) VALUES ('b.example', 'allowed', '2026-11-14T00:00:00Z')`); err != nil {
+		t.Fatal(err)
+	}
+	alice := e.bot("alice", "")
+	svc.Request = func(ctx context.Context, from, to string) error {
+		// Meanwhile the bot unfollowed and followed again: a new row.
+		if _, err := e.db.Exec(`DELETE FROM follows WHERE follower_key_id = ?`, alice); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.db.Exec(`INSERT INTO follows(follower_key_id, target, status, created_at)
+			VALUES (?, 'bob@b.example', 'pending', '2026-11-14T00:00:01Z')`, alice); err != nil {
+			t.Fatal(err)
+		}
+		return &fedrooms.Error{Status: http.StatusForbidden, Code: "follow_refused", Message: "no"}
+	}
+	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{"to":"bob@b.example"}`), http.StatusForbidden, "follow_refused")
+	if n := e.count(`SELECT COUNT(*) FROM follows WHERE follower_key_id = ?`, alice); n != 1 {
+		t.Errorf("%d follows left, want the new one", n)
 	}
 }

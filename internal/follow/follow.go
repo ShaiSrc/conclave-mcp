@@ -479,9 +479,12 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 	}
 	res, err := s.DB.ExecContext(ctx, `INSERT INTO follows(follower_key_id, target, status, created_at)
 		VALUES (?, ?, 'pending', ?) ON CONFLICT(follower_key_id, target) DO NOTHING`, caller, address, storage.FormatTS(time.Now()))
-	var created int64
+	var created, rowID int64 // rowID: the row this request made, 0 for none
 	if err == nil {
 		created, err = res.RowsAffected()
+	}
+	if err == nil && created == 1 {
+		rowID, err = res.LastInsertId()
 	}
 	var from string
 	if err == nil {
@@ -513,10 +516,10 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 		writeErr(w, r, fe.Status, fe.Code, fe.Message)
 		return
 	case errors.As(err, &fe):
-		if created == 1 { // a refused resend keeps the request the peer still holds
-			_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM follows WHERE follower_key_id = ? AND target = ? AND status = 'pending'`,
-				caller, address)
-		}
+		// Only the row this request made goes: a refused resend keeps the
+		// request the peer still holds, and a row made by a later follow
+		// stays too.
+		_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM follows WHERE id = ? AND status = 'pending'`, rowID)
 		if reason != "" {
 			s.refuse(w, r, caller, address, reason, fe.Status, fe.Code, fe.Message)
 		} else {

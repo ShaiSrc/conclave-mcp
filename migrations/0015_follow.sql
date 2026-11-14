@@ -18,7 +18,7 @@ CREATE UNIQUE INDEX rooms_feed_active ON rooms(feed) WHERE feed IS NOT NULL AND 
 ALTER TABLE bot_profiles ADD COLUMN follow_policy TEXT NOT NULL DEFAULT 'approve' CHECK (follow_policy IN ('none','approve','open'));
 
 CREATE TABLE follows (
-  id INTEGER PRIMARY KEY,
+  id INTEGER PRIMARY KEY AUTOINCREMENT, -- never reused: a late answer removes only its own row
   follower_key_id INTEGER NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
   target TEXT NOT NULL,
   target_key_id INTEGER REFERENCES api_keys(id) ON DELETE CASCADE,
