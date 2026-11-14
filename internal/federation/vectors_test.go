@@ -50,6 +50,10 @@ type protocolVectors struct {
 		SigningString string `json:"signing_string"`
 		Signature     string `json:"signature"`
 	} `json:"author_signature"`
+	MetadataWire struct {
+		Metadata string `json:"metadata"`
+		Wire     string `json:"wire"`
+	} `json:"metadata_wire"`
 }
 
 // vectorKey is an Ed25519 key of the vectors: its 32-byte seed (hex)
@@ -134,5 +138,11 @@ func TestProtocolVectors(t *testing.T) {
 	eq("author_signature.signature", id.SignMessage(m), a.Signature)
 	if !VerifyMessage(id.Public, m, a.Signature) {
 		t.Error("author_signature.signature does not verify")
+	}
+
+	// Only the top-level members are sorted; nested objects keep their order.
+	mw := v.MetadataWire
+	if wire, _, err := fedrooms.SplitMetadata([]byte(mw.Metadata)); mw.Wire == "" || err != nil || string(wire) != mw.Wire {
+		t.Errorf("metadata_wire: %q (%v), want %q", wire, err, mw.Wire)
 	}
 }

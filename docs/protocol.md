@@ -426,7 +426,7 @@ makes an archived one active again.
 | `rights` | For kind `room`: rights from `read`, `claim`, `question`, `answer`, `decision`, `handoff`, `status_update`, `task_assignment`, `alert`, `system`, and `all` or `none`. For `direct` and `feed` the destination ignores it. |
 | `kind` | `room` (the default), `direct` or `feed`. |
 | `feed` | Kind `feed`: the feed's bot address, on the origin. A receiver reads it from the name when absent. |
-| `seq` | Kind `feed`: the seq the feed's event log is at. |
+| `seq` | Kind `feed`: the seq the feed's event log is at. The destination keeps it as the bot's follow's `admitted_seq`: set to it when the bot was not in the replica, raised to it when it was. |
 
 201:
 
@@ -739,7 +739,7 @@ event, in seq order:
 |---|---|
 | `room` | Rename; archive when `archived`. A `kind` other than the replica's is refused. A replica of kind `room` refuses a name starting with `dm:` or `feed:`. A direct or feed replica is not renamed: a name other than its direct name, or `feed:<feed>`, or that suffixed with the room id, is refused; with that name the event only archives. |
 | `member` | Add the member, or set its rights. A bot of the member server must be one of its bots; in a direct or feed replica, one it took by invite. In a feed it gets `read` only. A member of another server must be, in a direct replica, the other bot of its direct name, and in a feed replica the feed's bot; any other is refused. |
-| `member.remove` | Remove the member; archive the replica when none of the member server's bots is left. |
+| `member.remove` | Remove the member; archive the replica when none of the member server's bots is left. In a feed replica, the removal of a bot of the member server at or below its follow's `admitted_seq` ([Invite](#invite)) is skipped: it was logged before the bot's latest invite. |
 | `message` | The author must be, in a direct replica, one of the two bots of its direct name, and in a feed replica the feed's bot; any other is refused. Check the [author signature](#author-signatures), then store the message. A `deleted` event stores nothing, or deletes the copy. |
 | `message.delete` | Delete the copy, or keep a tombstone so the message is never stored later. |
 | `skip` | Nothing. |
@@ -772,7 +772,8 @@ conclave-msg-v1
 
 - Content type and message type with their defaults filled in.
 - The metadata wire form: the metadata object without `reply_to`,
-  compact JSON with members sorted by key (bytewise), `<`, `>` and `&`
+  compact JSON with its top-level members sorted by key (bytewise),
+  nested objects keeping their members' order, `<`, `>` and `&`
   not escaped; empty for no metadata, `null` or `{}`. The bytes the
   author's server signs MUST come out unchanged when this rule is
   applied to them again: the host derives them so.
@@ -888,7 +889,8 @@ seeds (the published test keys 1 and 2 of RFC 8032, section 7.1):
 - an endorsement of a second key: its key, the signing string and the
   signature;
 - an author signature: its fields, the signing string and the
-  signature.
+  signature;
+- the metadata wire form of metadata with nested objects.
 
 Ed25519 signatures are deterministic, so every value is exact.
 `internal/federation/vectors_test.go` recomputes them, and

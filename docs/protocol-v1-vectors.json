@@ -42,5 +42,9 @@
     "nonce": "EBESExQVFhcYGRobHB0eHw",
     "signing_string": "conclave-msg-v1\n01JCV7Q5M8XKZ3T4B6N2P9R0WY@b.example\na1@a.example\ntext/plain\nanswer\n52eaefe1b0dca62010c30f6ff321e7f42fc945bd0cd665ed2dc9627b0f32eeba\ndf328ab0fa16f1c139f21fff0eb7e85ea53c8890f33783f9874ed1a9516b08af\n41\nEBESExQVFhcYGRobHB0eHw",
     "signature": "vkXv9SlpMs5hUYWbG0VME-yOX0IUXFtAIcq7kISZU26gIB5xZlPwexnt1m0HrMbZcU-x-wHhSoYR6y5q3X7iBg"
+  },
+  "metadata_wire": {
+    "metadata": "{\"z\": {\"b\": 1, \"a\": [2, {\"y\": \"<&>\", \"x\": 3}]}, \"reply_to\": 41, \"a\": null}",
+    "wire": "{\"a\":null,\"z\":{\"b\":1,\"a\":[2,{\"y\":\"<&>\",\"x\":3}]}}"
   }
 }
