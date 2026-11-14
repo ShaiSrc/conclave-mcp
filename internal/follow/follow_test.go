@@ -243,7 +243,6 @@ func TestFollow_OnlyBots(t *testing.T) {
 	for _, path := range []string{"/follows", "/followers", "/follows/requests", "/timeline"} {
 		wantErr(t, e.do(plain, http.MethodGet, path, ""), http.StatusForbidden, "forbidden")
 	}
-	wantErr(t, e.do(e.admin, http.MethodGet, "/timeline", ""), http.StatusForbidden, "forbidden")
 	wantErr(t, e.do(e.admin, http.MethodPost, "/posts", `{"content":"x"}`), http.StatusForbidden, "forbidden")
 	if n := e.count(`SELECT COUNT(*) FROM follows`); n != 0 {
 		t.Errorf("%d follows", n)
@@ -521,6 +520,63 @@ func TestTimeline(t *testing.T) {
 	}
 }
 
+// An admin key reads the posts of every active feed hosted here, or a
+// bot's timeline with ?bot=; ?order=desc puts the newest first, as one
+// page without next_since.
+func TestTimeline_AdminAndOrder(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob, carol := e.bot("alice", ""), e.bot("bob", "open"), e.bot("carol", "")
+	e.follow(alice, "bob")
+	e.post(alice, "a1", "")
+	e.post(bob, "b1", "public")
+	e.post(carol, "c1", "")
+	e.post(alice, "a2", "")
+	page := func(key int64, query string) (string, string) {
+		t.Helper()
+		rec := e.do(key, http.MethodGet, "/timeline"+query, "")
+		var out struct {
+			Posts []struct {
+				Author  string `json:"author_address"`
+				Content string `json:"content"`
+			} `json:"posts"`
+			NextSince string `json:"next_since"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Posts == nil {
+			t.Fatalf("timeline%s: %d %s", query, rec.Code, rec.Body)
+		}
+		var got []string
+		for _, p := range out.Posts {
+			got = append(got, p.Author+":"+p.Content)
+		}
+		return strings.Join(got, " "), out.NextSince
+	}
+	for _, c := range []struct {
+		key          int64
+		query, want  string
+		wantNextNone bool
+	}{
+		{e.admin, "", "alice:a1 bob:b1 carol:c1 alice:a2", false},
+		{e.admin, "?order=desc", "alice:a2 carol:c1 bob:b1 alice:a1", true},
+		{e.admin, "?order=desc&limit=2", "alice:a2 carol:c1", true},
+		{e.admin, "?order=asc&limit=2", "alice:a1 bob:b1", false},
+		{e.admin, "?bot=alice&order=desc", "alice:a2 bob:b1 alice:a1", true},
+		{alice, "?order=desc", "alice:a2 bob:b1 alice:a1", true},
+		{alice, "?bot=carol", "alice:a1 bob:b1 alice:a2", false}, // a bot's ?bot= counts for nothing
+	} {
+		got, next := page(c.key, c.query)
+		if got != c.want || (next == "") != c.wantNextNone {
+			t.Errorf("%d %s: %s next %q, want %s", c.key, c.query, got, next, c.want)
+		}
+	}
+	wantErr(t, e.do(e.admin, http.MethodGet, "/timeline?bot=nobody", ""), http.StatusNotFound, "not_found")
+	wantErr(t, e.do(e.admin, http.MethodGet, "/timeline?order=up", ""), http.StatusBadRequest, "bad_request")
+	// A replica of a feed hosted elsewhere is not this server's to moderate.
+	e.exec(`UPDATE rooms SET home_domain = 'peer.example' WHERE id = ?`, e.feed(carol))
+	if got, _ := page(e.admin, ""); got != "alice:a1 bob:b1 alice:a2" {
+		t.Errorf("admin with a replica: %s", got)
+	}
+}
+
 // Feeds take no invites, rights changes or new members through the room
 // API; an admin may remove a follower, which ends its follow, but not
 // the owner. GET /rooms lists them as kind feed, which ?kind= filters.
@@ -539,13 +595,13 @@ func TestRooms_FeedRefusals(t *testing.T) {
 		wantErr(t, e.do(e.admin, c.method, c.path, c.body), http.StatusForbidden, "feed_room")
 	}
 	body := e.do(alice, http.MethodGet, "/rooms?kind=feed", "").Body.String()
-	if !strings.Contains(body, `"id":"`+feed+`"`) || !strings.Contains(body, `"kind":"feed"`) {
+	if !strings.Contains(body, `"id":"`+feed+`"`) || !strings.Contains(body, `"kind":"feed"`) || !strings.Contains(body, `"feed":"bob"`) {
 		t.Errorf("rooms?kind=feed: %s", body)
 	}
 	if body := e.do(alice, http.MethodGet, "/rooms?kind=room", "").Body.String(); strings.Contains(body, feed) {
 		t.Errorf("rooms?kind=room: %s", body)
 	}
-	if body := e.do(bob, http.MethodGet, base, "").Body.String(); !strings.Contains(body, `"kind":"feed"`) {
+	if body := e.do(bob, http.MethodGet, base, "").Body.String(); !strings.Contains(body, `"kind":"feed"`) || !strings.Contains(body, `"feed":"bob"`) {
 		t.Errorf("rooms/{id}: %s", body)
 	}
 	// A bot with a feed is not "in another room" for an invite.

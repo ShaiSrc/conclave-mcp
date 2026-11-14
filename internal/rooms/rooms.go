@@ -117,6 +117,7 @@ type roomView struct {
 	Visibility string `json:"visibility"`
 	Home       string `json:"home,omitempty"` // the host of a replica room
 	Kind       string `json:"kind"`           // room, direct or feed
+	Feed       string `json:"feed,omitempty"` // a feed's bot address
 	// LastMessageAt is a direct room's latest message time, in lists.
 	LastMessageAt string `json:"last_message_at,omitempty"`
 }
@@ -243,7 +244,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	admin := auth.IsAdmin(r.Context())
 	archived := admin && r.URL.Query().Get("include_archived") == "1"
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), `+kindSQL+`,
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), `+kindSQL+`, COALESCE(r.feed, ''),
 		        CASE WHEN r.kind = 'direct' THEN COALESCE((SELECT MAX(ts) FROM messages WHERE room_id = r.id AND deleted_at IS NULL), '') ELSE '' END
 		 FROM rooms r
 		 WHERE (? OR r.archived_at IS NULL)
@@ -266,7 +267,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 			archivedAt sql.NullString
 		)
 		if err := rows.Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archivedAt, &rv.Visibility, &rv.Home, &rv.Kind,
-			&rv.LastMessageAt); err != nil {
+			&rv.Feed, &rv.LastMessageAt); err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return
 		}
@@ -290,9 +291,9 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 		archived sql.NullString
 	)
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), `+kindSQL+`
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), `+kindSQL+`, COALESCE(r.feed, '')
 		 FROM rooms r WHERE r.id = ?`, id,
-	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home, &rv.Kind); err != nil {
+	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home, &rv.Kind, &rv.Feed); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "get query")
 		return
 	}

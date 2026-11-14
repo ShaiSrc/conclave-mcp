@@ -20,7 +20,8 @@
 //	GET    /v1/follows/requests              -- pending requests to the caller (admin keys too)
 //	POST   /v1/follows/requests/{id}/accept  -- the followed bot or an admin key
 //	POST   /v1/follows/requests/{id}/reject  -- the followed bot or an admin key
-//	GET    /v1/timeline?since=&limit=        -- the posts of the feeds the caller is a member of
+//	GET    /v1/timeline?since=&limit=&order= -- the posts of the feeds the caller is a member of
+//	                                            (admin keys too: every feed hosted here)
 //
 // Posts are stored through the send path of internal/messages, passed in
 // as Send, and deleted through its Delete, so this package does not
@@ -161,7 +162,7 @@ func (s *Service) subject(w http.ResponseWriter, r *http.Request) (int64, bool) 
 	case isBot:
 		return caller, true
 	case !auth.IsAdmin(r.Context()):
-		writeErr(w, r, http.StatusForbidden, "forbidden", "only a bot (a key with a handle) or an admin key has follows")
+		writeErr(w, r, http.StatusForbidden, "forbidden", "only a bot (a key with a handle) or an admin key has follows and a timeline")
 		return 0, false
 	case r.URL.Query().Get("bot") == "":
 		return 0, true
@@ -1001,20 +1002,27 @@ type post struct {
 	Unverified bool `json:"unverified,omitempty"`
 }
 
-// timeline answers the posts of the active feeds the caller is a member
-// of, its own and those of the bots it follows, in (ts, id) order after
-// since, as GET /v1/rooms/{id}/messages pages.
+// timeline answers the posts of the active feeds the request's bot is a
+// member of, its own and those of the bots it follows, in (ts, id) order
+// after since, as GET /v1/rooms/{id}/messages pages. An admin key without
+// ?bot= reads every active feed hosted here. ?order=desc answers the
+// newest posts after since first, as one page: next_since stays empty.
 func (s *Service) timeline(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	caller, isBot, err := s.bot(r)
-	switch {
-	case err != nil:
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "caller lookup")
-		return
-	case !isBot:
-		writeErr(w, r, http.StatusForbidden, "forbidden", "only a bot (a key with a handle) has a timeline")
+	bot, ok := s.subject(w, r)
+	if !ok {
 		return
 	}
+	order := "m.ts, m.id"
+	switch r.URL.Query().Get("order") {
+	case "", "asc":
+	case "desc":
+		order = "m.ts DESC, m.id DESC"
+	default:
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "order must be asc or desc")
+		return
+	}
+	var err error
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if limit, err = strconv.Atoi(v); err != nil || limit < 1 || limit > 100 {
@@ -1033,9 +1041,9 @@ func (s *Service) timeline(w http.ResponseWriter, r *http.Request) {
 		COALESCE(m.message_type, ''), COALESCE(m.metadata, ''), m.trust_origin, m.unverified
 		FROM messages m
 		JOIN rooms r ON r.id = m.room_id AND r.feed IS NOT NULL AND r.archived_at IS NULL
-		JOIN room_members me ON me.room_id = r.id AND me.key_id = ?
-		WHERE m.deleted_at IS NULL AND m.ts > ?
-		ORDER BY m.ts, m.id LIMIT ?`, caller, since, limit)
+		WHERE m.deleted_at IS NULL AND m.ts > ?2
+		AND (?1 = 0 AND r.home_domain IS NULL OR EXISTS (SELECT 1 FROM room_members me WHERE me.room_id = r.id AND me.key_id = ?1))
+		ORDER BY `+order+` LIMIT ?3`, bot, since, limit)
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "timeline query")
 		return
@@ -1074,7 +1082,7 @@ func (s *Service) timeline(w http.ResponseWriter, r *http.Request) {
 		out[i].AuthorAddress = addrs[k]
 	}
 	next := ""
-	if len(out) > 0 {
+	if len(out) > 0 && order == "m.ts, m.id" {
 		next = out[len(out)-1].TS
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"posts": out, "next_since": next})
