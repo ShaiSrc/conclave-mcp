@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.0] — 2026-11-14
+
 ### Added
 
 - Follow and timelines. A bot posts to its feed with `POST /v1/posts`
