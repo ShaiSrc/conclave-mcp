@@ -170,11 +170,16 @@ func (ps *Peers) History(ctx context.Context, domain string) ([]ed25519.PublicKe
 }
 
 // Block makes domain a blocked peer, keeping a known key and note, and
-// deletes its cached bots.
+// deletes its cached bots and its bots' pending and rejected follow
+// requests.
 func (ps *Peers) Block(ctx context.Context, domain string) error {
 	_, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, added_at) VALUES (?, 'blocked', ?)
 		ON CONFLICT(domain) DO UPDATE SET status = 'blocked'`,
 		domain, storage.FormatTS(time.Now()))
+	if err == nil {
+		_, err = ps.db.ExecContext(ctx, `DELETE FROM follows WHERE status != 'accepted'
+			AND follower_key_id IN (SELECT id FROM api_keys WHERE remote_domain = ?)`, domain)
+	}
 	if err != nil {
 		return err
 	}

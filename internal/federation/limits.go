@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/go-chi/chi/v5"
 	"golang.org/x/time/rate"
 )
 
@@ -133,7 +132,7 @@ func (s *Service) dropLimiters(domain string) {
 // left out stays. It answers the peer's view.
 func (s *Service) handlePatchPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain"))
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
 	if !ok {
 		return
 	}

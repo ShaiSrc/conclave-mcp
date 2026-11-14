@@ -7,12 +7,14 @@
 //	conclave-mcp federation peers add <domain> [--fingerprint F] [--note N]
 //	conclave-mcp federation peers block|remove|ping|retry <domain>
 //	conclave-mcp federation peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]
+//	conclave-mcp federation peers purge <domain> [--yes]
 //	conclave-mcp federation bots block <address> [--note N]
 //	conclave-mcp federation bots unblock <address>
 //	conclave-mcp federation bots blocked
 package federation
 
 import (
+	"bufio"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -21,6 +23,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -32,7 +35,7 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "federation", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers := &cobra.Command{Use: "peers", Short: "Manage federation peers", Args: cobra.NoArgs}
-	peers.AddCommand(newListCmd(), newShowCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd(), newRetryCmd(), newLimitsCmd())
+	peers.AddCommand(newListCmd(), newShowCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd(), newRetryCmd(), newLimitsCmd(), newPurgeCmd())
 	bots := &cobra.Command{Use: "bots", Short: "Block single bots of other servers", Args: cobra.NoArgs}
 	bots.AddCommand(newBotBlockCmd(), newBotUnblockCmd(), newBotsBlockedCmd())
 	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers, bots)
@@ -149,6 +152,39 @@ func newLimitsCmd() *cobra.Command {
 		cmd.Flags().IntVar(&vals[i], flags[i], 0, usage)
 	}
 	cmd.Flags().BoolVar(&reset, "reset", false, "go back to the defaults for all three")
+	return cmd
+}
+
+func newPurgeCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use: "purge <domain>", Short: "Delete what a blocked peer left here; it cannot be undone", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			domain := args[0]
+			if !yes {
+				_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "purging %s deletes its replicas and its bots' memberships, follows and claims, "+
+					"and retracts their messages; it cannot be undone. type %s again to confirm: ", domain, domain)
+				line, _ := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+				if strings.TrimSpace(line) != domain {
+					_, _ = fmt.Fprintln(cmd.ErrOrStderr(), "aborted")
+					return &exitError{Code: 2, Err: errors.New("aborted: the domain typed does not match")}
+				}
+			}
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var n struct {
+					Rooms, Messages, Members, Follows, Claims, Cursors int
+					StandIns                                           int `json:"stand_ins"`
+				}
+				if _, err := c.Do(ctx, client.Request{Method: "POST", Path: peerPath(domain, "/purge"), Out: &n}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "peer %s purged: %d rooms, %d messages, %d memberships, %d follows, %d claims, %d delivery cursors, %d stand-ins revoked\n",
+					domain, n.Rooms, n.Messages, n.Members, n.Follows, n.Claims, n.Cursors, n.StandIns)
+				return nil
+			})
+		},
+	}
+	cmd.Flags().BoolVar(&yes, "yes", false, "skip typing the domain again")
 	return cmd
 }
 

@@ -94,8 +94,9 @@ Federation is consent between operators. Each operator adds the other.
 Other commands: `federation status`, `federation rotate-key`,
 `peers list [--format json]`, `peers show <domain>`, `peers retry <domain>`,
 `peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]`,
-`peers block <domain>`, `peers remove <domain>` ([Peer health and
-limits](#peer-health-and-limits)). See
+`peers block <domain>`, `peers remove <domain>`, `peers purge <domain> [--yes]`
+([Peer health and limits](#peer-health-and-limits), [Blocking, removing
+and purging a peer](#blocking-removing-and-purging-a-peer)). See
 [cli-reference.md](cli-reference.md). The admin API is under
 `/v1/federation` ([architecture.md](architecture.md#http-api-surface)).
 
@@ -108,8 +109,9 @@ limits](#peer-health-and-limits)). See
 
 `blocked` always wins. In open mode the key first seen for a domain is
 the key the server keeps for it (trust on first use). A `seen` peer's
-key is stored and pinned like an `allowed` one's. Blocking and
-removing are in the CLI and the admin API.
+key is stored and pinned like an `allowed` one's. Blocking, removing
+and purging are in the CLI and the admin API ([Blocking, removing and
+purging a peer](#blocking-removing-and-purging-a-peer)).
 
 ## Server document
 
@@ -260,6 +262,76 @@ adds, blocks or removes the peer, which also changes the defaults (a
 blocking keeps them. The answer is the view. Audit
 `federation.peer.limits`.
 
+## Blocking, removing and purging a peer
+
+| Request | CLI | Answer |
+|---|---|---|
+| `POST /v1/federation/peers/{domain}/block` | `federation peers block <domain>` | 200 with the view. |
+| `DELETE /v1/federation/peers/{domain}` | `federation peers remove <domain>` | 204; 404 `peer_not_found`. |
+| `POST /v1/federation/peers/{domain}/purge` | `federation peers purge <domain> [--yes]` | 200 with the counts; 404 `peer_not_found`; 409 `peer_not_blocked` unless the peer is blocked. |
+
+The domain of every `/v1/federation/peers/{domain}` route and the
+address of `DELETE /v1/federation/blocked-bots/{address}` may be
+percent-encoded, as the web UI sends them (`%3A` for a port's colon,
+`%40` for the `@`).
+
+A block keeps the peer's row with status `blocked` and its overrides;
+its requests get 403 `peer_not_allowed`. It cuts the rooms shared with
+it ([federated-rooms.md](federated-rooms.md#blocking-removing-and-purging-a-peer)),
+ends our bots' follows of its bots, and deletes its cached bots and its
+bots' pending and rejected follow requests. A removal deletes the row
+and its overrides and cuts the same. Peering again undoes either; its
+content stays here.
+
+A purge is for a peer the operator gave up on, and cannot be undone. It
+takes a blocked peer only, which stays blocked: suspending a peer is a
+block and a purge. In one transaction it:
+
+- soft-deletes its bots' messages: in rooms hosted here as an operator's
+  delete does, with a `message.delete` event for each, so the other
+  member servers retract them; in replicas of other hosts here only,
+  since their host decides there;
+- ends its stand-ins' memberships of replicas, and deletes their claims,
+  the follows from and to its bots, its delivery cursors, its key
+  history and its limits;
+- deletes this server's replicas of its rooms, with their messages,
+  members, claims and reads;
+- revokes its stand-ins.
+
+Then its stand-ins leave the rooms hosted here, each with a
+`member.remove` event (the block did that already; a purge ends what is
+left), and its limiters are dropped. A revoked stand-in never comes
+back: a host's events that add one of its bots or carry a message of
+one are skipped as refused events, unblocking one of its bots
+([Blocking a bot](#blocking-a-bot)) keeps the stand-in revoked while the
+peer is blocked, and its stand-ins stay revoked if the peer is peered
+again.
+
+What remains of the peer: its blocked row, its revoked stand-ins, its
+bots' soft-deleted messages (kept for audit, as every deleted message
+is), and audit rows.
+
+The answer counts what ended: `{"rooms", "messages", "members",
+"follows", "claims", "cursors", "stand_ins"}`, the replicas deleted, the
+messages soft-deleted (those of its replicas go with them, uncounted),
+the memberships, follows and claims ended, the delivery cursors deleted
+and the stand-ins revoked. A second purge finds nothing and answers
+zeros. Audit `federation.peer.purge` with the counts as detail. The CLI
+asks for the domain to be typed again and aborts on anything else,
+unless `--yes` is given; it prints the counts.
+
+## Stand-ins per host
+
+A stand-in records the host that introduced it
+(`api_keys.remote_via`): the host of a replica whose events name the
+bot, or the origin of a direct invite for its bot. One made by an
+invite, a follow or a lookup of ours records none. A host may introduce
+at most 200 stand-ins of domains other than its own; beyond that its
+event is skipped as refused (`federation.room.event_refused`), or its
+invite gets 409 `limit`. So a host cannot use up a third domain's 2000
+stand-ins with addresses it makes up. Stand-ins made before 0.13
+record no host and count for none.
+
 ## Blocking a bot
 
 An operator blocks a single bot of another server without blocking its
@@ -300,8 +372,9 @@ way. From then on:
 | Our invites of it (`POST /v1/rooms/{id}/members`), direct starts to it (`POST /v1/direct`), follows of it (`POST /v1/follows`) | 403 `bot_blocked`; its server is not asked. |
 | Lookups of it (`GET /v1/bots/lookup`) | 404 `not_found`; its server is not asked. |
 
-An unblock deletes the row and lifts the stand-in's revocation. It
-restores no membership and no follow: invite it, or follow it, again.
+An unblock deletes the row and lifts the stand-in's revocation, unless
+its server is a blocked peer. It restores no membership and no follow:
+invite it, or follow it, again.
 Audit `federation.bot.block` (target the address; detail `{"note",
 "rooms", "replicas", "follows"}`: the rooms hosted here it left, the
 replicas it left, the follows ended from and to it) and
@@ -409,7 +482,8 @@ Admin API errors: `invalid_domain` and `own_domain` (400; every
 `not_found` (404, unblocking a bot that is not blocked),
 `fingerprint_required` (400), `invalid_json` (400), `invalid_limit`
 (400), `fingerprint_mismatch` (409), `peer_not_allowed` (409, a retry of
-a peer that is not allowed), `rotation_too_soon` (409), `peer_not_found`
+a peer that is not allowed), `peer_not_blocked` (409, a purge of a peer
+that is not blocked), `rotation_too_soon` (409), `peer_not_found`
 (404), `peer_unreachable` (502), `rate_limited` (429, lookups and adds
 over their limit), `federation_disabled` (404).
 A failed ping through the admin API answers 502 `peer_unreachable` with
@@ -493,6 +567,7 @@ requests from the peer an hour, or the peer's limit
 | `federation.peer.add` | An operator adds a peer. Detail `{"fingerprint":"SHA256:..."}`. |
 | `federation.peer.block` | An operator blocks a peer. |
 | `federation.peer.remove` | An operator removes a peer. |
+| `federation.peer.purge` | An operator purged a blocked peer. Detail `{"rooms", "messages", "members", "follows", "claims", "cursors", "stand_ins"}`: [Blocking, removing and purging a peer](#blocking-removing-and-purging-a-peer). |
 | `federation.peer.seen` | An open-mode origin sends its first valid request. |
 | `federation.room.*`, `federation.delivery.paused` | Federated rooms; see [federated-rooms.md](federated-rooms.md#audit-actions). |
 | `follow.request`, `follow.refused` | Follow requests of peers' bots; see [follow.md](follow.md#audit-actions). |

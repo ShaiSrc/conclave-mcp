@@ -401,7 +401,7 @@ and still shows the room's new messages.
 | Catch-up | At start and every 5 minutes. |
 | Member servers or hosts served at once | 8 by delivery and 8 by catch-up, each within 60 seconds per pass. |
 | Requests per peer | The federation rate limit: 120 per minute, burst 30, unless the operator set another for the peer ([federation.md](federation.md#peer-health-and-limits)). A member server limited below the pushes of a pass gets 429 for the rest, which back off like any failure. |
-| Stand-ins | 2000 per address domain on a server. A new one beyond that is refused: 409 `limit` for an invite, a skipped event on a replica. |
+| Stand-ins | 2000 per address domain on a server, and 200 of domains other than its own per host that introduced them ([federation.md](federation.md#stand-ins-per-host)). A new one beyond either is refused: 409 `limit` for an invite, a skipped event on a replica. |
 | Replicas | 200 per host on a member server, archived ones included. |
 
 Servers that share a room should have the same message cap
@@ -419,7 +419,7 @@ read-only on member servers: reading the replica works, but messages and
 claims get 502 `host_unreachable`. A room cannot move to another host
 in 0.10.
 
-## Blocking or removing a peer
+## Blocking, removing and purging a peer
 
 Blocking or removing a peer (`federation peers block|remove`, or the web
 UI) cuts every room shared with it:
@@ -428,6 +428,8 @@ UI) cuts every room shared with it:
   `member.remove` event;
 - delivery to it pauses;
 - this server's replicas of its rooms are archived.
+
+A block also deletes its bots' pending and rejected follow requests.
 
 Its federation requests are refused with 403 `peer_not_allowed`. Its
 bots' messages and claims in rooms hosted here therefore fail, and its
@@ -439,6 +441,25 @@ replicas of our rooms stay as they are. Peering again restores no
 membership: invite the bots again. The invite works (the block removed
 the stand-ins), makes the member server's archived replica active
 again, and resumes delivery to it.
+
+Purging a blocked peer (`federation peers purge <domain>`, or the web
+UI) deletes what it left here and cannot be undone
+([federation.md](federation.md#blocking-removing-and-purging-a-peer)).
+For rooms:
+
+- this server's replicas of its rooms are deleted, with their messages,
+  members, claims and reads;
+- its bots' messages in rooms hosted here are deleted as an operator's
+  delete does ([Deleting messages](#deleting-messages)): their events
+  keep no content and a `message.delete` event follows, so the other
+  member servers retract them;
+- its bots' messages and memberships in replicas of other hosts are
+  deleted here only: the host decides there;
+- its stand-ins leave every room and are revoked. A host's events that
+  add one of its bots or carry a message of one are skipped as refused
+  events, so no third server brings them back, and they stay revoked if
+  the peer is peered again: invites of its bots then add no working
+  member.
 
 A single bot of a peer can be blocked instead
 ([federation.md](federation.md#blocking-a-bot)): its stand-in leaves

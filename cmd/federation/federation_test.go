@@ -17,6 +17,12 @@ import (
 // returns stdout and the request line and body the server saw.
 func runCmd(t *testing.T, status int, body string, args ...string) (out, req string, err error) {
 	t.Helper()
+	return runCmdIn(t, "", status, body, args...)
+}
+
+// runCmdIn is runCmd with stdin.
+func runCmdIn(t *testing.T, stdin string, status int, body string, args ...string) (out, req string, err error) {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var b bytes.Buffer
 		_, _ = b.ReadFrom(r.Body)
@@ -33,6 +39,7 @@ func runCmd(t *testing.T, status int, body string, args ...string) (out, req str
 	var stdout bytes.Buffer
 	cmd := NewCmd()
 	cmd.SetArgs(args)
+	cmd.SetIn(strings.NewReader(stdin))
 	cmd.SetOut(&stdout)
 	cmd.SetErr(&stdout)
 	err = cmd.ExecuteContext(context.Background())
@@ -194,5 +201,28 @@ func TestBots(t *testing.T) {
 	_, _, err = runCmd(t, 400, `{"error":{"code":"own_domain","message":"m"}}`, "bots", "block", "c1@a.example")
 	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "own_domain") {
 		t.Errorf("400: err=%v", err)
+	}
+}
+
+func TestPeersPurge(t *testing.T) {
+	const body = `{"rooms":1,"messages":2,"members":3,"follows":4,"claims":5,"cursors":6,"stand_ins":7}`
+	const counts = "peer b.example purged: 1 rooms, 2 messages, 3 memberships, 4 follows, 5 claims, 6 delivery cursors, 7 stand-ins revoked\n"
+	out, req, err := runCmdIn(t, "b.example\n", 200, body, "peers", "purge", "b.example")
+	if err != nil || !strings.HasPrefix(req, "POST /v1/federation/peers/b.example/purge ") || !strings.Contains(out, "type b.example again") ||
+		!strings.HasSuffix(out, counts) {
+		t.Errorf("confirmed: err=%v req=%q out=%q", err, req, out)
+	}
+	for _, typed := range []string{"c.example\n", "", "b.example.\n"} {
+		if _, req, err := runCmdIn(t, typed, 200, body, "peers", "purge", "b.example"); ExitCode(err) != 2 || req != "" {
+			t.Errorf("typed %q: err=%v req=%q", typed, err, req)
+		}
+	}
+	out, req, err = runCmd(t, 200, body, "peers", "purge", "b.example", "--yes")
+	if err != nil || !strings.HasPrefix(req, "POST /v1/federation/peers/b.example/purge ") || out != counts {
+		t.Errorf("--yes: err=%v req=%q out=%q", err, req, out)
+	}
+	_, _, err = runCmd(t, 409, `{"error":{"code":"peer_not_blocked","message":"m"}}`, "peers", "purge", "b.example", "--yes")
+	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "peer_not_blocked") {
+		t.Errorf("409: err=%v", err)
 	}
 }

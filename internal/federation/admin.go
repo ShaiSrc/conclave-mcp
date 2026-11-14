@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Delete("/peers/{domain}", s.handleRemovePeer)
 		r.Post("/peers/{domain}/ping", s.handlePingPeer)
 		r.Post("/peers/{domain}/retry", s.handleRetryPeer)
+		r.Post("/peers/{domain}/purge", s.handlePurgePeer)
 		r.Get("/blocked-bots", s.handleListBlocked)
 		r.Post("/blocked-bots", s.handleBlockBot)
 		r.Delete("/blocked-bots/{address}", s.handleUnblockBot)
@@ -312,7 +314,7 @@ func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleGetPeer(w http.ResponseWriter, r *http.Request) {
-	if domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain")); ok {
+	if domain, ok := s.peerDomain(w, r, pathParam(r, "domain")); ok {
 		s.writePeer(w, r, domain, http.StatusOK)
 	}
 }
@@ -322,7 +324,7 @@ func (s *Service) handleGetPeer(w http.ResponseWriter, r *http.Request) {
 // view.
 func (s *Service) handleRetryPeer(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain"))
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
 	if !ok {
 		return
 	}
@@ -348,6 +350,15 @@ func (s *Service) handleRetryPeer(w http.ResponseWriter, r *http.Request) {
 	s.DeliverSoon()
 	s.audit(ctx, "federation.delivery.retry", domain, "ok", fmt.Sprintf(`{"cursors":%d}`, n))
 	s.writePeer(w, r, domain, http.StatusOK)
+}
+
+// pathParam is r's path parameter key, decoded: the web UI encodes a
+// domain's port (%3A) and an address's @ (%40), and chi leaves a
+// parameter as the request spelled it. An invalid escape is "", which
+// the caller refuses as invalid.
+func pathParam(r *http.Request, key string) string {
+	v, _ := url.PathUnescape(chi.URLParam(r, key))
+	return v
 }
 
 // peerDomain returns the canonical form of raw, or answers 400 for an
@@ -433,7 +444,7 @@ func (s *Service) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleBlockPeer(w http.ResponseWriter, r *http.Request) {
-	domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain"))
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
 	if !ok {
 		return
 	}
@@ -451,7 +462,7 @@ func (s *Service) handleBlockPeer(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
-	domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain"))
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
 	if !ok {
 		return
 	}
@@ -471,8 +482,38 @@ func (s *Service) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handlePurgePeer deletes what a blocked peer left here (purgePeer) and
+// answers the counts: 404 for an unknown peer, 409 peer_not_blocked
+// unless it is blocked. Audit federation.peer.purge with the counts.
+func (s *Service) handlePurgePeer(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
+	if !ok {
+		return
+	}
+	if _, err := s.peers.Get(ctx, domain); errors.Is(err, ErrPeerNotFound) {
+		writeErr(w, r, http.StatusNotFound, "peer_not_found", "no such peer")
+		return
+	} else if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	n, err := s.purgePeer(ctx, domain)
+	switch {
+	case errors.Is(err, errNotBlocked):
+		writeErr(w, r, http.StatusConflict, "peer_not_blocked", err.Error())
+		return
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	detail, _ := json.Marshal(n)
+	s.audit(ctx, "federation.peer.purge", domain, "ok", string(detail))
+	writeJSON(w, http.StatusOK, n)
+}
+
 func (s *Service) handlePingPeer(w http.ResponseWriter, r *http.Request) {
-	domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain"))
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
 	if !ok {
 		return
 	}
@@ -587,7 +628,7 @@ func (s *Service) handleBlockBot(w http.ResponseWriter, r *http.Request) {
 // (unblockBot): its memberships and follows stay ended. 204, or 404 when
 // it is not blocked. Audit federation.bot.unblock.
 func (s *Service) handleUnblockBot(w http.ResponseWriter, r *http.Request) {
-	address, ok := s.botAddress(w, r, chi.URLParam(r, "address"))
+	address, ok := s.botAddress(w, r, pathParam(r, "address"))
 	if !ok {
 		return
 	}

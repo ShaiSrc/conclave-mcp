@@ -402,7 +402,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, name, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
 	ctx := r.Context()
-	key, err := fedrooms.StandIn(ctx, tx, other)
+	key, err := fedrooms.StandInVia(ctx, tx, other, origin)
 	if errors.Is(err, fedrooms.ErrStandInLimit) {
 		refuse(http.StatusConflict, "limit", err.Error())
 		return false
@@ -638,7 +638,7 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 	if err != nil {
 		return refused("member event: %v", err)
 	}
-	key, local, err := s.memberKey(ctx, tx, p.Address, true)
+	key, local, err := s.memberKey(ctx, tx, p.Address, host)
 	if err != nil {
 		return err
 	}
@@ -711,7 +711,7 @@ func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID, host stri
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return refused("member.remove event: bad payload")
 	}
-	key, local, err := s.memberKey(ctx, tx, p.Address, false)
+	key, local, err := s.memberKey(ctx, tx, p.Address, "")
 	if err != nil || key == 0 {
 		return err
 	}
@@ -759,23 +759,31 @@ func applyDelete(ctx context.Context, tx *sql.Tx, roomID string, payload json.Ra
 // memberKey returns the key that stands for address in a replica, and
 // whether it is a key of this server. An address of this server is our
 // own key: handle@, operator@ (the operator key) or key-<id>@. Any other
-// is its stand-in, created when create is set; a bot the operator
-// blocked is refused then, so it is never added again and its messages
-// are not taken. It returns 0 for an address without a key.
-func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, create bool) (id int64, local bool, err error) {
+// is its stand-in, created when via, the replica's host, is set, and
+// recorded as introduced by it; a bot the operator blocked, or whose
+// stand-in is revoked (a block or a purge of its server), is refused
+// then, so it is never added again and its messages are not taken. It
+// returns 0 for an address without a key.
+func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address, via string) (id int64, local bool, err error) {
 	name, domain, ok := strings.Cut(address, "@")
 	if !ok {
 		return 0, false, refused("invalid address %q", address)
 	}
 	if domain != s.id().Domain {
-		if create {
-			switch blocked, err := fedrooms.Blocked(ctx, tx, address); {
+		if via != "" {
+			var revoked bool
+			blocked, err := fedrooms.Blocked(ctx, tx, address)
+			if err == nil {
+				err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE label = ? AND remote_domain = ?
+					AND revoked_at IS NOT NULL)`, address, domain).Scan(&revoked)
+			}
+			switch {
 			case err != nil:
 				return 0, false, err
-			case blocked:
+			case blocked || revoked:
 				return 0, false, refused("%s is blocked", address)
 			}
-			if id, err = fedrooms.StandIn(ctx, tx, address); errors.Is(err, fedrooms.ErrAddress) {
+			if id, err = fedrooms.StandInVia(ctx, tx, address, via); errors.Is(err, fedrooms.ErrAddress) {
 				err = refused("%v", err)
 			}
 			return id, false, err
@@ -821,7 +829,7 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	author, _, err := s.memberKey(ctx, tx, p.Author, true)
+	author, _, err := s.memberKey(ctx, tx, p.Author, host)
 	if err != nil {
 		return err
 	}
@@ -1054,6 +1062,109 @@ func (s *Service) dropPeer(ctx context.Context, domain string) error {
 	return nil
 }
 
+// errNotBlocked is purgePeer's error for a peer that is not blocked.
+var errNotBlocked = errors.New("only a blocked peer is purged: block it first")
+
+// purgeCounts are what a purge ended: the peer's replicas deleted, its
+// bots' messages soft-deleted (its replicas' go with them), its
+// stand-ins' memberships, the follows from and to its bots, its
+// stand-ins' claims, its delivery cursors, and its stand-ins revoked.
+type purgeCounts struct {
+	Rooms    int64 `json:"rooms"`
+	Messages int64 `json:"messages"`
+	Members  int64 `json:"members"`
+	Follows  int64 `json:"follows"`
+	Claims   int64 `json:"claims"`
+	Cursors  int64 `json:"cursors"`
+	StandIns int64 `json:"stand_ins"`
+}
+
+// purgePeer deletes what domain, a blocked peer, left here, or returns
+// errNotBlocked. In one transaction its bots' messages are soft-deleted:
+// in rooms hosted here as a message delete does (fedrooms.LogDelete), so
+// the other member servers retract them, in other hosts' replicas here
+// only. Its stand-ins leave the replicas; their claims, the follows from
+// and to its bots, its delivery cursors, key history and limits are
+// deleted; its replicas are deleted with what depends on them (their
+// members, messages, claims and reads go by cascade; replicas have no
+// event log or cursors); its stand-ins are revoked, so no event brings
+// them back (memberKey). Then they leave the rooms hosted here with
+// member.remove events (leaveAll) and its limiters go. The peer stays
+// blocked.
+func (s *Service) purgePeer(ctx context.Context, domain string) (purgeCounts, error) {
+	var n purgeCounts
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return n, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var blocked bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM federation_peers WHERE domain = ? AND status = 'blocked')`,
+		domain).Scan(&blocked); err != nil || !blocked {
+		return n, cmp.Or(err, errNotBlocked)
+	}
+	const standIns = `(SELECT id FROM api_keys WHERE remote_domain = ?1)`
+	type message struct {
+		room string
+		id   int64
+	}
+	var hosted []message
+	rows, err := tx.QueryContext(ctx, `SELECT m.room_id, m.id FROM messages m JOIN rooms r ON r.id = m.room_id
+		WHERE r.home_domain IS NULL AND m.deleted_at IS NULL AND m.author_key_id IN `+standIns, domain)
+	for err == nil && rows.Next() {
+		var m message
+		if err = rows.Scan(&m.room, &m.id); err == nil {
+			hosted = append(hosted, m)
+		}
+	}
+	if rows != nil {
+		if err == nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+	}
+	exec := func(dst *int64, q string, args ...any) {
+		var res sql.Result
+		if err == nil {
+			res, err = tx.ExecContext(ctx, q, args...)
+		}
+		if err == nil && dst != nil {
+			var k int64
+			k, err = res.RowsAffected()
+			*dst += k
+		}
+	}
+	now := storage.FormatTS(s.now())
+	exec(&n.Messages, `UPDATE messages SET deleted_at = ?2 WHERE deleted_at IS NULL AND author_key_id IN `+standIns+`
+		AND room_id NOT IN (SELECT id FROM rooms WHERE home_domain = ?1)`, domain, now)
+	for _, m := range hosted {
+		if err == nil {
+			err = fedrooms.LogDelete(ctx, tx, m.room, m.id)
+		}
+	}
+	exec(&n.Members, `DELETE FROM room_members WHERE key_id IN `+standIns+`
+		AND room_id IN (SELECT id FROM rooms WHERE home_domain IS NOT NULL)`, domain)
+	exec(&n.Claims, `DELETE FROM claims WHERE key_id IN `+standIns, domain)
+	exec(&n.Follows, `DELETE FROM follows WHERE follower_key_id IN `+standIns+`
+		OR target_key_id IS NULL AND substr(target, instr(target, '@') + 1) = ?1`, domain)
+	exec(&n.Cursors, `DELETE FROM fed_delivery WHERE peer = ?1`, domain)
+	exec(nil, `DELETE FROM federation_peer_keys WHERE domain = ?1`, domain)
+	exec(nil, `DELETE FROM federation_peer_limits WHERE domain = ?1`, domain)
+	exec(&n.Rooms, `DELETE FROM rooms WHERE home_domain = ?1`, domain)
+	exec(&n.StandIns, `UPDATE api_keys SET revoked_at = ?2 WHERE remote_domain = ?1 AND revoked_at IS NULL`, domain, now)
+	if err == nil {
+		err = tx.Commit()
+	}
+	var left int
+	if err == nil {
+		left, err = s.leaveAll(ctx, `k.remote_domain = ?`, domain)
+		n.Members += int64(left)
+	}
+	s.dropLimiters(domain)
+	s.DeliverSoon()
+	return n, err
+}
+
 // leaveAll takes the stand-ins that cond picks (on their key k, with
 // arg) out of every room hosted here (leaveHosted), and returns how many
 // memberships ended.
@@ -1206,7 +1317,8 @@ func (s *Service) blockBot(ctx context.Context, address, note string, actor int6
 }
 
 // unblockBot lifts the block of address: its row goes and its stand-in
-// is no longer revoked. It reports whether address was blocked.
+// is no longer revoked, unless its server is a blocked peer. It reports
+// whether address was blocked.
 func (s *Service) unblockBot(ctx context.Context, address string) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -1221,7 +1333,8 @@ func (s *Service) unblockBot(ctx context.Context, address string) (bool, error) 
 	if err != nil || n == 0 {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE label = ? AND remote_domain IS NOT NULL`, address); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE label = ? AND remote_domain IS NOT NULL
+		AND remote_domain NOT IN (SELECT domain FROM federation_peers WHERE status = 'blocked')`, address); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()
