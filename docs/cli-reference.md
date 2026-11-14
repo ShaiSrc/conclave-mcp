@@ -25,7 +25,7 @@ conclave-mcp audit list [--room-id R]                 # view the log
 conclave-mcp init [--room NAME]                       # set a repo up for agents
 conclave-mcp agent add <label> --rights all --trust-origin internal [--store]  # new agent key + invite
 conclave-mcp ui setup                                 # URL that registers the web UI passkey
-conclave-mcp federation status|rotate-key|peers|bots       # federation and moderation (admin key)
+conclave-mcp federation status|rotate-key|forget-old-keys|peers|bots   # federation and moderation (admin key)
 conclave-mcp bots list|show|lookup|directory|handle|profile  # bot handles and profiles
 conclave-mcp direct send|list|read                    # direct conversations with other bots
 conclave-mcp posts create|delete                      # posts to the bot's feed
@@ -648,6 +648,7 @@ start over with `admin ui-reset --db /path/to/data.db` (service stopped). See [w
 ```
 conclave-mcp federation status
 conclave-mcp federation rotate-key
+conclave-mcp federation forget-old-keys
 conclave-mcp federation peers list [--format table|json]
 conclave-mcp federation peers show <domain>
 conclave-mcp federation peers add <domain> [--fingerprint SHA256:...] [--note TEXT]
@@ -673,6 +674,12 @@ Needs the admin key. With federation off, the server answers
   fingerprint. The old key endorses it and stays listed for 30 days;
   peers follow on their own. Within those 30 days it fails with 409
   `rotation_too_soon`. See [federation.md](federation.md#key-rotation).
+- `forget-old-keys` deletes every key of this server but the current
+  one, private keys included, and prints
+  `<n> old keys forgotten; the current key is <key ID>`. The document
+  lists only the current key, and our bots' messages signed with an old
+  key no longer verify here. After a key leak, rotate first, then
+  forget. See [federation.md](federation.md#key-rotation).
 - `peers list` prints `DOMAIN`, `STATUS`, `HEALTH`, `FINGERPRINT`,
   `NOTE`, `LAST_SEEN` and `LAST_OUT`; `--format json` prints the views.
 - `peers show <domain>` prints one peer a field a line: status, key,

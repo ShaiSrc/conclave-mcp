@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -10,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"strings"
 	"sync"
@@ -826,4 +828,79 @@ func TestReplicaEvents_AuthorRepinNoEvidence(t *testing.T) {
 			t.Errorf("%s: the host's re-pin budget has %v left", tc.name, lims.repins.Tokens())
 		}
 	}
+}
+
+// Forgetting our old keys deletes them, their private keys included,
+// from the database files: the document lists only the current key, our
+// bots' messages signed with an old key no longer verify, and a restart
+// loads only the current key.
+func TestForgetOldKeys(t *testing.T) {
+	g, h, room, _ := replica(t, "read", "answer")
+	old := g.svc.id()
+	wantStatus(t, adminDo(g.svc, admin, http.MethodPost, "/v1/federation/keys/rotate", ""), http.StatusOK)
+	cur := g.svc.id()
+
+	rec := adminDo(g.svc, admin, http.MethodDelete, "/v1/federation/keys/previous", "")
+	var out struct {
+		KeyID   string   `json:"key_id"`
+		Dropped int      `json:"dropped"`
+		Keys    []DocKey `json:"keys"`
+	}
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.KeyID != cur.KeyID || out.Dropped != 1 ||
+		len(out.Keys) != 1 || out.Keys[0].KeyID != cur.KeyID {
+		t.Fatalf("forget: %d %s", rec.Code, rec.Body)
+	}
+	if doc := docOf(t, g.svc); len(doc.Keys) != 1 || doc.Keys[0].KeyID != cur.KeyID || doc.Keys[0].EndorsedBy == nil {
+		t.Errorf("document: %+v", doc.Keys)
+	}
+	var targetType, targetID, detail string
+	if err := g.db.QueryRow(`SELECT target_type, target_id, detail FROM audit WHERE action = 'federation.key.forget'`).
+		Scan(&targetType, &targetID, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf(`{"dropped":1,"key_ids":[%q]}`, old.KeyID); targetType != "federation_key" || targetID != cur.KeyID || detail != want {
+		t.Errorf("audit %s %s %s, want %s", targetType, targetID, detail, want)
+	}
+
+	for i, tc := range []struct {
+		name   string
+		signer *Identity
+		stored bool
+	}{{"old key", old, false}, {"current key", cur, true}} {
+		seq, id := int64(i+1), int64(100+i)
+		if got := h.push(t, g, room, msg(seq, id, room, h.id.Domain, "b1@"+local, tc.name, nil, "", tc.signer)); got != seq {
+			t.Fatalf("%s: applied %d", tc.name, got)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND remote_id = ?`, room, id); (n == 1) != tc.stored {
+			t.Errorf("%s: stored %d", tc.name, n)
+		}
+	}
+
+	again, err := New(g.db, Options{Domain: local, Mode: "allowlist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.id().KeyID != cur.KeyID || len(again.id().keys) != 1 {
+		t.Errorf("after a restart: key %s, %d keys", again.id().KeyID, len(again.id().keys))
+	}
+
+	var file string
+	if err := g.db.QueryRow(`SELECT file FROM pragma_database_list WHERE name = 'main'`).Scan(&file); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{file, file + "-wal"} {
+		b, err := os.ReadFile(f)
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if bytes.Contains(b, old.private.Seed()) {
+			t.Errorf("%s still holds the old private key", f)
+		}
+	}
+
+	rec = adminDo(g.svc, admin, http.MethodDelete, "/v1/federation/keys/previous", "")
+	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Dropped != 0 {
+		t.Errorf("forget again: %d %s", rec.Code, rec.Body)
+	}
+	wantStatus(t, adminDo(g.svc, nil, http.MethodDelete, "/v1/federation/keys/previous", ""), http.StatusForbidden)
 }

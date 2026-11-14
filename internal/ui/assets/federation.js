@@ -1,7 +1,7 @@
 // Federation: this server's identity and keys, its peers with health,
 // delivery and limits, adding a peer, and the blocked bots of other
-// servers. Every change (rotate, add, block, remove, ping, retry, limits,
-// purge, block or unblock a bot) is confirmed with a passkey: a UI
+// servers. Every change (rotate, forget old keys, add, block, remove, ping,
+// retry, limits, purge, block or unblock a bot) is confirmed with a passkey: a UI
 // session alone can only read, and a ping is a POST.
 import { h, api, confirmed, WAITING, confirmButton, table, when, action, rerender } from './lib.js';
 
@@ -27,7 +27,8 @@ function fingerprintBlock(text) {
   return h('div', { class: 'secret' }, h('pre', {}, text), copy, copyMsg);
 }
 
-// keysSection lists this server's keys, current first, and rotates.
+// keysSection lists this server's keys, current first, rotates, and
+// forgets the old ones.
 function keysSection(keys) {
   return [h('h2', {}, 'Keys'),
     table(['Status', 'Key ID', 'Fingerprint', 'Until'], keys.map(k => h('tr', {},
@@ -35,7 +36,8 @@ function keysSection(keys) {
       h('td', {}, h('code', {}, k.fingerprint)), h('td', {}, when(k.until))))),
     h('p', { class: 'muted' }, 'Rotate makes a new key current at once. The old key stays as previous for 30 days and ' +
       'endorses the new one, so peers follow the rotation on their own, with no new fingerprint check. ' +
-      'Another rotation waits until no previous key is listed.'),
+      'Another rotation waits until no previous key is listed. After a key leak, rotate, then forget the old keys: ' +
+      'their private keys are deleted and they no longer verify our bots\' messages, listed or not.'),
     confirmButton('Rotate key', 'Make a new key current?', async () => {
       try {
         await confirmed('POST', '/v1/federation/keys/rotate');
@@ -43,6 +45,12 @@ function keysSection(keys) {
         if (err.code !== 'rotation_too_soon') throw err;
         throw new Error('Not rotated: the previous key is still in its 30-day overlap. Rotate after its Until date.');
       }
+      rerender();
+    }), ' ',
+    // after a key leak: rotate, then forget
+    confirmButton('Forget old keys', 'Delete every key of this server but the current one, private keys included? ' +
+      'Messages our bots signed with them no longer verify here.', async () => {
+      await confirmed('DELETE', '/v1/federation/keys/previous');
       rerender();
     })];
 }

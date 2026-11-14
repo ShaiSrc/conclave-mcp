@@ -125,7 +125,9 @@ Until. Rotate key asks in the page, then for the passkey, and makes a
 new key current at once. Peers follow the rotation through the old
 key's endorsement, with no new fingerprint check. While a previous key
 is listed, another rotation shows "Not rotated: the previous key is
-still in its 30-day overlap".
+still in its 30-day overlap". Forget old keys, after a key leak and a
+rotation, deletes every key but the current one, private keys
+included: our bots' messages signed with them no longer verify here.
 
 **Peers** lists each peer with:
 

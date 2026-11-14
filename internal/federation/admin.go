@@ -36,6 +36,7 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Use(adminOnly)
 		r.Get("/", s.handleStatus)
 		r.Post("/keys/rotate", s.handleRotateKey)
+		r.Delete("/keys/previous", s.handleForgetOwnKeys)
 		r.Get("/peers", s.handleListPeers)
 		r.Get("/lookup", s.handleLookup)
 		r.Post("/peers", s.handleAddPeer)
@@ -282,6 +283,8 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleRotateKey makes a new key current (Rotate) and answers it.
 func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
 	prev := s.id()
 	id, err := Rotate(r.Context(), s.db, prev, s.now())
 	switch {
@@ -299,6 +302,28 @@ func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	}{prev.Fingerprint(), id.Fingerprint()})
 	s.auditTarget(r.Context(), "federation.key.rotate", "federation_key", id.KeyID, "", "ok", string(detail))
 	writeJSON(w, http.StatusOK, map[string]any{"key_id": id.KeyID, "fingerprint": id.Fingerprint(), "keys": id.Document(s.now()).Keys})
+}
+
+// handleForgetOwnKeys deletes this server's keys other than the current
+// one, private keys included (ForgetOldKeys): after a key leak, the
+// operator rotates and then forgets. It answers the keys now and how
+// many were dropped; audit federation.key.forget.
+func (s *Service) handleForgetOwnKeys(w http.ResponseWriter, r *http.Request) {
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
+	id, dropped, err := ForgetOldKeys(r.Context(), s.db, s.id())
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	s.ident.Store(id)
+	detail, _ := json.Marshal(struct {
+		Dropped int      `json:"dropped"`
+		KeyIDs  []string `json:"key_ids"`
+	}{len(dropped), append([]string{}, dropped...)})
+	s.auditTarget(r.Context(), "federation.key.forget", "federation_key", id.KeyID, "", "ok", string(detail))
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": id.KeyID, "fingerprint": id.Fingerprint(),
+		"keys": id.Document(s.now()).Keys, "dropped": len(dropped)})
 }
 
 func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {

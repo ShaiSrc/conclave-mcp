@@ -157,6 +157,72 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 	return next, nil
 }
 
+// ForgetOldKeys deletes every key in db but id's current one, private
+// keys included, and returns the identity without them and the key IDs
+// deleted: the document no longer lists them, and our bots' author
+// signatures made with them no longer verify. The current key keeps its
+// endorsement, so a peer still pinned to the key before it follows it.
+//
+// The whole table is cleared and the current key written back, with
+// secure_delete on: SQLite then zeroes the table's pages, where an
+// update or delete would leave old copies of a row in free space, and a
+// checkpoint moves the zeroed pages into the database file and empties
+// the write-ahead log. Backups made before keep the keys.
+func ForgetOldKeys(ctx context.Context, db *sql.DB, id *Identity) (*Identity, []string, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA secure_delete = ON`); err != nil {
+		return nil, nil, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA secure_delete = OFF`) }()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var dropped []string
+	rows, err := tx.QueryContext(ctx, `SELECT key_id FROM federation_keys WHERE key_id != ? ORDER BY created_at DESC, rowid DESC`, id.KeyID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			_ = rows.Close()
+			return nil, nil, err
+		}
+		dropped = append(dropped, k)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, err
+	}
+	var pub, priv []byte
+	var created string
+	var endorsement sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT public_key, private_key, created_at, endorsement FROM federation_keys
+		WHERE key_id = ? AND retired_at IS NULL`, id.KeyID).Scan(&pub, &priv, &created, &endorsement); err != nil {
+		return nil, nil, fmt.Errorf("load the current federation key: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM federation_keys`); err != nil {
+		return nil, nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO federation_keys(key_id, public_key, private_key, created_at, endorsement)
+		VALUES (?, ?, ?, ?, ?)`, id.KeyID, pub, priv, created, endorsement); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	// Best effort: a checkpoint blocked by readers leaves it to a later one.
+	_, _ = conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`)
+	next := *id
+	next.keys = slices.DeleteFunc(slices.Clone(id.keys), func(k ownKey) bool { return k.keyID != id.KeyID })
+	return &next, dropped, nil
+}
+
 // EndorsementString is what a server's previous key signs for the key
 // that replaces it: the lines conclave-key-v1, the domain, the previous
 // key's ID, the new key's ID and the new public key (unpadded
