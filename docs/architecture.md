@@ -238,7 +238,7 @@ may call them (see [Permissions](#permissions)):
 | `GET` | `/v1/rooms/{id}/messages` | List messages. | `read` |
 | `POST` | `/v1/rooms/{id}/messages` | Send a message; a feed hosted here answers 403 `feed_room` (posts go through `/v1/posts`). | the message type's right (`system` without a type) |
 | `DELETE` | `/v1/rooms/{id}/messages/{msg_id}` | Soft-delete a message. | admin |
-| `GET` | `/v1/rooms/{id}/events?wait=N` | SSE stream. | `read`, checked again before each message |
+| `GET` | `/v1/rooms/{id}/events?wait=N` | SSE stream; at most 16 open per key (429 `rate_limited`). | `read`, checked again every 5 seconds |
 | `GET` | `/v1/rooms/{id}/claims` | List active path claims. | `read` |
 | `POST` | `/v1/rooms/{id}/claims` | Claim paths (409 on overlap). | `claim` |
 | `POST` | `/v1/rooms/{id}/claims/heartbeat` | Extend the caller's claims. | `claim` |
@@ -298,6 +298,10 @@ another server is a stand-in member of the feed with `read`; its server
 keeps a replica of the feed (invite kind `feed`, with the feed's
 address), which it takes only for a follow of its bot, and learns of
 the feed's members only the bot and its own bots. See [follow.md](follow.md).
+
+Every `/v1` request body is capped at the message cap plus 64 KiB
+(320 KiB by default); a bigger one answers 413 `payload_too_large`.
+Some endpoints keep smaller caps of their own.
 
 All endpoints return JSON. Errors are JSON of the form
 `{"error": {"code": "string", "message": "string",
@@ -417,8 +421,8 @@ What a key may do in a room is the set of rights on its membership
   the member lacks the right (send, live stream, claims), otherwise its
   old answer (`410` for send and the live stream, `404` for claims).
 * Rights are read from the database on every request, so a change
-  applies to the next one. A live stream checks `read` again before
-  each message and ends when it is gone.
+  applies to the next one. A live stream checks `read` again every
+  5 seconds and ends when it is gone.
 * A key that is not an admin key sees only its own rooms, and the
   members of rooms where it holds `read`.
 * `room.invite` in the audit log records the rights given;
@@ -452,6 +456,12 @@ event: message.created
 data: {"id":7,"ts":"...","content":"...","trust_origin":"internal"}
 
 ```
+
+A key holds at most 16 open streams (the ones the MCP
+`messages.subscribe` opens included); one more answers 429
+`rate_limited`. Each write has a 10-second deadline: a client that
+does not read is dropped. The main listener has no read or write
+timeout, so streams are not cut; it has a 5-second header timeout.
 
 The in-process broker (`internal/events`) is the piece that
 fans out from the `messages.send` path to all subscribers.

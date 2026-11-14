@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -131,6 +132,59 @@ func TestBackup(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "nope")); !os.IsNotExist(err) {
 		t.Errorf("missing database made its directory: %v", err)
+	}
+}
+
+// The copy appears under its name only when it is complete, with mode
+// 0600: there is never an empty or half-written file at the target that
+// another local user could swap for one of their own. No temporary
+// directory is left behind.
+func TestBackup_AppearsComplete(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "data", "data.db")
+	db, closeDB, err := storage.Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Migrate(context.Background(), db, migrations.FS(), nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 32; i++ { // 32 MiB, so the copy takes a while
+		if _, err := db.Exec(`INSERT INTO meta(key, value) VALUES (?, hex(randomblob(512 * 1024)))`, fmt.Sprintf("pad%d", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := closeDB(); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(dir, "backup.db")
+	done := make(chan error, 1)
+	go func() { _, err := runRoot(t, "backup", "--db", dbPath, dest); done <- err }()
+	var seen []os.FileInfo
+	for running := true; running; {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("backup: %v", err)
+			}
+			running = false
+		default:
+		}
+		if fi, err := os.Lstat(dest); err == nil {
+			seen = append(seen, fi)
+		}
+	}
+	final, err := os.Stat(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fi := range seen {
+		if fi.Size() != final.Size() || fi.Mode() != 0o600 {
+			t.Fatalf("target seen while the copy ran: size %d of %d, mode %v", fi.Size(), final.Size(), fi.Mode())
+		}
+	}
+	if entries, _ := os.ReadDir(dir); len(entries) != 2 { // data/ and backup.db
+		t.Errorf("files next to the backup: %v", entries)
 	}
 }
 
