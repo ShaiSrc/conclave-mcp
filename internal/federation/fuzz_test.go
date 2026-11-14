@@ -299,10 +299,16 @@ func newFuzzRig(tb testing.TB) *fuzzRig {
 	}
 	rg.hosted = g.room(tb, "hosted")
 	g.invite(tb, rg.hosted, "m1@"+peerDomain, "read,answer,claim")
+	rg.join(tb)
+	return rg
+}
+
+// join invites b1 into the replica: it is active again, with b1 in it.
+func (rg *fuzzRig) join(tb testing.TB) {
+	tb.Helper()
 	if rec := rg.send(tb, "/fed/v1/rooms/"+rg.replica+"/invite", []byte(`{"name":"proj","handle":"b1","rights":["read","answer"]}`)); rec.Code != http.StatusCreated {
 		tb.Fatalf("replica invite: %d %s", rec.Code, rec.Body)
 	}
-	return rg
 }
 
 // send is a POST of body to path, signed by the peer.
@@ -386,8 +392,10 @@ func FuzzInbound(f *testing.F) {
 }
 
 // FuzzApplyEvents pushes two events of any type and payload to the
-// replica, numbered on from what it applied: each is applied or
-// refused, never a 5xx, and the replica moves past both.
+// replica, active with b1 in it (an input may archive it or remove b1),
+// numbered on from what it applied: each is applied or refused, never a
+// 5xx, and the replica moves past both. A push over what the replica
+// reads is 413.
 func FuzzApplyEvents(f *testing.F) {
 	rg := newFuzzRig(f)
 	msg := func(id int64, author, extra string) []byte {
@@ -407,6 +415,7 @@ func FuzzApplyEvents(f *testing.F) {
 		if !json.Valid(payload1) || !json.Valid(payload2) {
 			return // the body would not decode: FuzzInbound covers that
 		}
+		rg.join(t)
 		var applied int64
 		if err := rg.g.db.QueryRow(`SELECT applied_seq FROM rooms WHERE id = ?`, rg.replica).Scan(&applied); err != nil {
 			t.Fatal(err)
@@ -414,6 +423,12 @@ func FuzzApplyEvents(f *testing.F) {
 		body := rawJSON(map[string]any{"events": []fedrooms.Event{{Seq: applied + 1, Type: type1, Payload: payload1},
 			{Seq: applied + 2, Type: type2, Payload: payload2}}})
 		rec := rg.send(t, "/fed/v1/rooms/"+rg.replica+"/events", body)
+		if len(body) > rg.g.svc.eventsLimit() {
+			if rec.Code != http.StatusRequestEntityTooLarge {
+				t.Fatalf("a push of %d bytes: %d, want 413", len(body), rec.Code)
+			}
+			return
+		}
 		var out struct{ Applied int64 }
 		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Applied != applied+2 {
 			t.Fatalf("%s: %d %s, want 200 applied %d", body, rec.Code, rec.Body, applied+2)
@@ -455,6 +470,7 @@ func FuzzPeerAnswers(f *testing.F) {
 		f.Fatal(err)
 	}
 	svc.keyLimiters[g.admin.KeyID] = rate.NewLimiter(rate.Inf, 0) // remote lookups
+	svc.peerLookups[peerDomain] = rate.NewLimiter(rate.Inf, 0)    // and to the peer
 	api := chi.NewRouter()
 	api.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
