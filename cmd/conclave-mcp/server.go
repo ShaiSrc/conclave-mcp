@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -27,7 +28,9 @@ func newBackupCmd() *cobra.Command {
 		Long: `backup writes a consistent copy of the database with VACUUM INTO,
 over a read-only connection, while the server keeps running. It refuses
 an existing file and writes the copy with mode 0600: it holds the
-server's private federation key and every key hash.
+server's private federation key and every key hash. The copy is made in
+a private temporary directory next to the file and linked into place
+when complete, so the directory must allow hard links.
 
 It finds the database as serve does: --db, then CONCLAVE_DB_PATH, then
 ./.conclave-mcp/data.db.`,
@@ -51,24 +54,29 @@ func runBackup(cmd *cobra.Command, dbPath, dest string) error {
 	if _, err := os.Stat(dbPath); err != nil {
 		return &exitCodeError{Code: 1, Err: fmt.Errorf("database: %w", err)}
 	}
-	// O_EXCL refuses an existing file and creates ours with mode 0600 from
-	// the start; VACUUM INTO accepts an empty file.
-	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return &exitCodeError{Code: 2, Err: fmt.Errorf("%s exists: name a new file", dest)}
+	exists := &exitCodeError{Code: 2, Err: fmt.Errorf("%s exists: name a new file", dest)}
+	if _, err := os.Lstat(dest); err == nil { // early, before a long copy; the link below decides
+		return exists
 	}
+	// The copy is written in a fresh directory only we can enter (0700)
+	// next to dest, and linked to dest once complete: no other local user
+	// can swap the file while SQLite writes it by name, and dest never
+	// names an empty or half-written file. Link refuses an existing dest.
+	tmp, err := os.MkdirTemp(filepath.Dir(dest), ".conclave-backup-")
 	if err != nil {
-		return &exitCodeError{Code: 1, Err: err}
+		return &exitCodeError{Code: 1, Err: fmt.Errorf("backup: %w", err)}
 	}
-	err = f.Chmod(0o600) // the umask may have narrowed it
-	if cerr := f.Close(); err == nil {
-		err = cerr
+	defer os.RemoveAll(tmp)
+	file := filepath.Join(tmp, "backup.db")
+	if err := vacuumInto(cmd, dbPath, file); err != nil {
+		return &exitCodeError{Code: 1, Err: fmt.Errorf("backup: %w", err)}
 	}
-	if err == nil {
-		err = vacuumInto(cmd, dbPath, dest)
+	if err := os.Chmod(file, 0o600); err != nil {
+		return &exitCodeError{Code: 1, Err: fmt.Errorf("backup: %w", err)}
 	}
-	if err != nil {
-		_ = os.Remove(dest) // ours: created above
+	if err := os.Link(file, dest); errors.Is(err, fs.ErrExist) {
+		return exists
+	} else if err != nil {
 		return &exitCodeError{Code: 1, Err: fmt.Errorf("backup: %w", err)}
 	}
 	fi, err := os.Stat(dest)

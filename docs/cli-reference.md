@@ -187,7 +187,10 @@ runs as. Prints the path and size of the copy.
 The target must not exist: an existing file is refused with exit code 2
 and left alone. The copy is written with mode `0600`: it holds the
 server's private federation key and every key hash, so keep it as safe
-as the data directory. There is no backup endpoint, MCP tool or web UI
+as the data directory, in a directory other users cannot write to. It
+is made in a private temporary directory next to the target and linked
+into place once complete, so the target never names a half-written
+file; the target's file system must support hard links. There is no backup endpoint, MCP tool or web UI
 button, on purpose. To restore, stop the server, delete the database's
 `-wal` and `-shm` files, put the copy in place of the database file
 (owned by the server's user) and start the server; see
