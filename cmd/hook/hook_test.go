@@ -71,6 +71,9 @@ func (f *fake) direct(w http.ResponseWriter, r *http.Request, room string) {
 				for _, m := range out {
 					if m.Author != 1 {
 						cv.Unread = max(cv.Unread-1, 0)
+						if agent.Actionable(m) {
+							cv.Actionable = max(cv.Actionable-1, 0)
+						}
 					}
 				}
 				cv.LastReadAt = out[len(out)-1].TS

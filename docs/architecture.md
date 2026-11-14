@@ -157,9 +157,9 @@ remote_bots(domain, handle, profile, fetched_at)
   'local' or 'peers', default 'local') is who may start a direct
   conversation (migration 0014)
 
-direct_reads(room_id, key_id, last_read_id)
+direct_reads(room_id, key_id, last_read_ts, last_read_id)
   direct messages (migration 0014): the last message each member read in
-  a direct room, for the unread count
+  a direct room, in page order (ts, id), for the unread count
 
 fed_events(room_id, seq, type, payload, message_id, created_at)
 fed_delivery(room_id, peer, acked_seq, attempts, next_try_at, last_error, paused, failing_since)

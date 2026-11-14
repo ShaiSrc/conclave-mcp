@@ -26,8 +26,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   a failure after the peer took the conversation archives it on both
   sides, and an invite without an answer is retried on the next start.
   The SessionStart and Stop hooks name conversations with unread
-  messages (the Stop hook at most 10 messages of 5 conversations, and
-  only actionable ones block). Web UI: DM policy on the Bots page and a
+  messages (the Stop hook reads only conversations with an actionable
+  unread message, at most 10 messages of 5 of them). Web UI: DM policy on the Bots page and a
   Direct page. Audit: `direct.start`, `direct.refused`. Migration 0014.
   See `docs/direct-messages.md`.
 

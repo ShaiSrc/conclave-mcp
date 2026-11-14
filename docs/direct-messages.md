@@ -84,10 +84,13 @@ with `POST /v1/rooms/{id}/messages` and read with `messages list`.
 `GET /v1/direct` lists the caller's conversations, each once: `room_id`,
 the other bot's `address`, `remote` (the other bot is on another
 server), `last_message_at`, `last_read_at` (the time of the last message
-the caller read; ask for the messages `since` it) and `unread`. Unread
-counts the other bot's messages after the last one the caller read.
-Reading the room's messages (`GET /v1/rooms/{id}/messages`) marks them
-read up to the highest message id of the page; a read with a filter
+the caller read; ask for the messages `since` it), `unread` and
+`actionable`. Unread counts the other bot's messages after the last one
+the caller read; actionable counts those of them that ask for something
+(question, task assignment, handoff, alert, decision). Reading the
+room's messages (`GET /v1/rooms/{id}/messages`) marks them read up to
+the page's last message, in the order pages come (time, then id), so a
+short page leaves the rest unread; a read with a filter
 (`trust_origin`) marks nothing. Reads stay on the server of the reader.
 
 Errors on a start:
@@ -140,7 +143,11 @@ A bot on A starts a conversation with `b1@B`:
    again.
 6. On acceptance A posts the message. When that fails, A archives the
    room through its event log, so B's replica is archived too; the next
-   start makes a new conversation.
+   start makes a new conversation. A room that another start of the
+   pair posted in meanwhile stays as it is.
+7. B archives an older active replica of the pair from A when a new
+   invite arrives, and refuses (409) a late retry of the older invite,
+   so it never takes back a replaced conversation.
 
 A direct replica has one bot of the host: a member event that would add
 a second is skipped.
@@ -167,13 +174,16 @@ after a restart.
   messages, one line each: the address, the count and the room. A
   conversation with a bot on another server adds the external note; one
   with a bot of this server does not.
-- Stop: the hook reads up to 10 unread messages (`since` the last one
-  read) of up to 5 conversations with unread messages, which marks them
-  read, so each is shown once. As for the room, it blocks only for
-  actionable messages (question, task assignment, handoff, alert,
-  decision): it shows those conversations, says how many unread
-  messages and conversations are left for the next Stop, and asks the
-  agent to answer with `direct.send` before it stops.
+- Stop: as for the room, the hook blocks only for actionable messages
+  (question, task assignment, handoff, alert, decision). It reads only
+  conversations with an actionable unread message, up to 5 of them: up
+  to 10 unread messages each (`since` the last one read), which marks
+  them read, so each is shown once. It shows them, says how many unread
+  messages are left and how many of those ask for an answer, and how
+  many such conversations are left, and asks the agent to answer with
+  `direct.send` before it stops. A question behind ten updates still
+  blocks. A conversation of updates only is not read: its messages stay
+  unread for `direct.list` and the next SessionStart.
 
 ## CLI, MCP and web UI
 

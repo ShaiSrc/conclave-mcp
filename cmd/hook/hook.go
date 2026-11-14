@@ -461,9 +461,11 @@ const (
 // directNews renders the unread messages of the agent's direct
 // conversations that hold an actionable one ("" if none), as the room
 // path does: up to directMsgs after the last one read, of up to
-// directConvs conversations, saying how many are left. Reading a direct
-// room marks what it read on the server, so each message is shown once,
-// and the next Stop goes on after it. Best effort.
+// directConvs conversations, saying how many are left and how many of
+// those ask for something. Reading a direct room marks what it read on
+// the server, so each message is shown once and the next Stop goes on
+// after it; a conversation without an actionable unread message is not
+// read, so its messages stay unread. Best effort.
 func (h *Hook) directNews(ctx context.Context, st *agent.State) string {
 	convs, err := agent.ListDirect(ctx, h.C)
 	if err != nil || agent.EnsureSelf(ctx, h.C, st) != nil {
@@ -473,7 +475,7 @@ func (h *Hook) directNews(ctx context.Context, st *agent.State) string {
 	read, left := 0, 0
 	for _, cv := range convs {
 		switch {
-		case cv.Unread <= 0:
+		case cv.Actionable <= 0:
 			continue
 		case read == directConvs:
 			left++
@@ -485,17 +487,24 @@ func (h *Hook) directNews(ctx context.Context, st *agent.State) string {
 			continue
 		}
 		msgs := slices.DeleteFunc(page, func(m agent.Msg) bool { return m.Author == st.SelfID })
-		if !slices.ContainsFunc(msgs, agent.Actionable) {
+		if len(msgs) == 0 {
 			continue
 		}
 		room := agent.LoadRoom(ctx, h.C, cv.RoomID, "direct with "+cv.Address+" (room_id "+cv.RoomID+")")
 		b.WriteString(agent.Format(room, msgs))
-		if more := cv.Unread - len(msgs); more > 0 {
-			fmt.Fprintf(&b, "(%d more unread in this conversation: read them with messages.list on room %s.)\n", more, agent.OneLine(cv.RoomID))
+		more, asking := cv.Unread-len(msgs), cv.Actionable
+		for _, m := range msgs {
+			if agent.Actionable(m) {
+				asking--
+			}
+		}
+		if more > 0 {
+			fmt.Fprintf(&b, "(%d more unread in this conversation, %d of them asking for an answer: read them with messages.list on room %s.)\n",
+				more, max(asking, 0), agent.OneLine(cv.RoomID))
 		}
 	}
 	if b.Len() > 0 && left > 0 {
-		fmt.Fprintf(&b, "(%d more direct conversations with unread messages: see direct.list.)\n", left)
+		fmt.Fprintf(&b, "(%d more direct conversations with messages asking for an answer: see direct.list.)\n", left)
 	}
 	return b.String()
 }

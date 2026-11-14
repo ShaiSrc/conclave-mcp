@@ -52,7 +52,8 @@ func TestDirect_AcrossServers(t *testing.T) {
 		t.Fatalf("start: %d %s", r.Status, r.Body)
 	}
 	var convs []dmConv
-	waitFor(t, "the conversation on B", func() bool { convs = b.dmList(b1); return len(convs) == 1 })
+	// Unread 1 means the message is stored on B, not only the invite taken.
+	waitFor(t, "the message on B", func() bool { convs = b.dmList(b1); return len(convs) == 1 && convs[0].Unread == 1 })
 	if convs[0].RoomID != started.RoomID || convs[0].Address != "a1@"+a.domain || convs[0].Unread != 1 {
 		t.Fatalf("b1's conversations: %+v", convs)
 	}

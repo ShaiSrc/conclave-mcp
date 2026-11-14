@@ -311,7 +311,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 // our bot keyID, and archives an older active replica of the pair from
 // the origin, before the replica is named: it held the name. A replica
 // with another member, of ours or of the origin, is a 409: a host
-// cannot put a second bot of ours into a conversation. On an error it
+// cannot put a second bot of ours into a conversation. So is a replica
+// that a newer one of the pair replaced: a late retry of its invite
+// neither brings it back nor archives the newer one. On an error it
 // answers and returns false.
 func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
@@ -321,13 +323,24 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 		refuse(http.StatusConflict, "limit", err.Error())
 		return false
 	}
-	var taken bool
+	var taken, superseded bool
 	if err == nil {
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id NOT IN (?, ?))`,
 			roomID, keyID, key).Scan(&taken)
 	}
-	if taken {
+	if err == nil { // a late retry of an older invite: the newer replica stays
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.kind = 'direct' AND o.home_domain = ?
+			AND o.id != ? AND o.archived_at IS NULL AND o.created_at > (SELECT created_at FROM rooms WHERE id = ?)
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?)
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?))`,
+			origin, roomID, roomID, keyID, key).Scan(&superseded)
+	}
+	switch {
+	case taken:
 		refuse(http.StatusConflict, "conflict", "the conversation has another member")
+		return false
+	case superseded:
+		refuse(http.StatusConflict, "conflict", "a newer conversation of the pair replaced this one")
 		return false
 	}
 	if err == nil {

@@ -331,7 +331,7 @@ func (s *Service) invite(ctx context.Context, roomID, name, address string) (rea
 // delivery cursor; a room with a stand-in (a concurrent start added it)
 // is left as it is. With archive it archives the room first, so the
 // snapshot, or a room event when the log has started, archives the
-// peer's replica too.
+// peer's replica too; a room another start posted in is left as it is.
 func (s *Service) join(ctx context.Context, roomID, address string, readLimit int, archive bool) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -339,9 +339,13 @@ func (s *Service) join(ctx context.Context, roomID, address string, readLimit in
 	}
 	defer tx.Rollback()
 	if archive {
-		if _, err := tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
-			storage.FormatTS(time.Now()), roomID); err != nil {
+		res, err := tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ? AND NOT `+hasMessage,
+			storage.FormatTS(time.Now()), roomID)
+		if err != nil {
 			return err
+		}
+		if n, err := res.RowsAffected(); err != nil || n == 0 {
+			return err // another start used the conversation: it stays
 		}
 	}
 	logged, err := fedrooms.Logged(ctx, tx, roomID)
@@ -368,9 +372,10 @@ func (s *Service) join(ctx context.Context, roomID, address string, readLimit in
 
 // abandon archives roomID, a conversation the peer took whose start
 // failed after that, through its event log, so the peer's replica is
-// archived too. Best effort: a room it cannot archive stays pending, is
-// invited into again on the next start, and the peer then archives an
-// older replica of the pair.
+// archived too; one that another start posted in meanwhile stays. Best
+// effort: a room it cannot archive stays pending, is invited into again
+// on the next start, and the peer then archives an older replica of the
+// pair.
 func (s *Service) abandon(ctx context.Context, roomID, address string, readLimit int) {
 	if s.join(context.WithoutCancel(ctx), roomID, address, readLimit, true) == nil && s.FedNotify != nil {
 		s.FedNotify()
@@ -378,16 +383,21 @@ func (s *Service) abandon(ctx context.Context, roomID, address string, readLimit
 }
 
 // drop removes roomID, a conversation this start made that the peer
-// refused or whose first message failed: its members, messages and
-// reads go with the room. It has no event log yet. One that got a
-// stand-in meanwhile (a concurrent start) is kept.
+// refused or whose first message failed: its members and reads go with
+// the room. It has no event log yet. One that a concurrent start used
+// meanwhile, a stand-in or a message, is kept.
 func (s *Service) drop(ctx context.Context, roomID string) {
-	_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM rooms WHERE id = ? AND NOT `+hasStandIn, roomID)
+	_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM rooms WHERE id = ? AND NOT `+hasStandIn+` AND NOT `+hasMessage,
+		roomID)
 }
 
 // hasStandIn is whether room rooms.id has a member of another server.
 const hasStandIn = `EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
 	WHERE m.room_id = rooms.id AND k.remote_domain IS NOT NULL)`
+
+// hasMessage is whether room rooms.id holds a message: a start's undo
+// leaves a conversation alone once another start posted in it.
+const hasMessage = `EXISTS (SELECT 1 FROM messages WHERE room_id = rooms.id)`
 
 // pending reports whether roomID is a conversation hosted here whose
 // invite had no clear answer: it has no member of another server yet.
@@ -582,9 +592,20 @@ type conversation struct {
 	// none: a reader asks for the messages since it.
 	LastReadAt string `json:"last_read_at,omitempty"`
 	// Unread counts the other bot's messages after the last one the
-	// caller read.
-	Unread int `json:"unread"`
+	// caller read; Actionable those of them that ask for something.
+	Unread     int `json:"unread"`
+	Actionable int `json:"actionable"`
 }
+
+// ActionableTypes are the message types that ask the reader for
+// something, as agent.Actionable has them: the Stop hook reads a
+// conversation only when one of them is unread.
+var ActionableTypes = []string{"question", "task_assignment", "handoff", "alert", "decision"}
+
+// unreadSQL counts the messages of room r.id that key ?1 has not read,
+// in the order a room's messages are paged, by its direct_reads row d.
+const unreadSQL = `SELECT COUNT(*) FROM messages m WHERE m.room_id = r.id AND m.deleted_at IS NULL AND m.author_key_id != ?1
+	AND (m.ts, m.id) > (COALESCE(d.last_read_ts, ''), COALESCE(d.last_read_id, 0))`
 
 // list answers the caller's active conversations, the latest first,
 // each once.
@@ -601,11 +622,11 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT r.id, o.id, o.remote_domain IS NOT NULL,
 		COALESCE((SELECT MAX(ts) FROM messages WHERE room_id = r.id AND deleted_at IS NULL), ''),
-		COALESCE((SELECT m.ts FROM direct_reads d JOIN messages m ON m.id = d.last_read_id WHERE d.room_id = r.id AND d.key_id = ?1), ''),
-		(SELECT COUNT(*) FROM messages m WHERE m.room_id = r.id AND m.deleted_at IS NULL AND m.author_key_id != ?1
-		   AND m.id > COALESCE((SELECT last_read_id FROM direct_reads d WHERE d.room_id = r.id AND d.key_id = ?1), 0))
+		COALESCE(d.last_read_ts, ''), (`+unreadSQL+`),
+		(`+unreadSQL+` AND m.message_type IN ('`+strings.Join(ActionableTypes, "','")+`'))
 		FROM rooms r
 		JOIN room_members me ON me.room_id = r.id AND me.key_id = ?1
+		LEFT JOIN direct_reads d ON d.room_id = r.id AND d.key_id = ?1
 		JOIN api_keys o ON o.id = (SELECT MIN(key_id) FROM room_members WHERE room_id = r.id AND key_id != ?1)
 		WHERE r.kind = 'direct' AND r.archived_at IS NULL
 		ORDER BY 4 DESC, r.id`, caller)
@@ -617,7 +638,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var c conversation
 		var other int64
-		if err := rows.Scan(&c.RoomID, &other, &c.Remote, &c.LastMessageAt, &c.LastReadAt, &c.Unread); err != nil {
+		if err := rows.Scan(&c.RoomID, &other, &c.Remote, &c.LastMessageAt, &c.LastReadAt, &c.Unread, &c.Actionable); err != nil {
 			rows.Close()
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "scan")
 			return

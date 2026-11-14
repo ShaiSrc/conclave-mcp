@@ -8,14 +8,17 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/messages"
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/rooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
 	"github.com/hermes/conclave-mcp/migrations"
@@ -28,6 +31,7 @@ type env struct {
 	db    *sql.DB
 	h     http.Handler
 	admin int64
+	svc   *Service
 }
 
 func newEnv(t *testing.T, domain string) *env {
@@ -44,6 +48,7 @@ func newEnv(t *testing.T, domain string) *env {
 	e.admin = e.key("root", "", true)
 	msgs := messages.NewService(db, 1024, nil)
 	svc := &Service{DB: db, FedDomain: domain, MaxMessageBytes: msgs.MaxMessageBytes, Send: msgs.Send}
+	e.svc = svc
 	r := chi.NewRouter()
 	r.Use(func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -289,6 +294,11 @@ func TestList_ReadMarking(t *testing.T) {
 	if got := unread(); got != 2 {
 		t.Errorf("after a filtered read: %d unread, want 2", got)
 	}
+	// A page of one holds the earlier ts only: the other stays unread.
+	e.do(bob, http.MethodGet, "/rooms/"+room+"/messages?limit=1", "")
+	if got := unread(); got != 1 {
+		t.Errorf("after a page of one: %d unread, want 1", got)
+	}
 	e.do(bob, http.MethodGet, "/rooms/"+room+"/messages", "")
 	if got := unread(); got != 0 {
 		t.Errorf("after reading all: %d unread, want 0", got)
@@ -391,6 +401,7 @@ func TestList_Unread(t *testing.T) {
 		Address       string `json:"address"`
 		LastMessageAt string `json:"last_message_at"`
 		Unread        int    `json:"unread"`
+		Actionable    int    `json:"actionable"`
 	}
 	list := func(key int64) []conv {
 		t.Helper()
@@ -401,8 +412,12 @@ func TestList_Unread(t *testing.T) {
 		}
 		return out.Conversations
 	}
+	if rec := e.do(alice, http.MethodPost, "/rooms/"+room+"/messages", `{"content":"fyi","message_type":"status_update"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("update: %d %s", rec.Code, rec.Body)
+	}
 	got := list(bob)
-	if len(got) != 1 || got[0].RoomID != room || got[0].Address != "alice" || got[0].Unread != 2 || got[0].LastMessageAt == "" {
+	if len(got) != 1 || got[0].RoomID != room || got[0].Address != "alice" || got[0].Unread != 3 || got[0].Actionable != 2 ||
+		got[0].LastMessageAt == "" {
 		t.Errorf("bob: %+v", got)
 	}
 	if got := list(alice); len(got) != 1 || got[0].Address != "bob" || got[0].Unread != 0 {
@@ -411,7 +426,7 @@ func TestList_Unread(t *testing.T) {
 	if rec := e.do(bob, http.MethodGet, "/rooms/"+room+"/messages?limit=1", ""); rec.Code != http.StatusOK {
 		t.Fatalf("read: %d %s", rec.Code, rec.Body)
 	}
-	if got := list(bob); got[0].Unread != 1 {
+	if got := list(bob); got[0].Unread != 2 || got[0].Actionable != 1 {
 		t.Errorf("after reading one: %+v", got)
 	}
 	e.do(bob, http.MethodGet, "/rooms/"+room+"/messages", "")
@@ -439,5 +454,35 @@ func TestStart_DefaultTypeIsQuestion(t *testing.T) {
 	room := e.started(e.do(alice, http.MethodPost, "/direct", `{"to":"bob","content":"hi <b>"}`))
 	if n := e.count(`SELECT COUNT(*) FROM messages WHERE room_id = ? AND message_type = 'question' AND content = 'hi <b>'`, room); n != 1 {
 		t.Errorf("stored %d question(s), want 1", n)
+	}
+}
+
+// ActionableTypes are the message types agent.Actionable takes, so the
+// count GET /v1/direct gives is what the Stop hook reads for.
+func TestActionableTypes(t *testing.T) {
+	for _, typ := range rights.Order {
+		if agent.Actionable(agent.Msg{MessageType: typ}) != slices.Contains(ActionableTypes, typ) {
+			t.Errorf("%s: agent.Actionable and ActionableTypes differ", typ)
+		}
+	}
+}
+
+// A start whose first message fails does not remove a conversation
+// that another start used meanwhile.
+func TestStart_FailureKeepsUsedConversation(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "")
+	send := e.svc.Send
+	e.svc.Send = func(w http.ResponseWriter, r *http.Request, roomID string) {
+		e.svc.Send = send
+		e.started(e.start(bob, "alice")) // bob's start finds the room and posts
+		http.Error(w, `{"error":{"code":"bad_request","message":"no"}}`, http.StatusBadRequest)
+	}
+	wantErr(t, e.start(alice, "bob"), http.StatusBadRequest, "bad_request")
+	if n := e.count(`SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND archived_at IS NULL`); n != 1 {
+		t.Errorf("%d active conversations, want 1", n)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM messages`); n != 1 {
+		t.Errorf("%d messages, want bob's", n)
 	}
 }

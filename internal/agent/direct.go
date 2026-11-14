@@ -18,6 +18,8 @@ type Conversation struct {
 	// when it read none: what comes after it is unread.
 	LastReadAt string `json:"last_read_at"`
 	Unread     int    `json:"unread"`
+	// Actionable counts the unread messages that Actionable takes.
+	Actionable int `json:"actionable"`
 }
 
 // ListDirect returns the caller's direct conversations.

@@ -440,6 +440,33 @@ func TestDirectRemote_AcceptedThenFailed(t *testing.T) {
 	}
 }
 
+// A failure of the first message after the peer took the conversation
+// does not archive it when another start used it meanwhile.
+func TestDirectRemote_FailureKeepsUsedConversation(t *testing.T) {
+	a, b := dmPair(t)
+	ctx := context.Background()
+	a1 := a.dmBot(t, "a1", "")
+	b1 := b.dmBot(t, "b1", "peers")
+	send := a.direct.Send
+	a.direct.Send = func(w http.ResponseWriter, r *http.Request, roomID string) {
+		a.direct.Send = send
+		dmRoom(t, a.dm(a1, "b1@"+b.svc.Domain(), "second")) // another start posts
+		http.Error(w, `{"error":{"code":"bad_request","message":"no"}}`, http.StatusBadRequest)
+	}
+	if rec := a.dm(a1, "b1@"+b.svc.Domain(), "hi"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("failed send: %d %s", rec.Code, rec.Body)
+	}
+	a.svc.deliverDue(ctx)
+	for _, g := range []*roomRig{a, b} {
+		if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND archived_at IS NULL`); n != 1 {
+			t.Errorf("%s has %d active conversations, want 1", g.svc.Domain(), n)
+		}
+	}
+	if got := b.dmList(t, b1); len(got) != 1 || got[0].Unread != 1 {
+		t.Errorf("b1's list: %+v", got)
+	}
+}
+
 // An invite whose answer is lost leaves the room pending; the next
 // start invites into it again, which the peer takes as the same, so
 // the pair has one room on each side.
@@ -470,7 +497,8 @@ func TestDirectRemote_TimeoutRetry(t *testing.T) {
 }
 
 // A second direct invite of the origin for the same pair, into another
-// room, archives the older replica.
+// room, archives the older replica; a late retry of the older invite
+// then changes nothing.
 func TestDirectRemote_NewInviteArchivesOlder(t *testing.T) {
 	g := newRoomRig(t)
 	h := newFakeHost(t, g)
@@ -481,6 +509,7 @@ func TestDirectRemote_NewInviteArchivesOlder(t *testing.T) {
 			t.Fatalf("invite %s: %d %s", room, rec.Code, rec.Body)
 		}
 	}
+	wantErr(t, h.directInvite(t, g, older, h.pairOf(g, "b1"), "b1"), http.StatusConflict, "conflict")
 	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, older); n != 1 {
 		t.Error("the older replica is still active")
 	}
