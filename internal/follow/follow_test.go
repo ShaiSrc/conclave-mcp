@@ -868,11 +868,13 @@ func TestRooms_FeedMembersPrivate(t *testing.T) {
 
 // A bot takes at most 1000 pending requests: the next is 429, also for
 // a bot that follows it for the first time; a decided one makes room.
+// The 1000 come from ten other servers, 100 each.
 func TestFollow_PendingCap(t *testing.T) {
 	e := newEnv(t, "")
 	alice, bob := e.bot("alice", ""), e.bot("bob", "approve")
 	e.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
-		INSERT INTO api_keys(label, hash, prefix, created_at, handle) SELECT 'k' || i, 'x', 'p' || i, '2026-01-01T00:00:00Z', 'k' || i FROM n`)
+		INSERT INTO api_keys(label, hash, prefix, created_at, trust_origin, remote_domain)
+		SELECT 'k' || i || '@s' || (i % 10) || '.example', '', '', '2026-01-01T00:00:00Z', 'external', 's' || (i % 10) || '.example' FROM n`)
 	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
 		SELECT id, 'bob', ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE label LIKE 'k%'`, bob)
 	rec := e.do(alice, http.MethodPost, "/follows", `{"to":"bob"}`)
@@ -883,6 +885,23 @@ func TestFollow_PendingCap(t *testing.T) {
 	if n := e.count(`SELECT COUNT(*) FROM audit WHERE action = 'follow.refused' AND detail LIKE '%"reason":"limit"%'`); n != 1 {
 		t.Errorf("%d limit refusals audited, want 1", n)
 	}
+	e.exec(`UPDATE follows SET status = 'rejected' WHERE id = (SELECT MIN(id) FROM follows)`)
+	if f := e.follow(alice, "bob"); f.Status != "pending" {
+		t.Errorf("after a rejection: %+v", f)
+	}
+}
+
+// This server's bots count as one server against MaxPendingPerPeer:
+// with 100 of their requests pending, the next local one is 429.
+func TestFollow_PendingCapLocal(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "approve")
+	e.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO api_keys(label, hash, prefix, created_at, handle) SELECT 'k' || i, 'x', 'p' || i, '2026-01-01T00:00:00Z', 'k' || i FROM n`,
+		MaxPendingPerPeer)
+	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		SELECT id, 'bob', ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE label LIKE 'k%'`, bob)
+	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{"to":"bob"}`), http.StatusTooManyRequests, "rate_limited")
 	e.exec(`UPDATE follows SET status = 'rejected' WHERE id = (SELECT MIN(id) FROM follows)`)
 	if f := e.follow(alice, "bob"); f.Status != "pending" {
 		t.Errorf("after a rejection: %+v", f)
@@ -1054,5 +1073,40 @@ func TestRemote_PendingCapPerPeer(t *testing.T) {
 	e.exec(`UPDATE follows SET status = 'rejected' WHERE id = (SELECT MIN(id) FROM follows)`)
 	if status, err := svc.Remote(ctx, "new@m.example", "bob"); err != nil || status != "pending" {
 		t.Errorf("after a rejection: %q %v", status, err)
+	}
+	// Full again: the same request again is answered, not refused.
+	if status, err := svc.Remote(ctx, "new@m.example", "bob"); err != nil || status != "pending" {
+		t.Errorf("the same request again: %q %v", status, err)
+	}
+}
+
+// Requests of one peer that arrive together take the last slot once:
+// the cap is checked in the write that stores a request.
+func TestRemote_PendingCapPerPeerAtOnce(t *testing.T) {
+	e := newEnv(t, "")
+	svc := e.serve("b.example")
+	bob := e.bot("bob", "approve")
+	e.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO api_keys(label, hash, prefix, created_at, trust_origin, remote_domain)
+		SELECT 's' || i || '@m.example', '', '', '2026-01-01T00:00:00Z', 'external', 'm.example' FROM n`, MaxPendingPerPeer-1)
+	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		SELECT id, 'bob@b.example', ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE remote_domain = 'm.example'`, bob)
+	errs := make(chan error, 8)
+	for i := range 8 {
+		go func() {
+			_, err := svc.Remote(context.Background(), fmt.Sprintf("new%d@m.example", i), "bob")
+			errs <- err
+		}()
+	}
+	stored := 0
+	for range 8 {
+		if err := <-errs; err == nil {
+			stored++
+		} else {
+			remoteErr(t, err, http.StatusTooManyRequests, "rate_limited")
+		}
+	}
+	if n := e.count(`SELECT COUNT(*) FROM follows WHERE status = 'pending'`); stored != 1 || n != MaxPendingPerPeer {
+		t.Errorf("%d requests stored, %d pending; want 1 and %d", stored, n, MaxPendingPerPeer)
 	}
 }

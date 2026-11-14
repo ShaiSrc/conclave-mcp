@@ -364,7 +364,7 @@ func (s *Service) follow(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, r, caller, toAddr, "policy", http.StatusForbidden, "follow_refused", toAddr+" takes no followers")
 		return
 	}
-	if full, err := s.full(ctx, to, ""); err != nil || full {
+	if isFull, err := full(ctx, s.DB, to, ""); err != nil || isFull {
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "request count")
 			return
@@ -596,14 +596,8 @@ func (s *Service) Remote(ctx context.Context, follower, handle string) (string, 
 		s.refused(ctx, key, follower, toAddr, "policy", "follow_refused")
 		return "", &fedrooms.Error{Status: http.StatusForbidden, Code: "follow_refused", Message: toAddr + " takes no followers"}
 	case len(existing) == 0:
-		var full bool
 		var created int64
-		_, domain, _ := strings.Cut(follower, "@")
-		if full, err = s.full(ctx, to, domain); err == nil && full {
-			err = &fedrooms.Error{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: toAddr + " has too many pending follow requests"}
-		} else if err == nil {
-			key, created, err = s.store(ctx, follower, toAddr, to)
-		}
+		key, created, err = s.store(ctx, follower, toAddr, to)
 		if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
 			if reason := map[string]string{"rate_limited": "limit", "bot_blocked": "blocked"}[fe.Code]; reason != "" {
 				s.refused(ctx, key, follower, toAddr, reason, fe.Code)
@@ -644,7 +638,10 @@ func (s *Service) Remote(ctx context.Context, follower, handle string) (string, 
 // stored one (1) or found one (0). A follower whose server has all the
 // stand-ins it may have here is 429; one the operator blocked is 403
 // bot_blocked: checked in the write, a block made since the federation
-// listener checked holds.
+// listener checked holds. A new request to a bot that is full (MaxPending
+// pending requests, or MaxPendingPerPeer from the follower's server) is
+// 429 too, checked in the write as well: requests at once cannot both
+// take the last slot, and one already stored is answered, not refused.
 func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) (int64, int64, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -664,6 +661,16 @@ func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) 
 	case errors.Is(err, fedrooms.ErrAddress):
 		return 0, 0, &fedrooms.Error{Status: http.StatusConflict, Code: "conflict", Message: err.Error()}
 	}
+	var stored, isFull bool
+	if err == nil {
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM follows WHERE follower_key_id = ? AND target = ?)`, key, toAddr).Scan(&stored)
+	}
+	if err == nil && !stored {
+		_, domain, _ := strings.Cut(follower, "@")
+		if isFull, err = full(ctx, tx, to, domain); err == nil && isFull {
+			return 0, 0, &fedrooms.Error{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: toAddr + " has too many pending follow requests"}
+		}
+	}
 	var res sql.Result
 	if err == nil {
 		res, err = tx.ExecContext(ctx, `INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
@@ -680,12 +687,12 @@ func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) 
 }
 
 // full reports whether bot, a bot of ours, has MaxPending pending
-// requests, or MaxPendingPerPeer from the bots of domain ("" for a
-// follower of this server). ponytail: counts by scanning follows; an
-// index on (target_key_id, status) if that shows.
-func (s *Service) full(ctx context.Context, bot int64, domain string) (bool, error) {
+// requests, or MaxPendingPerPeer from the bots of domain ("" for the
+// bots of this server, whose remote_domain is NULL). ponytail: counts by
+// scanning follows; an index on (target_key_id, status) if that shows.
+func full(ctx context.Context, db fedrooms.DB, bot int64, domain string) (bool, error) {
 	var full bool
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) >= ? OR COALESCE(SUM(k.remote_domain = ?), 0) >= ?
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) >= ? OR COALESCE(SUM(COALESCE(k.remote_domain, '') = ?), 0) >= ?
 		FROM follows f JOIN api_keys k ON k.id = f.follower_key_id WHERE f.target_key_id = ? AND f.status = 'pending'`,
 		MaxPending, domain, MaxPendingPerPeer, bot).Scan(&full)
 	return full, err

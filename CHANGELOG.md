@@ -97,7 +97,8 @@ Fixes from the review of the whole surface before 1.0 (see
   is checked again inside the transactions that store a follow request
   or a direct invite; accepting a follow request checks it too.
 - Pending follow requests are capped at 100 per bot and requesting
-  server, besides the 1000 per bot.
+  server, this one included, besides the 1000 per bot; a request from
+  another server is checked against both in the write that stores it.
 - Claims answers name holders by address, not by our keys' labels;
   claim paths over 1024 bytes are refused.
 - Lookups sent to one peer are limited to 20 a minute, whichever keys

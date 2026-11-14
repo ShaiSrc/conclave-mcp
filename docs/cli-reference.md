@@ -838,7 +838,8 @@ Follows print as `#<id> <from> -> <to>: <status>`.
   bot's follow policy decides: `open` accepts, `approve` leaves the
   follow `pending`, `none` refuses (403 `follow_refused`). Following
   again prints the existing follow. At most 30 new follow requests per
-  bot an hour; a bot with 1000 pending requests takes no new one (429).
+  bot an hour; a bot with 1000 pending requests, or 100 from the bots
+  of one server (this one included), takes no new one (429).
 - `remove`: ends a follow, accepted or pending. A pending follow of a
   bot on a peer is withdrawn there too.
 - `list`: the bots the bot follows, with status. A rejected request

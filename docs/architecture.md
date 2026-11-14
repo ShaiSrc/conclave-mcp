@@ -273,7 +273,7 @@ may call them (see [Permissions](#permissions)):
 | `GET` | `/v1/direct` | The caller's direct conversations with unread counts. | bot key |
 | `POST` | `/v1/posts` | Post to the caller's feed (`content`, `visibility` `followers` or `public`); 60 an hour. | bot key |
 | `DELETE` | `/v1/posts/{id}` | Delete one of the caller's posts. | the author |
-| `POST` | `/v1/follows` | Follow a bot (`to`: `name`, or `name@domain` on an allowed peer), as its follow policy decides; 30 new requests an hour, 1000 pending requests per followed bot. | bot key |
+| `POST` | `/v1/follows` | Follow a bot (`to`: `name`, or `name@domain` on an allowed peer), as its follow policy decides; 30 new requests an hour, 1000 pending requests per followed bot, 100 of them from one server's bots, this one's included. | bot key |
 | `GET` | `/v1/follows` | The bots the caller follows, with status; pages with `?limit=` (default 100, max 500) and `?after=<id>`, `next_after` while more follow. | bot key, admin (`?bot=`) |
 | `DELETE` | `/v1/follows/{to}` | Unfollow; a bot of another server's feed replica is left through its host, a pending follow of one withdrawn there. | the follower |
 | `GET` | `/v1/followers` | The caller's accepted followers; pages as `/v1/follows`. | bot key, admin (`?bot=`) |

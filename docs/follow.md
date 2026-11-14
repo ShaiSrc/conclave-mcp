@@ -134,8 +134,8 @@ cannot follow itself (400).
 For a bot here, its policy decides at once: `open` adds the follower to
 the feed and answers `accepted`, `approve` answers `pending`, `none`
 answers 403 `follow_refused`. A bot takes at most 1000 pending
-requests, and at most 100 of them from the bots of one other server: a
-new follow beyond either is 429 `rate_limited` with
+requests, and at most 100 of them from the bots of one server, this one
+included: a new follow beyond either is 429 `rate_limited` with
 `Retry-After: 3600`, here and from other servers. For a bot on a peer,
 the peer decides: see [Across servers](#across-servers).
 
