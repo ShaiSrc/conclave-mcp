@@ -210,6 +210,36 @@ func TestFollowRemote_FeedBotOnly(t *testing.T) {
 	}
 }
 
+// A removal of our bot from a feed replica is weighed against the seq
+// of that replica's invite, not of an older replica's.
+func TestFollowRemote_AdmittedSeqPerReplica(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1 := g.followBot(t, "b1", "")
+	if _, err := g.db.Exec(`INSERT INTO follows(follower_key_id, target, status, created_at) VALUES (?, ?, 'pending', '2026-11-14T00:00:00Z')`,
+		b1.KeyID, h.addr("x")); err != nil {
+		t.Fatal(err)
+	}
+	old, newer, name := ulid.Make().String(), ulid.Make().String(), "feed:"+h.addr("x")
+	for _, inv := range []struct {
+		room string
+		seq  int64
+	}{{old, 40}, {newer, 3}} {
+		rec := g.fedDo(signedReq(t, h.id, g.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+inv.room+"/invite",
+			map[string]any{"name": name, "handle": "b1", "rights": []string{"read"}, "kind": "feed", "feed": h.addr("x"), "seq": inv.seq}))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("invite %s: %d %s", inv.room, rec.Code, rec.Body)
+		}
+	}
+	if got := h.push(t, g, newer, roomEv(1, name, false), memberEv(2, h.addr("x"), "read"), memberEv(3, "b1@"+local, "read"),
+		roomEv(4, name, false), removeEv(5, "b1@"+local)); got != 5 {
+		t.Fatalf("applied %d", got)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, newer, b1.KeyID); n != 0 {
+		t.Error("the removal from the newer replica was taken as older than its invite")
+	}
+}
+
 // Blocking a bot archives our replicas of the conversations with it:
 // our bots can no longer write to it through its host.
 func TestBlockBot_ArchivesConversation(t *testing.T) {

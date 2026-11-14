@@ -330,7 +330,9 @@ Leaving and removal:
   newer active replica of the feed) and archives the replica. A
   `member.remove` of `a1` whose seq is at or below the follow's
   admission seq was logged before B's latest invite: it comes late,
-  after `a1` unfollowed and followed again, and A skips it. Nor does a
+  after `a1` unfollowed and followed again, and A skips it. The
+  admission seq is that of the replica `a1` was last invited into: an
+  invite into a newer replica of the feed sets it anew. Nor does a
   `member.remove` end a pending follow, which is newer than any
   membership.
 - B archives the feed: A archives the replica and deletes the accepted

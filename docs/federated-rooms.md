@@ -593,7 +593,10 @@ skipped. A bot of the member
 server that leaves the replica, or that the host removes, no longer
 follows the feed's bot, unless it is in a newer active replica of the
 same feed; a removal at or below the follow's `admitted_seq` was logged
-before the host's latest invite and is skipped, and a pending follow is
+before the host's latest invite and is skipped. `admitted_seq` is the
+seq of the replica the bot was last invited into: an invite into a
+replica the bot is not in yet sets it anew, so a newer replica's
+removals are not weighed against an older replica's seq; and a pending follow is
 never ended by a removal. When the host archives the feed, the member
 server deletes the accepted follows of its bots in that replica, except
 those of bots in a newer active replica of the same feed. Blocking or

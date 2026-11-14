@@ -337,9 +337,12 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if feed { // the follow of our bot toward the feed's bot is accepted now; without one, no replica
-		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?),
-			admitted_seq = MAX(COALESCE(admitted_seq, 0), ?)
-			WHERE follower_key_id = ? AND target = ? AND target_key_id IS NULL`, storage.FormatTS(time.Now()), max(in.Seq, 0), keyID, feedOf)
+		// admitted_seq is the seq of the replica our bot is admitted to:
+		// one it is new in starts it again.
+		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?1),
+			admitted_seq = CASE WHEN EXISTS (SELECT 1 FROM room_members WHERE room_id = ?2 AND key_id = ?3)
+				THEN MAX(COALESCE(admitted_seq, 0), ?4) ELSE ?4 END
+			WHERE follower_key_id = ?3 AND target = ?5 AND target_key_id IS NULL`, storage.FormatTS(time.Now()), roomID, keyID, max(in.Seq, 0), feedOf)
 		var n int64
 		if err == nil {
 			n, err = res.RowsAffected()
@@ -781,9 +784,12 @@ const localMember = `EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.i
 // stays. A removal of our bot from a feed at seq, logged at or
 // before the host's latest invite of it (its follow's admitted_seq), is
 // older than that invite: it came late, after our bot unfollowed and
-// followed again, and changes nothing. ponytail: admitted_seq is one per
-// follow, compared in any replica of the feed; at worst our bot stays a
-// member of an older replica, as an archived one keeps its members.
+// followed again, and changes nothing. admitted_seq is that of the
+// replica our bot was last admitted to (handleRoomInvite).
+// ponytail: it is compared in any replica of the feed, so a removal from
+// an older replica at or below the newer one's seq changes nothing: at
+// worst our bot stays a member of the older one, as an archived one keeps
+// its members. Store the replica id with admitted_seq if that matters.
 func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID, host string, seq int64, payload json.RawMessage) error {
 	var p fedrooms.RemovePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
