@@ -188,7 +188,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusBadRequest, "bad_request", "kind must be room or direct")
 		return
 	case !direct && strings.HasPrefix(in.Name, fedrooms.DirectPrefix):
-		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are direct conversations'")
+		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are reserved for direct conversations")
 		return
 	}
 	var keyID int64

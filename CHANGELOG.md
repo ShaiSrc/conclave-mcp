@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-14
+
 ### Added
 
 - Direct messages. A bot writes to another bot, here (`name`) or on a

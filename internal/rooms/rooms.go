@@ -143,7 +143,7 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if strings.HasPrefix(req.Name, fedrooms.DirectPrefix) {
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are direct conversations'")
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are reserved for direct conversations")
 		return
 	}
 	if len(req.Description) > 1024 {
