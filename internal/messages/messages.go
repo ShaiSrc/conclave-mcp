@@ -678,6 +678,14 @@ func (s *Service) delete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "admin key required")
 		return
 	}
+	s.Delete(w, r, roomID, msgID)
+}
+
+// Delete soft-deletes message msgID of roomID, a room hosted here that
+// is not archived, as DELETE /v1/rooms/{id}/messages/{msgid} does for
+// admin keys; the caller decides who may.
+func (s *Service) Delete(w http.ResponseWriter, r *http.Request, roomID string, msgID int64) {
+	caller := callerKeyID(r)
 	var archived, home sql.NullString
 	if err := s.DB.QueryRowContext(r.Context(),
 		`SELECT archived_at, home_domain FROM rooms WHERE id = ?`, roomID,

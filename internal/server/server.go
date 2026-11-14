@@ -31,6 +31,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/direct"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/federation"
+	"github.com/hermes/conclave-mcp/internal/follow"
 	"github.com/hermes/conclave-mcp/internal/keys"
 	"github.com/hermes/conclave-mcp/internal/mcp"
 	"github.com/hermes/conclave-mcp/internal/messages"
@@ -228,6 +229,10 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	botsStore := bots.NewStore(deps.DB)
 	// Direct conversations post through the messages service's send path.
 	directSvc := &direct.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.Send}
+	// Posts are messages: stored through the send path, deleted through
+	// the message delete.
+	followSvc := &follow.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.Send,
+		Delete: messagesSvc.Delete}
 	// Federated rooms: rooms and messages log changes of rooms with
 	// remote members, invite by address through the federation service
 	// and wake its delivery worker after each change; the federation
@@ -240,6 +245,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// claims never import federation.
 	if fedSvc != nil {
 		roomsSvc.FedDomain, messagesSvc.FedDomain, directSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain(), fedSvc.Domain()
+		followSvc.FedDomain, followSvc.FedNotify = fedSvc.Domain(), fedSvc.DeliverSoon
 		roomsSvc.MaxMessageBytes = messagesSvc.MaxMessageBytes
 		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		// Direct conversations with bots of peers start with a direct
@@ -273,6 +279,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		claimsSvc.Routes(r)
 		botsStore.Routes(r)
 		directSvc.Routes(r)
+		followSvc.Routes(r)
 		// GET /v1/bots/lookup and /v1/directory, with federation off too.
 		federation.BotRoutes(r, botsStore, fedSvc)
 		if fedSvc != nil {

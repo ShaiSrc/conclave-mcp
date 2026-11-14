@@ -158,6 +158,10 @@ func Address(ctx context.Context, db DB, keyID int64, ourDomain string) (string,
 // room may have a name that starts with it.
 const DirectPrefix = "dm:"
 
+// FeedPrefix starts the name of every feed, a bot's room of posts
+// (internal/follow); no other room may have a name that starts with it.
+const FeedPrefix = "feed:"
+
 // DirectRights are the rights of a member of a direct conversation:
 // read and every message type but system. Claims do not apply.
 var DirectRights = func() rights.Set {

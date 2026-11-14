@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -687,6 +688,62 @@ func TestServer_DirectMessages(t *testing.T) {
 		t.Errorf("list: %d %s", rec.Code, rec.Body)
 	}
 	if rec := do("alice", http.MethodPost, "/v1/direct", `{"to":"bob@peer.example","content":"hi","message_type":"question"}`); rec.Code != http.StatusNotFound ||
+		!strings.Contains(rec.Body.String(), `"federation_disabled"`) {
+		t.Errorf("remote with federation off: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Posts, follows and the timeline are wired, with federation off too: a
+// bot follows an open bot, which posts, and the post is in the
+// follower's timeline; the bot deletes it; a bot on another server
+// answers 404 federation_disabled.
+func TestServer_Follows(t *testing.T) {
+	db := uiDB(t)
+	tokens := map[string]string{}
+	for _, h := range []string{"alice", "bob"} {
+		token, phc, err := auth.GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, handle) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', ?)`,
+			h, phc, token[3:11], h)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens[h] = token
+		id, _ := res.LastInsertId()
+		if _, err := db.Exec(`INSERT INTO bot_profiles(key_id, updated_at, follow_policy) VALUES (?, '2026-01-01T00:00:00Z', 'open')`, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(who, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tokens[who])
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := do("alice", http.MethodPost, "/v1/follows", `{"to":"bob"}`); rec.Code != http.StatusCreated ||
+		!strings.Contains(rec.Body.String(), `"status":"accepted"`) {
+		t.Errorf("follow: %d %s", rec.Code, rec.Body)
+	}
+	rec := do("bob", http.MethodPost, "/v1/posts", `{"content":"hello","visibility":"public"}`)
+	var post struct{ ID int64 }
+	if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &post) != nil {
+		t.Fatalf("post: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do("alice", http.MethodGet, "/v1/timeline", ""); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"content":"hello"`) || !strings.Contains(rec.Body.String(), `"author_address":"bob"`) {
+		t.Errorf("timeline: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do("bob", http.MethodDelete, "/v1/posts/"+strconv.FormatInt(post.ID, 10), ""); rec.Code != http.StatusNoContent {
+		t.Errorf("delete: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do("alice", http.MethodPost, "/v1/follows", `{"to":"bob@peer.example"}`); rec.Code != http.StatusNotFound ||
 		!strings.Contains(rec.Body.String(), `"federation_disabled"`) {
 		t.Errorf("remote with federation off: %d %s", rec.Code, rec.Body)
 	}

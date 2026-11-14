@@ -18,7 +18,10 @@
 //
 // A direct room (kind direct, internal/direct) is a conversation of two
 // bots: it refuses invites and rights changes with 403 direct_room, and
-// removing a member archives it.
+// removing a member archives it. A feed (rooms.feed set, internal/follow)
+// is a bot's room of posts, listed with kind feed: it refuses invites and
+// rights changes with 403 feed_room; removing a follower, or archiving
+// the feed, ends that follow.
 //
 // Mutations are audit-logged. With federation on, every change of a
 // room with remote members is written to its event log in the change's
@@ -113,7 +116,7 @@ type roomView struct {
 	// responses so clients never have to default.
 	Visibility string `json:"visibility"`
 	Home       string `json:"home,omitempty"` // the host of a replica room
-	Kind       string `json:"kind"`           // room or direct
+	Kind       string `json:"kind"`           // room, direct or feed
 	// LastMessageAt is a direct room's latest message time, in lists.
 	LastMessageAt string `json:"last_message_at,omitempty"`
 }
@@ -144,6 +147,10 @@ func (s *Service) create(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(req.Name, fedrooms.DirectPrefix) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are reserved for direct conversations")
+		return
+	}
+	if strings.HasPrefix(req.Name, fedrooms.FeedPrefix) {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.FeedPrefix+" are reserved for feeds")
 		return
 	}
 	if len(req.Description) > 1024 {
@@ -229,20 +236,20 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	kind := r.URL.Query().Get("kind")
-	if kind != "" && kind != "room" && kind != "direct" {
-		writeErr(w, r, http.StatusBadRequest, "bad_request", "kind must be room or direct")
+	if kind != "" && kind != "room" && kind != "direct" && kind != "feed" {
+		writeErr(w, r, http.StatusBadRequest, "bad_request", "kind must be room, direct or feed")
 		return
 	}
 	admin := auth.IsAdmin(r.Context())
 	archived := admin && r.URL.Query().Get("include_archived") == "1"
 	rows, err := s.DB.QueryContext(r.Context(),
-		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), r.kind,
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), `+kindSQL+`,
 		        CASE WHEN r.kind = 'direct' THEN COALESCE((SELECT MAX(ts) FROM messages WHERE room_id = r.id AND deleted_at IS NULL), '') ELSE '' END
 		 FROM rooms r
 		 WHERE (? OR r.archived_at IS NULL)
 		   AND (? OR EXISTS (SELECT 1 FROM room_members m WHERE m.room_id = r.id AND m.key_id = ?))
 		   AND (? = '' OR r.visibility = ?)
-		   AND (? = '' OR r.kind = ?)
+		   AND (? = '' OR `+kindSQL+` = ?)
 		 ORDER BY r.created_at DESC`,
 		archived, admin, caller, visibilityFilter, visibilityFilter, kind, kind)
 	if err != nil {
@@ -283,7 +290,8 @@ func (s *Service) get(w http.ResponseWriter, r *http.Request) {
 		archived sql.NullString
 	)
 	if err := s.DB.QueryRowContext(r.Context(),
-		`SELECT id, name, description, owner_key_id, created_at, archived_at, visibility, COALESCE(home_domain, ''), kind FROM rooms WHERE id = ?`, id,
+		`SELECT r.id, r.name, r.description, r.owner_key_id, r.created_at, r.archived_at, r.visibility, COALESCE(r.home_domain, ''), `+kindSQL+`
+		 FROM rooms r WHERE r.id = ?`, id,
 	).Scan(&rv.ID, &rv.Name, &desc, &rv.OwnerKeyID, &rv.CreatedAt, &archived, &rv.Visibility, &rv.Home, &rv.Kind); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "get query")
 		return
@@ -369,6 +377,13 @@ func (s *Service) archive(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
 		return
 	}
+	// An archived feed has no followers: its accepted follows end, so
+	// they can follow again into the bot's next feed.
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM follows WHERE status = 'accepted'
+		AND target = (SELECT feed FROM rooms WHERE id = ?)`, id); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "end follows")
+		return
+	}
 	if err := tx.Commit(); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "commit")
 		return
@@ -430,12 +445,13 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 	}
 	// One room per key: a key that is not an admin key and is already
 	// in another room that is not archived needs allow_multi_room. Its
-	// direct conversations do not count.
+	// direct conversations and feeds do not count.
 	var isAdmin, elsewhere, remote bool
 	err = s.DB.QueryRowContext(r.Context(),
 		`SELECT k.is_admin, EXISTS (
 		   SELECT 1 FROM room_members m JOIN rooms o ON o.id = m.room_id
-		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL AND o.kind = 'room'), k.remote_domain IS NOT NULL
+		   WHERE m.key_id = k.id AND m.room_id != ? AND o.archived_at IS NULL AND o.kind = 'room' AND o.feed IS NULL),
+		   k.remote_domain IS NOT NULL
 		 FROM api_keys k WHERE k.id = ? AND k.revoked_at IS NULL`,
 		id, req.KeyID,
 	).Scan(&isAdmin, &elsewhere, &remote)
@@ -709,6 +725,12 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
 		return
 	}
+	// A member leaving a feed ends its follow.
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM follows WHERE follower_key_id = ? AND target = (SELECT feed FROM rooms WHERE id = ?)`,
+		keyid, id); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "end follow")
+		return
+	}
 	// A replica with no key of ours left is archived, as when its host
 	// removes our last bot.
 	if home.Valid {
@@ -746,12 +768,13 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 // refuseReplica answers 403 replica_room and returns true when roomID
 // is a replica: its host owns the members, rights and archive state.
 // With direct, it answers 403 direct_room for a direct room too: its
-// two bots are its only members, with fixed rights. A room that does
-// not exist is left to the handler's 404.
+// two bots are its only members, with fixed rights; and 403 feed_room
+// for a feed, whose members come only through follows. A room that
+// does not exist is left to the handler's 404.
 func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID string, direct bool) bool {
 	var home sql.NullString
 	var kind string
-	err := s.DB.QueryRowContext(r.Context(), `SELECT home_domain, kind FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind)
+	err := s.DB.QueryRowContext(r.Context(), `SELECT home_domain, `+kindSQL+` FROM rooms r WHERE id = ?`, roomID).Scan(&home, &kind)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return false
@@ -764,9 +787,16 @@ func (s *Service) refuseReplica(w http.ResponseWriter, r *http.Request, roomID s
 	case direct && kind == "direct":
 		writeErr(w, r, http.StatusForbidden, "direct_room", "a direct conversation has its two bots as members, with fixed rights")
 		return true
+	case direct && kind == "feed":
+		writeErr(w, r, http.StatusForbidden, "feed_room", "a feed has its bot and its followers as members, with fixed rights")
+		return true
 	}
 	return false
 }
+
+// kindSQL is the kind of room r as the API names it: feed for a feed,
+// else its kind column.
+const kindSQL = `CASE WHEN r.feed IS NOT NULL THEN 'feed' ELSE r.kind END`
 
 // writeFedErr answers a refusal of the federation service with its
 // status and code, and any other error with 500.

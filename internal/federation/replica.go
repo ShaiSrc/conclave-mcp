@@ -112,7 +112,8 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // otherwise). The replica is created under the host's room id, of the
 // invite's kind, or updated and made active again; a room of that id
 // that is not the origin's replica of that kind is a 409. A room name
-// starting with dm: is a direct conversation's (400 otherwise). The
+// starting with dm: is a direct conversation's (400 otherwise); one
+// starting with feed: is refused (400). The
 // answer has the kind and max_events_bytes.
 //
 // A direct invite (kind direct) starts a conversation with our bot: it
@@ -189,6 +190,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	case !direct && strings.HasPrefix(in.Name, fedrooms.DirectPrefix):
 		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are reserved for direct conversations")
+		return
+	case strings.HasPrefix(in.Name, fedrooms.FeedPrefix):
+		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.FeedPrefix+" are reserved for feeds")
 		return
 	}
 	var keyID int64
