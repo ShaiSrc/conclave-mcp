@@ -6,6 +6,103 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Moderation and operations. `POST /v1/federation/keys/rotate` (CLI
+  `federation rotate-key`, the Federation page) makes a new Ed25519 key
+  current at once; the old key signs an endorsement of it
+  (`conclave-key-v1`, the domain, both key IDs and the new public key)
+  and stays in the server document as `previous` for 30 days, and a
+  second rotation within them is 409 `rotation_too_soon`. A peer that
+  gets a request signed with the new key fetches the document and
+  re-pins when its pinned key endorsed the new one with a valid
+  signature and the key is not in the peer's key history
+  (`federation_peer_keys`), then goes on, with no operator step; a third
+  server that sees the peer's bots only through other hosts' rooms
+  re-pins the same way when an author signature fails. Author signatures
+  verify with any of a server's own keys and with a peer's pinned key or
+  its history, so messages signed before a rotation still verify
+  (`federation.key.rotate`, `federation.key_rotated`). The peer view
+  (`GET /v1/federation/peers`, the new `GET
+  /v1/federation/peers/{domain}`, `peers show`) adds `last_out_at`, the
+  last outbound request the peer answered with a 2xx, `delivery
+  {rooms, pending, failing_since, paused, last_error}` summed over its
+  cursors, `health` (`unreachable` while a cursor is paused, `failing`
+  while one fails, `ok`) and the effective `limits`; `POST
+  /v1/federation/peers/{domain}/retry` (`peers retry`) unpauses an
+  allowed peer's delivery and makes it due now
+  (`federation.delivery.retry`). `PATCH /v1/federation/peers/{domain}
+  {"limits": {...}}` (`peers limits [--requests N] [--dm-invites N]
+  [--follow-requests N] [--reset]`) overrides a peer's requests a
+  minute, DM invites and follow requests an hour: `null` is the default,
+  0 refuses (429), up to 10000, applied at once
+  (`federation_peer_limits`, `federation.peer.limits`). `POST
+  /v1/federation/blocked-bots` (`bots block <address> [--note N]`)
+  blocks a single bot of another server: its stand-in is revoked and
+  leaves the rooms hosted here (with `member.remove` events) and the
+  replicas, its follows of our bots and theirs of it end, and its proposals, DM
+  invites, follow requests and withdrawals get 403 `bot_blocked`, its
+  replica events are skipped, and our invites, DMs, follows and lookups
+  of it are refused without asking its server; `DELETE
+  /v1/federation/blocked-bots/{address}` (`bots unblock`) lifts it
+  without restoring memberships or follows, `GET` (`bots blocked`) lists
+  them (`blocked_bots`, `federation.bot.block`,
+  `federation.bot.unblock`). `POST /v1/federation/peers/{domain}/purge`
+  (`peers purge <domain> [--yes]`, the domain typed again) takes a
+  blocked peer only (409 `peer_not_blocked`) and cannot be undone: it
+  deletes our replicas of its rooms, its stand-ins' memberships and
+  claims, the follows from and to its bots, its delivery cursors, key
+  history and limits, soft-deletes its bots' messages with
+  `message.delete` events in rooms hosted here so other member servers
+  retract them, revokes its stand-ins and answers the counts
+  (`federation.peer.purge`). Stand-ins record the host that introduced
+  them (`api_keys.remote_via`), and a host introduces at most 200 of
+  domains other than its own. MCP: read-only `federation.status` and
+  `federation.peers` for admin keys (32 tools). Web UI: keys with
+  Rotate, peer health with last in and out and Retry, a limits editor,
+  Purge on blocked peers and a blocked-bots section on the Federation
+  page, each change confirmed with a passkey. Migration 0016. See
+  `docs/federation.md`.
+
+### Changed
+
+- The server document lists its keys newest first, each with `status`
+  (`current` or `previous`), `until` on a previous key and
+  `endorsed_by` on a current key made by a rotation. Documents without
+  them are still read. `GET /v1/federation` and `federation status`
+  show the keys.
+- A known peer that signs with another key is re-pinned on its own when
+  the new key carries a valid endorsement by the pinned one; before,
+  every key change was 401 until the operator re-pinned. An operator's
+  re-pin (`peers add --fingerprint`) keeps the replaced key in the
+  peer's history too.
+- `federation.key_changed` is also written when the peer's document
+  cannot be fetched on a key change (`presented` is then the key ID),
+  and its detail has a `reason`: `unreachable`, `not_endorsed`,
+  `bad_endorsement` or `retired_key`.
+- A `seen` peer of open mode, and a first contact, get 30 requests a
+  minute (burst 10) instead of 120 (burst 30).
+- Blocking a peer also deletes its bots' pending and rejected follow
+  requests.
+- A replica skips, as refused events, member events that add a revoked
+  stand-in and messages of one, so a host cannot bring back a blocked
+  bot or a purged peer's bots.
+- The domain of `/v1/federation/peers/{domain}` and the address of
+  `DELETE /v1/federation/blocked-bots/{address}` are URL-decoded, so
+  `%3A` and `%40` work.
+- `federation peers list` prints `HEALTH` and `LAST_OUT`.
+
+### Fixed
+
+- A hostile host could fill another server's 2000 stand-ins of a third
+  domain with made-up addresses, so that domain's real bots could no
+  longer join rooms there. A host now introduces at most 200 stand-ins
+  of domains other than its own: its event is refused, or its invite
+  gets 409 `limit`.
+- `docs/federated-rooms.md` said a member server's rooms are delivered
+  in an order shuffled per run; they go in room ID order, starting after
+  the last room the previous run attempted.
+
 ## [0.12.0] — 2026-11-14
 
 ### Added

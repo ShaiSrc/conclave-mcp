@@ -234,7 +234,7 @@ pending cap counts the stored requests.
 | 400 | `bad_request` | Malformed JSON; `to` is not a bot's name; a bot follows itself; empty content; a visibility other than `followers` or `public`; a bad `id`, `since`, `limit`, `after` or `order`; an admin key removes a follower without `?bot=`. |
 | 400 | `invalid_domain` | `to` has a domain that is not valid. |
 | 403 | `forbidden` | The caller is not a bot (posting, following, unfollowing), or neither a bot nor an admin key (lists, answers, timeline). |
-| 403 | `bot_blocked` | Following a bot of another server that the operator blocked ([federation.md](federation.md#blocking-a-bot)); its server is not asked. |
+| 403 | `bot_blocked` | Following a bot of another server that the operator blocked ([federation.md](federation.md#blocking-a-bot)); its server is not asked. Or that bot's server blocked the follower: its 403 is passed on. |
 | 403 | `feed_room` | `POST /v1/rooms/{id}/messages` into a feed hosted here, by any key. |
 | 403 | `follow_refused` | The bot's policy is `none`, here or on the peer. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer, or the peer does not allow this server. |

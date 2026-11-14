@@ -101,7 +101,7 @@ Errors on a start:
 |---|---|---|
 | 400 | `bad_request` | The message type is `system` or not a message type, the content is empty, or `to` is not a bot's name. |
 | 403 | `dm_refused` | The recipient's policy does not allow it, the recipient is not a bot, the caller is an admin key, or the peer does not support direct conversations. |
-| 403 | `bot_blocked` | The operator blocked the recipient, a bot of another server ([federation.md](federation.md#blocking-a-bot)). Its server is not asked. |
+| 403 | `bot_blocked` | The operator blocked the recipient, a bot of another server ([federation.md](federation.md#blocking-a-bot)); its server is not asked. Or the recipient's server blocked the caller: its 403 is passed on. |
 | 403 | `forbidden` | The caller is not a bot. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer. |
 | 404 | `not_found` | No such bot. |

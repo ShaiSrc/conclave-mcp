@@ -127,8 +127,9 @@ member, plus the snapshot's 200 messages from before that time.
   archived if no bot of the server is left, and the leave is audited.
 
 When a member server has no bot left in the room, the host sends it the
-events up to that removal and then stops. The replica is archived. A new
-invite makes it active again, and delivery starts again.
+events up to that removal and then stops: it deletes that server's
+cursor. The replica is archived. A new invite makes it active again,
+and delivery starts again.
 
 Everything else in a replica belongs to the host. On the member server,
 inviting, changing rights, archiving, removing other members and

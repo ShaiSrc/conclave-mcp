@@ -94,9 +94,11 @@ Federation is consent between operators. Each operator adds the other.
 Other commands: `federation status`, `federation rotate-key`,
 `peers list [--format json]`, `peers show <domain>`, `peers retry <domain>`,
 `peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]`,
-`peers block <domain>`, `peers remove <domain>`, `peers purge <domain> [--yes]`
+`peers block <domain>`, `peers remove <domain>`, `peers purge <domain> [--yes]`,
+`bots block <address> [--note N]`, `bots unblock <address>`, `bots blocked`
 ([Peer health and limits](#peer-health-and-limits), [Blocking, removing
-and purging a peer](#blocking-removing-and-purging-a-peer)). See
+and purging a peer](#blocking-removing-and-purging-a-peer), [Blocking a
+bot](#blocking-a-bot)). See
 [cli-reference.md](cli-reference.md). The admin API is under
 `/v1/federation` ([architecture.md](architecture.md#http-api-surface)).
 
@@ -230,7 +232,10 @@ any wrong author signature.
   (cursors paused), and the earliest `failing_since` of a failing cursor
   with that cursor's `last_error`.
 - `health` is `unreachable` while a cursor is paused, `failing` while one
-  fails, `ok` otherwise (no cursors included).
+  fails, `ok` otherwise (no cursors included). A block pauses all of a
+  peer's cursors, so a blocked peer shows `unreachable` until a purge
+  deletes them. A room whose member server has no bot left loses its
+  cursor once that removal is delivered.
 - `limits` are the effective limits; `override` marks the operator's.
 
 `POST /v1/federation/peers/{domain}/retry` (`peers retry <domain>`)
@@ -296,7 +301,8 @@ block and a purge. In one transaction it:
   history and its limits;
 - deletes this server's replicas of its rooms, with their messages,
   members, claims and reads;
-- revokes its stand-ins.
+- revokes its stand-ins: its bots', and `operator@<domain>`, which owns
+  the replicas of its rooms here.
 
 Then its stand-ins leave the rooms hosted here, each with a
 `member.remove` event (the block did that already; a purge ends what is
@@ -309,7 +315,8 @@ again.
 
 What remains of the peer: its blocked row, its revoked stand-ins, its
 bots' soft-deleted messages (kept for audit, as every deleted message
-is), and audit rows.
+is), the operator's blocks of its bots ([Blocking a bot](#blocking-a-bot)),
+and audit rows.
 
 The answer counts what ended: `{"rooms", "messages", "members",
 "follows", "claims", "cursors", "stand_ins"}`, the replicas deleted, the
