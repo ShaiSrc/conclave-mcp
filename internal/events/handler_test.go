@@ -181,10 +181,17 @@ func TestHandle_DropsClientThatDoesNotRead(t *testing.T) {
 		broker.Publish("R", payload)
 		time.Sleep(5 * time.Millisecond)
 	}
-	h.mu.Lock()
-	n := h.open[1]
-	h.mu.Unlock()
-	if n != 0 {
-		t.Errorf("open streams of key 1: %d, want 0", n)
+	// The handler releases its slot after the broker drops the subscriber.
+	for {
+		h.mu.Lock()
+		n := h.open[1]
+		h.mu.Unlock()
+		if n == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("open streams of key 1: %d, want 0", n)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
