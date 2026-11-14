@@ -997,3 +997,118 @@ func TestServer_BodyCap(t *testing.T) {
 		}
 	}
 }
+
+// A /v1 request body must arrive within bodyReadTimeout: a stalled one,
+// with a Content-Length or chunked, is cut off with 400. A GET carries
+// no body (400), so an event stream never gets a read deadline: it
+// stays open past bodyReadTimeout.
+func TestServer_BodyReadDeadline(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	db := uiDB(t)
+	token, phc, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', ?, ?, '2026-01-01T00:00:00Z', 1)`,
+		phc, token[3:11]); err != nil {
+		t.Fatal(err)
+	}
+	broker := events.NewBroker()
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	for _, framing := range []string{"Content-Length: 20\r\n\r\n{\"name\":", "Transfer-Encoding: chunked\r\n\r\n8\r\n{\"name\":\r\n"} {
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		fmt.Fprintf(conn, "POST /v1/rooms HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n%s", token, framing)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("%q: no answer to a stalled body: %v", framing, err)
+		}
+		resp.Body.Close()
+		conn.Close()
+		if resp.StatusCode != http.StatusBadRequest || time.Since(start) < bodyReadTimeout {
+			t.Errorf("%q: %d after %v, want 400 after %v", framing, resp.StatusCode, time.Since(start), bodyReadTimeout)
+		}
+	}
+
+	do := func(method, path string, body io.Reader) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(method, srv.URL+path, body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	resp := do(http.MethodPost, "/v1/rooms", strings.NewReader(`{"name":"proj"}`))
+	var room struct{ ID string }
+	if err := json.NewDecoder(resp.Body).Decode(&room); err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create room: %d %v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+	for _, body := range []io.Reader{strings.NewReader("x"), io.MultiReader(strings.NewReader("x"))} {
+		if resp := do(http.MethodGet, "/v1/rooms/"+room.ID+"/events", body); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("a GET with a body: %d, want 400", resp.StatusCode)
+		}
+	}
+
+	resp = do(http.MethodGet, "/v1/rooms/"+room.ID+"/events?wait=30", nil)
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	if line, err := br.ReadString('\n'); err != nil || line != ": ok\n" {
+		t.Fatalf("stream: %q %v", line, err)
+	}
+	time.Sleep(3 * bodyReadTimeout)
+	broker.Publish(room.ID, []byte(`{"id":1}`))
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("the stream ended past the body deadline: %v", err)
+		}
+		if line == "data: {\"id\":1}\n" {
+			break
+		}
+	}
+}
+
+// The body's read deadline ends with the body: a handler that runs
+// longer, as an MCP call or a stream does, keeps its request.
+func TestBodyLimit_DeadlineEndsWithTheBody(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	mw := BodyLimitMiddleware(slog.New(slog.DiscardHandler), 1<<10)
+	srv := httptest.NewServer(mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case <-r.Context().Done():
+			http.Error(w, "cancelled", http.StatusServiceUnavailable)
+		case <-time.After(3 * bodyReadTimeout):
+			_, _ = w.Write(body)
+		}
+	})))
+	defer srv.Close()
+	for _, body := range []io.Reader{strings.NewReader("hello"), io.MultiReader(strings.NewReader("hello"))} {
+		resp, err := http.Post(srv.URL, "text/plain", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(got) != "hello" {
+			t.Errorf("%d %q, want 200 hello", resp.StatusCode, got)
+		}
+	}
+}

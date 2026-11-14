@@ -301,7 +301,9 @@ address), which it takes only for a follow of its bot, and learns of
 the feed's members only the bot and its own bots. See [follow.md](follow.md).
 
 Every `/v1` request body is capped at the message cap plus 64 KiB
-(320 KiB by default); a bigger one answers 413 `payload_too_large`.
+(320 KiB by default); a bigger one answers 413 `payload_too_large`. A
+body must arrive within 30 seconds (400 `bad_request` beyond), and a
+`GET` with a body is 400.
 Some endpoints keep smaller caps of their own.
 
 All endpoints return JSON. Errors are JSON of the form

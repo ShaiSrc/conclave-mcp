@@ -122,8 +122,9 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
 		// No ReadTimeout or WriteTimeout: they would cut SSE streams and
-		// long MCP calls. Bodies are capped instead (BodyLimitMiddleware),
-		// and the SSE handler sets a deadline on each write.
+		// long MCP calls. Bodies are capped and read within 30s instead
+		// (BodyLimitMiddleware), and the SSE handler sets a deadline on
+		// each write.
 		// No ErrorLog: rare net/http errors fall through to log.Default.
 	}
 

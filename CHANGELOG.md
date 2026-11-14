@@ -106,7 +106,8 @@ Fixes from the review of the whole surface before 1.0 (see
 - Public pages and feeds cut posts at 4096 characters and render at
   most 8 pages at once (503 with `Retry-After: 1` beyond).
 - Every `/v1` request body is capped (320 KiB by default; 413
-  `payload_too_large`). A key may hold 16 event streams (429 beyond); a
+  `payload_too_large`) and must arrive within 30 seconds (400); a `GET`
+  with a body is 400, so an event stream never waits on one. A key may hold 16 event streams (429 beyond); a
   stream whose client does not read is dropped after 10 seconds; read
   rights are rechecked every 5 seconds.
 - Passkey confirmations and operator messages have slots per session
