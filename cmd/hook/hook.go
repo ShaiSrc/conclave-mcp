@@ -487,7 +487,9 @@ func (h *Hook) directNews(ctx context.Context, st *agent.State) string {
 			continue
 		}
 		msgs := slices.DeleteFunc(page, func(m agent.Msg) bool { return m.Author == st.SelfID })
-		if len(msgs) == 0 {
+		if len(msgs) == 0 { // a page of its own messages: the rest still waits
+			fmt.Fprintf(&b, "(%d unread in direct with %s, %d of them asking for an answer: read them with messages.list on room %s.)\n",
+				cv.Unread, agent.OneLine(cv.Address), cv.Actionable, agent.OneLine(cv.RoomID))
 			continue
 		}
 		room := agent.LoadRoom(ctx, h.C, cv.RoomID, "direct with "+cv.Address+" (room_id "+cv.RoomID+")")

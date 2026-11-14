@@ -636,15 +636,17 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	}
 	// A member reading a direct room has read up to the page's last
 	// message, in the page's (ts, id) order, for its unread count (GET
-	// /v1/direct). A filtered read skips messages, so it marks nothing.
-	// The list stands without it.
+	// /v1/direct), when the page starts at or before its last read: a
+	// `since` past it skips unread messages, and a filtered read skips
+	// messages too, so they mark nothing. The list stands without it.
 	if n := len(out); n > 0 && trustOrigin == "" {
 		_, _ = s.DB.ExecContext(r.Context(), `INSERT INTO direct_reads(room_id, key_id, last_read_ts, last_read_id)
-			SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
-			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?)
+			SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM rooms WHERE id = ?1 AND kind = 'direct')
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = ?1 AND key_id = ?2)
+			AND (?5 = '' OR EXISTS (SELECT 1 FROM direct_reads WHERE room_id = ?1 AND key_id = ?2 AND last_read_ts >= ?5))
 			ON CONFLICT(room_id, key_id) DO UPDATE SET last_read_ts = excluded.last_read_ts, last_read_id = excluded.last_read_id
 			WHERE (excluded.last_read_ts, excluded.last_read_id) > (last_read_ts, last_read_id)`,
-			roomID, caller, out[n-1].TS, out[n-1].ID, roomID, roomID, caller)
+			roomID, caller, out[n-1].TS, out[n-1].ID, sinceTS)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messages":   out,

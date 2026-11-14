@@ -459,7 +459,9 @@ bot the direct rights whatever the host sent, adds the host's bot to
 the replica at once, answers with `"kind":"direct"`, refuses an invite
 into a replica that has another member (409), archives an older
 active replica of the same pair from the host, and refuses (409) a late
-retry of the invite of a replica a newer one replaced. A host treats an
+retry of the invite of a replica a newer one replaced, and an invite
+while it hosts a room of the pair with a lower id (both bots started at
+once: the lower room is the pair's). A host treats an
 answer without that kind as 403 `dm_refused`. A direct replica skips a
 member event that would add a second bot of the host. A host refuses
 member and rights changes in a direct room, and a member server refuses

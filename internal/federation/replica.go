@@ -273,7 +273,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if direct {
-		if !s.directPair(w, r, tx, roomID, origin, keyID, other, refuse) {
+		if !s.directPair(w, r, tx, roomID, in.Name, origin, keyID, other, refuse) {
 			return
 		}
 	}
@@ -312,10 +312,13 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 // the origin, before the replica is named: it held the name. A replica
 // with another member, of ours or of the origin, is a 409: a host
 // cannot put a second bot of ours into a conversation. So is a replica
-// that a newer one of the pair replaced: a late retry of its invite
-// neither brings it back nor archives the newer one. On an error it
-// answers and returns false.
-func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, origin string, keyID int64, other string,
+// that a newer one of the pair replaced, archived or not: a late retry
+// of its invite neither brings it back nor archives the newer one. And
+// so is an invite while we host a room of the pair, name, with a lower
+// id: when both bots start at once, the lower room is the pair's on
+// both servers, since each refuses the other's higher one. On an error
+// it answers and returns false.
+func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, name, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
 	ctx := r.Context()
 	key, err := fedrooms.StandIn(ctx, tx, other)
@@ -328,12 +331,19 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id NOT IN (?, ?))`,
 			roomID, keyID, key).Scan(&taken)
 	}
-	if err == nil { // a late retry of an older invite: the newer replica stays
+	if err == nil { // a late retry of an older invite: the newer replica stays, archived or not
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.kind = 'direct' AND o.home_domain = ?
-			AND o.id != ? AND o.archived_at IS NULL AND o.created_at > (SELECT created_at FROM rooms WHERE id = ?)
+			AND o.id != ? AND o.created_at > (SELECT created_at FROM rooms WHERE id = ?)
 			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?)
 			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?))`,
 			origin, roomID, roomID, keyID, key).Scan(&superseded)
+	}
+	var lower bool
+	if err == nil { // both bots started at once: the room with the lower id is the pair's
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o JOIN room_members me ON me.room_id = o.id AND me.key_id = ?
+			WHERE o.kind = 'direct' AND o.home_domain IS NULL AND o.archived_at IS NULL AND o.id < ?
+			AND (o.name = ?3 OR o.name = ?3 || '#' || o.id OR EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?)))`,
+			keyID, roomID, name, key).Scan(&lower)
 	}
 	switch {
 	case taken:
@@ -341,6 +351,9 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 		return false
 	case superseded:
 		refuse(http.StatusConflict, "conflict", "a newer conversation of the pair replaced this one")
+		return false
+	case lower:
+		refuse(http.StatusConflict, "conflict", "the other bot started this conversation here at the same time: start again to use it")
 		return false
 	}
 	if err == nil {

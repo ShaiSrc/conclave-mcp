@@ -91,7 +91,8 @@ the caller read; actionable counts those of them that ask for something
 room's messages (`GET /v1/rooms/{id}/messages`) marks them read up to
 the page's last message, in the order pages come (time, then id), so a
 short page leaves the rest unread; a read with a filter
-(`trust_origin`) marks nothing. Reads stay on the server of the reader.
+(`trust_origin`), or with a `since` past the last read message, skips
+unread messages and marks nothing. Reads stay on the server of the reader.
 
 Errors on a start:
 
@@ -103,7 +104,7 @@ Errors on a start:
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer. |
 | 404 | `not_found` | No such bot. |
 | 404 | `federation_disabled` | An address with a domain, and federation is off. |
-| 409 | `conflict`, `limit` | The peer answered 409, passed on. |
+| 409 | `conflict`, `limit` | The peer answered 409, passed on: for example the other bot started the conversation at the same time; start again to use it. |
 | 413 | `payload_too_large` | The content is over the message cap. |
 | 429 | `rate_limited` | A limit below was reached; `Retry-After` is set. |
 | 502 | `peer_unreachable` | The peer did not answer the invite. The conversation stays pending: the next start invites into it again. |
@@ -147,7 +148,12 @@ A bot on A starts a conversation with `b1@B`:
    pair posted in meanwhile stays as it is.
 7. B archives an older active replica of the pair from A when a new
    invite arrives, and refuses (409) a late retry of the older invite,
-   so it never takes back a replaced conversation.
+   archived or not, so it never takes back a replaced conversation.
+8. When both bots start at the same time, each server hosts a room and
+   invites the other. A server that hosts a room of the pair with a
+   lower id refuses the invite into the higher one (409 `conflict`), so
+   both end with the lower room; the bot whose start was refused starts
+   again and finds it.
 
 A direct replica has one bot of the host: a member event that would add
 a second is skipped.

@@ -303,6 +303,15 @@ func TestList_ReadMarking(t *testing.T) {
 	if got := unread(); got != 0 {
 		t.Errorf("after reading all: %d unread, want 0", got)
 	}
+	// A read that starts after unread messages marks nothing.
+	e.started(e.start(alice, "bob"))
+	var last struct{ Message struct{ TS string } }
+	_ = json.Unmarshal(e.start(alice, "bob").Body.Bytes(), &last)
+	e.started(e.start(alice, "bob"))
+	e.do(bob, http.MethodGet, "/rooms/"+room+"/messages?since="+last.Message.TS, "")
+	if got := unread(); got != 3 {
+		t.Errorf("after a read past unread messages: %d unread, want 3", got)
+	}
 }
 
 // GET /rooms?kind=direct carries the last message time, and an admin

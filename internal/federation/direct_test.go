@@ -516,6 +516,62 @@ func TestDirectRemote_NewInviteArchivesOlder(t *testing.T) {
 	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, newer); n != 1 {
 		t.Error("the newer replica is not active")
 	}
+	// Archiving the newer one does not let the older come back.
+	if _, err := g.db.Exec(`UPDATE rooms SET archived_at = '2026-11-14T00:00:00Z' WHERE id = ?`, newer); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, h.directInvite(t, g, older, h.pairOf(g, "b1"), "b1"), http.StatusConflict, "conflict")
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, older); n != 1 {
+		t.Error("the older replica came back")
+	}
+}
+
+// When both bots start at once, the room with the lower id is the
+// pair's: a server that hosts a lower one of the pair answers an invite
+// into a higher one with 409, and takes an invite into a lower one.
+func TestDirectRemote_LowerRoomWins(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1 := g.dmBot(t, "b1", "peers")
+	lower, mine, higher := ulid.Make().String(), ulid.Make().String(), ulid.Make().String()
+	// g's own start toward the host's bot, its invite not answered yet.
+	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind)
+		VALUES (?, ?, ?, '2026-11-14T00:00:00Z', 'private', 'direct')`, mine, h.pairOf(g, "b1"), b1.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights)
+		VALUES (?, ?, 'reader', '2026-11-14T00:00:00Z', 'read')`, mine, b1.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, h.directInvite(t, g, higher, h.pairOf(g, "b1"), "b1"), http.StatusConflict, "conflict")
+	if rec := h.directInvite(t, g, lower, h.pairOf(g, "b1"), "b1"); rec.Code != http.StatusCreated {
+		t.Errorf("invite into the lower room: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// Both bots start at once across two servers: one conversation is left.
+func TestDirectRemote_SimultaneousStarts(t *testing.T) {
+	a, b := dmPair(t)
+	ctx := context.Background()
+	a1 := a.dmBot(t, "a1", "peers")
+	b1 := b.dmBot(t, "b1", "peers")
+	invite := a.direct.InviteRemote
+	a.direct.InviteRemote = func(ctx context.Context, roomID, name, address string, rights []string) (int, error) {
+		a.direct.InviteRemote = invite
+		// b1 starts before a's invite arrives: b's room has the higher id.
+		wantErr(t, b.dm(b1, "a1@"+a.svc.Domain(), "hello a1"), http.StatusConflict, "conflict")
+		return invite(ctx, roomID, name, address, rights)
+	}
+	room := dmRoom(t, a.dm(a1, "b1@"+b.svc.Domain(), "hello b1"))
+	a.svc.deliverDue(ctx)
+	if again := dmRoom(t, b.dm(b1, "a1@"+a.svc.Domain(), "hello a1")); again != room {
+		t.Errorf("b1's next start went to %s, want %s", again, room)
+	}
+	for _, g := range []*roomRig{a, b} {
+		if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND archived_at IS NULL`); n != 1 {
+			t.Errorf("%s has %d active conversations, want 1", g.svc.Domain(), n)
+		}
+	}
 }
 
 // The dm: prefix is the conversations': a room invite with such a name

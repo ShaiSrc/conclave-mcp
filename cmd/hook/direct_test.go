@@ -110,6 +110,21 @@ func TestStop_DirectNotActionableDoesNotBlock(t *testing.T) {
 	}
 }
 
+// A page of the agent's own messages still names what is left.
+func TestStop_DirectOwnMessagesPage(t *testing.T) {
+	s := newSetup(t)
+	s.f.convs = []agent.Conversation{{RoomID: "D1", Address: "bob", Unread: 1, Actionable: 1}}
+	for i := 1; i <= 10; i++ {
+		s.f.dmMsgs = append(s.f.dmMsgs, agent.Msg{ID: int64(i), Author: 1, TS: fmt.Sprintf("t%02d", i), MessageType: "status_update", Content: "mine"})
+	}
+	s.f.dmMsgs = append(s.f.dmMsgs, agent.Msg{ID: 11, Author: 7, TS: "t11", MessageType: "question", Content: "q"})
+	var o struct{ Decision, Reason string }
+	if err := json.Unmarshal([]byte(s.run(map[string]any{"hook_event_name": "Stop"})), &o); err != nil || o.Decision != "block" ||
+		!strings.Contains(o.Reason, "1 unread in direct with bob, 1 of them asking for an answer") {
+		t.Errorf("want a block naming what is left: %+v %v", o, err)
+	}
+}
+
 // An actionable message behind the read budget still blocks: the Stop
 // shows what it read and says what is left to read, and conversations
 // without an actionable message do not take the budget.
