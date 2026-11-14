@@ -383,10 +383,10 @@ func (s *Service) refreshLogged(ctx context.Context, domain string) {
 // refresh is refused while the other does not allow us yet.
 func (s *Service) retryDirectory(domain string) {
 	v, ok := s.dirFailed.Load(domain)
-	if !ok || s.now().Sub(v.(time.Time)) < retryEvery {
+	// Contacts at once claim the retry once.
+	if !ok || s.now().Sub(v.(time.Time)) < retryEvery || !s.dirFailed.CompareAndSwap(domain, v, s.now()) {
 		return
 	}
-	s.dirFailed.Store(domain, s.now())
 	s.refreshSoon(domain)
 }
 

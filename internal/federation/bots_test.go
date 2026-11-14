@@ -892,3 +892,29 @@ func TestDirectory_RetriedOnContact(t *testing.T) {
 	default:
 	}
 }
+
+// Contacts that arrive together claim a due retry once: one refresh is
+// queued, not one per contact.
+func TestDirectory_RetryClaimedOnce(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	for round := 0; round < 20; round++ {
+		svc.dirFailed.Store("peer.example", time.Time{})
+		start := make(chan struct{})
+		done := make(chan struct{})
+		for i := 0; i < 16; i++ {
+			go func() {
+				<-start
+				svc.retryDirectory("peer.example")
+				done <- struct{}{}
+			}()
+		}
+		close(start)
+		for i := 0; i < 16; i++ {
+			<-done
+		}
+		if n := len(svc.refresh); n != 1 {
+			t.Fatalf("round %d: %d refreshes queued, want 1", round, n)
+		}
+		<-svc.refresh
+	}
+}
