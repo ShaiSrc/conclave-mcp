@@ -89,8 +89,11 @@ jobs:
 
       - name: go test -fuzz
         run: |
-          for pkg in $(go list ./...); do
-            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do
+          # Assignments, so a failed listing fails the step (bash -e).
+          pkgs=$(go list ./...)
+          for pkg in $pkgs; do
+            list=$(go test -list '^Fuzz' "$pkg")
+            for target in $(printf '%s\n' "$list" | grep '^Fuzz'); do
               echo "::group::$pkg $target"
               go test -run '^$' -fuzz "^${target}\$" -fuzztime 15s "$pkg" || exit 1
               echo "::endgroup::"
