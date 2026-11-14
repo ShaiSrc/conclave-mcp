@@ -14,7 +14,9 @@
 //	PATCH  /v1/rooms/{id}/members/{keyid}  -- replace a member's rights (admin)
 //	DELETE /v1/rooms/{id}/members/{keyid}  -- remove member (admin); in a
 //	                                          replica room only this server's
-//	                                          bot, which leaves on the host first
+//	                                          bot, which leaves on the host first;
+//	                                          ?force=true leaves here only when
+//	                                          the host refuses or does not answer
 //
 // A direct room (kind direct, internal/direct) is a conversation of two
 // bots: it refuses invites and rights changes with 403 direct_room, and
@@ -697,7 +699,9 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "room lookup")
 		return
 	}
-	agreed := false // the host let our bot leave its replica
+	// agreed: the host let our bot leave its replica; forced: the host
+	// refused or did not answer, and the operator made it leave here only.
+	agreed, forced := false, false
 	switch {
 	case !home.Valid: // hosted here, or no such room (404 below)
 	case !local:
@@ -706,12 +710,14 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 	case !member:
 		writeErr(w, r, http.StatusNotFound, "not_found", "member not found")
 		return
-	case s.Leave != nil: // the host first: if it cannot be told, nothing changes here
-		if err := s.Leave(r.Context(), id, keyid); err != nil {
+	case s.Leave != nil: // the host first: if it cannot be told, nothing changes here, unless forced
+		err := s.Leave(r.Context(), id, keyid)
+		var fe *fedrooms.Error
+		if err != nil && (r.URL.Query().Get("force") != "true" || !errors.As(err, &fe)) {
 			writeFedErr(w, r, err, "leave")
 			return
 		}
-		agreed = true
+		agreed, forced = true, err != nil
 	}
 	tx, err := s.DB.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -780,6 +786,9 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 	detail := map[string]string{"room_id": id}
 	if address != "" {
 		detail["address"] = address
+	}
+	if forced {
+		detail["forced"] = "true"
 	}
 	b, _ := json.Marshal(detail)
 	_ = audit.Write(r.Context(), s.DB, caller, "room.remove", "member", strconv.FormatInt(keyid, 10), id, "ok", string(b))

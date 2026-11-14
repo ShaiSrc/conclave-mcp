@@ -417,16 +417,21 @@ func rightsText(list []string) string {
 // ---------- remove ----------
 
 func newRemoveCmd() *cobra.Command {
+	var force bool
 	cmd := &cobra.Command{
 		Use:   "remove <room-id> <api-key-id>",
 		Short: "Remove an API key from a room (admin key only)",
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			roomID, keyID := args[0], args[1]
+			path := "/v1/rooms/" + roomID + "/members/" + keyID
+			if force {
+				path += "?force=true"
+			}
 			return makeClientAndDo(cmd.Context(), cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				_, err := c.Do(ctx, client.Request{
 					Method: "DELETE",
-					Path:   "/v1/rooms/" + roomID + "/members/" + keyID,
+					Path:   path,
 				})
 				if err != nil {
 					return err
@@ -436,6 +441,8 @@ func newRemoveCmd() *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().BoolVar(&force, "force", false,
+		"in a room hosted on another server: leave here only when the host refuses or does not answer")
 	return cmd
 }
 

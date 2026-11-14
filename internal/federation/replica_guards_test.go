@@ -304,3 +304,46 @@ func TestReplicaInvite_IDConflictAudited(t *testing.T) {
 		}
 	}
 }
+
+// When the host refuses our bot's leave or does not answer, the operator
+// can force it: the bot leaves here only, which is audited.
+func TestReplicaLeave_Force(t *testing.T) {
+	g, h, room, b1 := replica(t, "read")
+	path := fmt.Sprintf("/rooms/%s/members/%d", room, b1)
+	h.setAnswer(answerWith(http.StatusForbidden, `{"error":{"code":"forbidden","message":"stay"}}`))
+	wantErr(t, g.do(g.admin, http.MethodDelete, path, ""), http.StatusForbidden, "forbidden")
+	if rec := g.do(g.admin, http.MethodDelete, path+"?force=true", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("forced leave: %d %s", rec.Code, rec.Body)
+	}
+	if count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, room, b1) != 0 ||
+		count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, room) != 1 {
+		t.Error("b1 still in an active replica")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'room.remove' AND result = 'ok' AND json_extract(detail, '$.forced') = 'true'`); n != 1 {
+		t.Errorf("%d forced leaves audited", n)
+	}
+
+	// A host that does not answer.
+	b2 := g.bot(t, "b2")
+	room2 := ulid.Make().String()
+	if rec := h.invite(t, g, room2, "proj2", "b2", "read"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	h.setAnswer(answerWith(0, ""))
+	if rec := g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d?force=true", room2, b2), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("forced leave, host down: %d %s", rec.Code, rec.Body)
+	}
+	// Forced or not, the host is asked first: one that agrees is no forced leave.
+	b3 := g.bot(t, "b3")
+	room3 := ulid.Make().String()
+	if rec := h.invite(t, g, room3, "proj3", "b3", "read"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	h.setAnswer(answerWith(http.StatusNoContent, ""))
+	if rec := g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d?force=true", room3, b3), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("leave: %d %s", rec.Code, rec.Body)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'room.remove' AND json_extract(detail, '$.forced') = 'true'`); n != 2 {
+		t.Errorf("%d forced leaves audited, want 2", n)
+	}
+}

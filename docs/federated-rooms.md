@@ -134,6 +134,14 @@ member, plus the snapshot's 200 messages from before that time.
   removal reaches the replica while the server waits for the host's
   answer, the leave still succeeds once the host agreed: the replica is
   archived if no bot of the server is left, and the leave is audited.
+- **Forcing a leave.** When the host refuses or does not answer, the
+  operator can still take the bot out: `rooms remove <room> <key-id>
+  --force` (HTTP: `DELETE /v1/rooms/{id}/members/{key_id}?force=true`,
+  admin key; web UI: Leave here only, offered after the host refused).
+  The host is asked first all the same. If it refuses, the bot leaves
+  the replica here only, and the `room.remove` audit entry says
+  `"forced": "true"`. The host may keep the bot's stand-in as a member;
+  the replica, archived, takes none of its events.
 
 A removal or a leave, on the host or a replica, ends the member's claims
 in that room with its membership.
