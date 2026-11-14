@@ -61,6 +61,7 @@ type Service struct {
 
 	mu          sync.Mutex
 	limiters    map[string]*rate.Limiter // per verified peer
+	dmLimits    map[string]*rate.Limiter // direct invites, per peer
 	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
 
 	warnLog, keyChecks minuteGate

@@ -58,9 +58,9 @@ func TestServer_ToolsList(t *testing.T) {
 	if !ok {
 		t.Fatalf("tools not array: %T", result["tools"])
 	}
-	// 22 tools: 17 + bots.list, bots.lookup, bots.directory, profile.get, profile.update.
-	if len(tools) != 22 {
-		t.Errorf("tool count: got %d, want 22", len(tools))
+	// 24 tools: 17 + bots.list, bots.lookup, bots.directory, profile.get, profile.update, direct.send, direct.list.
+	if len(tools) != 24 {
+		t.Errorf("tool count: got %d, want 24", len(tools))
 	}
 	for i, raw := range tools {
 		m, ok := raw.(map[string]any)
@@ -569,6 +569,45 @@ func TestSubscribe_KeepsRemoteFields(t *testing.T) {
 		api.Close()
 		if len(events) != 1 || events[0]["unverified"] != true || events[0]["author_address"] != "c1@c.example" {
 			t.Errorf("%s: %v", name, events)
+		}
+	}
+}
+
+func TestDirectTools(t *testing.T) {
+	var gotBody map[string]any
+	var gotPath string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.Method + " " + r.URL.Path
+		gotBody = nil
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusCreated)
+			fmt.Fprint(w, `{"room_id":"D1","message":{"id":3}}`)
+			return
+		}
+		fmt.Fprint(w, `{"conversations":[{"room_id":"D1","address":"b@x.example","unread":1}]}`)
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "tk_test")
+	if text, isErr := toolText(t, s, "direct.send", `{"to":"b@x.example","content":"hi"}`); isErr || !strings.Contains(text, "D1") {
+		t.Fatalf("send: %s", text)
+	}
+	if gotPath != "POST /v1/direct" || gotBody["to"] != "b@x.example" || gotBody["message_type"] != "question" {
+		t.Errorf("send forwarded %s %v", gotPath, gotBody)
+	}
+	toolText(t, s, "direct.send", `{"to":"b","content":"hi","message_type":"alert"}`)
+	if gotBody["message_type"] != "alert" {
+		t.Errorf("message_type not kept: %v", gotBody)
+	}
+	if _, isErr := toolText(t, s, "direct.send", `{"content":"hi"}`); !isErr {
+		t.Error("send without to must fail")
+	}
+	if text, isErr := toolText(t, s, "direct.list", `{}`); isErr || !strings.Contains(text, "b@x.example") || gotPath != "GET /v1/direct" {
+		t.Errorf("list: %v %s %s", isErr, gotPath, text)
+	}
+	for _, tl := range tools {
+		if strings.HasPrefix(tl.name, "direct.") && !strings.Contains(tl.desc, agent.ExternalNote) {
+			t.Errorf("%s lacks the external note", tl.name)
 		}
 	}
 }

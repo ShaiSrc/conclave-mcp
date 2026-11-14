@@ -24,6 +24,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/claims"
+	"github.com/hermes/conclave-mcp/internal/direct"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/messages"
@@ -104,6 +105,7 @@ type roomRig struct {
 	routes func(chi.Router)
 	fed    chi.Router
 	broker *events.Broker
+	direct *direct.Service
 }
 
 func newRoomRig(t *testing.T) *roomRig {
@@ -147,6 +149,8 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	cl := chi.NewRouter()
 	cs.Routes(cl)
 	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica}
+	ds := &direct.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.Send,
+		InviteRemote: svc.InviteRemote, FedNotify: svc.DeliverSoon}
 	fed := chi.NewRouter()
 	svc.PublicRoutes(fed)
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', 'x', 'p-root', '2026-01-01T00:00:00Z', 1)`)
@@ -154,8 +158,8 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 		t.Fatal(err)
 	}
 	adminID, _ := res.LastInsertId()
-	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed, broker: broker,
-		routes: func(r chi.Router) { rs.Routes(r); ms.Routes(r); cs.Routes(r) }}
+	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed, broker: broker, direct: ds,
+		routes: func(r chi.Router) { rs.Routes(r); ms.Routes(r); cs.Routes(r); ds.Routes(r) }}
 }
 
 // bot adds a local bot with handle and returns its key.
@@ -442,7 +446,7 @@ func TestInviteRemote(t *testing.T) {
 	m.answer.Store(0)
 	c1 := g.invite(t, room, m.addr("C1"), "read,answer,claim") // addresses are lowercased
 	got := m.received()
-	want := fmt.Sprintf(`POST /fed/v1/rooms/%s/invite {"name":"proj","handle":"c1","rights":["read","claim","answer"]}`, room)
+	want := fmt.Sprintf(`POST /fed/v1/rooms/%s/invite {"name":"proj","handle":"c1","rights":["read","claim","answer"],"kind":"room"}`, room)
 	if len(got) != 4 || got[3] != want {
 		t.Errorf("invite sent: %q, want %q", got[len(got)-1], want)
 	}

@@ -85,7 +85,7 @@ func NewService(db *sql.DB, maxBytes int, broker Broker) *Service {
 
 func (s *Service) Routes(r chi.Router) {
 	r.Post("/rooms/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
-		s.post(w, r, chi.URLParam(r, "id"), false, "", "")
+		s.Send(w, r, chi.URLParam(r, "id"))
 	})
 	r.Get("/rooms/{id}/messages", s.list)
 	// Soft-delete (SPEC-0001 Q8). Admin keys only; delete() answers
@@ -144,6 +144,12 @@ var allowedMessageTypes = map[string]struct{}{
 	"task_assignment": {},
 	"alert":           {},
 	"system":          {},
+}
+
+// Send stores the request body as a message of the caller in roomID,
+// as POST /v1/rooms/{id}/messages does.
+func (s *Service) Send(w http.ResponseWriter, r *http.Request, roomID string) {
+	s.post(w, r, roomID, false, "", "")
 }
 
 // SendAsOperator stores the request body as an operator message. It is
@@ -627,6 +633,20 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	var nextSince string
 	if n := len(out); n > 0 {
 		nextSince = out[n-1].TS
+	}
+	// A member reading a direct room has read up to the page's last
+	// message, in the page's (ts, id) order, for its unread count (GET
+	// /v1/direct), when the page starts at or before its last read: a
+	// `since` past it skips unread messages, and a filtered read skips
+	// messages too, so they mark nothing. The list stands without it.
+	if n := len(out); n > 0 && trustOrigin == "" {
+		_, _ = s.DB.ExecContext(r.Context(), `INSERT INTO direct_reads(room_id, key_id, last_read_ts, last_read_id)
+			SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM rooms WHERE id = ?1 AND kind = 'direct')
+			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = ?1 AND key_id = ?2)
+			AND (?5 = '' OR EXISTS (SELECT 1 FROM direct_reads WHERE room_id = ?1 AND key_id = ?2 AND last_read_ts >= ?5))
+			ON CONFLICT(room_id, key_id) DO UPDATE SET last_read_ts = excluded.last_read_ts, last_read_id = excluded.last_read_id
+			WHERE (excluded.last_read_ts, excluded.last_read_id) > (last_read_ts, last_read_id)`,
+			roomID, caller, out[n-1].TS, out[n-1].ID, sinceTS)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"messages":   out,

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hermes/conclave-mcp/internal/rights"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -151,4 +152,55 @@ func Address(ctx context.Context, db DB, keyID int64, ourDomain string) (string,
 		return "operator@" + ourDomain, nil
 	}
 	return "key-" + strconv.FormatInt(keyID, 10) + "@" + ourDomain, nil
+}
+
+// DirectPrefix starts the name of every direct conversation; no other
+// room may have a name that starts with it.
+const DirectPrefix = "dm:"
+
+// DirectRights are the rights of a member of a direct conversation:
+// read and every message type but system. Claims do not apply.
+var DirectRights = func() rights.Set {
+	out := rights.Set{}
+	for _, r := range rights.Order {
+		if r != rights.Claim && r != rights.System {
+			out = append(out, r)
+		}
+	}
+	return out
+}()
+
+// ErrDirectName is DirectName's error for two addresses too long for a
+// room name.
+var ErrDirectName = errors.New("the two addresses are too long for a conversation name")
+
+// DirectName is the name of the conversation of the bots at addresses a
+// and b: dm:<a>~<b>, sorted, so the same on every server.
+func DirectName(a, b string) (string, error) {
+	if b < a {
+		a, b = b, a
+	}
+	name := DirectPrefix + a + "~" + b
+	// ponytail: a room name has at most 128 bytes, so two addresses with
+	// long domains do not fit; derive a shorter unique name if that shows.
+	if len(name) > 128 {
+		return "", ErrDirectName
+	}
+	return name, nil
+}
+
+// DirectOther returns the other address of name, the DirectName of the
+// address me and another one; false when name is not such a name.
+// Addresses have no "~", so the split is unambiguous.
+func DirectOther(name, me string) (string, bool) {
+	pair, ok := strings.CutPrefix(name, DirectPrefix)
+	a, b, cut := strings.Cut(pair, "~")
+	other := a
+	if a == me {
+		other = b
+	}
+	if want, err := DirectName(me, other); !ok || !cut || err != nil || want != name {
+		return "", false
+	}
+	return other, true
 }

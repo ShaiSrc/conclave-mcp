@@ -134,7 +134,7 @@ func TestLogJoin_Snapshot(t *testing.T) {
 		t.Fatalf("snapshot has %d events, want %d", len(got), 1+3+SnapshotMessages)
 	}
 	want := []string{
-		`{"name":"Room R","archived":false}`,
+		`{"name":"Room R","archived":false,"kind":"room"}`,
 		`{"address":"b1@a.example","rights":["read","answer"]}`,
 		`{"address":"key-` + strconv.FormatInt(h.plain, 10) + `@a.example","rights":[]}`,
 		`{"address":"c1@c.example","rights":["read","question"]}`,
@@ -340,7 +340,7 @@ func TestLog_PayloadNotHTMLEscaped(t *testing.T) {
 		t.Fatal(err)
 	}
 	join(t, h.db, "R", "c1@c.example", "read", "a.example")
-	if got := events(t, h.db, "R"); string(got[0].Payload) != `{"name":"a<b>&c","archived":false}` {
+	if got := events(t, h.db, "R"); string(got[0].Payload) != `{"name":"a<b>&c","archived":false,"kind":"room"}` {
 		t.Errorf("room payload: %s", got[0].Payload)
 	}
 }

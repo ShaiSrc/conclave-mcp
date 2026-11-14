@@ -318,6 +318,9 @@ func (h *Hook) sessionStart(ctx context.Context, repo agent.Repo, st *agent.Stat
 	if agent.HasOperator(msgs) {
 		b.WriteString(agent.OperatorNote + "\n")
 	}
+	if convs, err := agent.ListDirect(ctx, h.C); err == nil { // best effort: an older server has no /v1/direct
+		b.WriteString(agent.FormatUnreadDirect(convs))
+	}
 	fmt.Fprintf(&b, "Conclave: you are %s in room %s; use this room_id with the conclave tools.\n",
 		agent.OneLine(me.Label), room.Title())
 	switch {
@@ -432,15 +435,80 @@ func (h *Hook) stop(ctx context.Context, in agent.HookInput, repo agent.Repo, st
 	if err != nil {
 		return err
 	}
-	if !slices.ContainsFunc(msgs, agent.Actionable) {
+	actionable := slices.ContainsFunc(msgs, agent.Actionable)
+	direct := h.directNews(ctx, st)
+	if !actionable && direct == "" {
 		return h.releaseOnStop(ctx, st) // cursor untouched: the messages stay for the next inbox read
 	}
-	*st = next
+	reason := direct
+	if actionable {
+		*st = next
+		reason = agent.Format(h.room(ctx, repo, st), msgs) + direct
+	}
 	return json.NewEncoder(out).Encode(map[string]any{
 		"decision": "block",
-		"reason": agent.Format(h.room(ctx, repo, st), msgs) +
-			"Before you stop: answer what is addressed to you in the Conclave room (messages.send with reply_to = the message's #id), or say briefly why no answer is needed. Then stop.",
+		"reason": reason +
+			"Before you stop: answer what is addressed to you in the Conclave room or the direct conversation (messages.send with reply_to = the message's #id, or direct.send), or say briefly why no answer is needed. Then stop.",
 	})
+}
+
+// Bounds of what one Stop reads of direct conversations.
+const (
+	directConvs = 5  // conversations with unread messages
+	directMsgs  = 10 // unread messages of each
+)
+
+// directNews renders the unread messages of the agent's direct
+// conversations that hold an actionable one ("" if none), as the room
+// path does: up to directMsgs after the last one read, of up to
+// directConvs conversations, saying how many are left and how many of
+// those ask for something. Reading a direct room marks what it read on
+// the server, so each message is shown once and the next Stop goes on
+// after it; a conversation without an actionable unread message is not
+// read, so its messages stay unread. Best effort.
+func (h *Hook) directNews(ctx context.Context, st *agent.State) string {
+	convs, err := agent.ListDirect(ctx, h.C)
+	if err != nil || agent.EnsureSelf(ctx, h.C, st) != nil {
+		return ""
+	}
+	var b strings.Builder
+	read, left := 0, 0
+	for _, cv := range convs {
+		switch {
+		case cv.Actionable <= 0:
+			continue
+		case read == directConvs:
+			left++
+			continue
+		}
+		read++
+		page, err := agent.Page(ctx, h.C, cv.RoomID, cv.LastReadAt, directMsgs)
+		if err != nil {
+			continue
+		}
+		msgs := slices.DeleteFunc(page, func(m agent.Msg) bool { return m.Author == st.SelfID })
+		if len(msgs) == 0 { // a page of its own messages: the rest still waits
+			fmt.Fprintf(&b, "(%d unread in direct with %s, %d of them asking for an answer: read them with messages.list on room %s.)\n",
+				cv.Unread, agent.OneLine(cv.Address), cv.Actionable, agent.OneLine(cv.RoomID))
+			continue
+		}
+		room := agent.LoadRoom(ctx, h.C, cv.RoomID, "direct with "+cv.Address+" (room_id "+cv.RoomID+")")
+		b.WriteString(agent.Format(room, msgs))
+		more, asking := cv.Unread-len(msgs), cv.Actionable
+		for _, m := range msgs {
+			if agent.Actionable(m) {
+				asking--
+			}
+		}
+		if more > 0 {
+			fmt.Fprintf(&b, "(%d more unread in this conversation, %d of them asking for an answer: read them with messages.list on room %s.)\n",
+				more, max(asking, 0), agent.OneLine(cv.RoomID))
+		}
+	}
+	if b.Len() > 0 && left > 0 {
+		fmt.Fprintf(&b, "(%d more direct conversations with messages asking for an answer: see direct.list.)\n", left)
+	}
+	return b.String()
 }
 
 func (h *Hook) releaseOnStop(ctx context.Context, st *agent.State) error {

@@ -36,10 +36,12 @@ type Event struct {
 	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
-// RoomPayload is the payload of a room event.
+// RoomPayload is the payload of a room event. Kind is room or direct;
+// hosts before direct conversations send none, which is room.
 type RoomPayload struct {
 	Name     string `json:"name"`
 	Archived bool   `json:"archived"`
+	Kind     string `json:"kind"`
 }
 
 // MemberPayload is the payload of a member event.
@@ -291,8 +293,8 @@ func ids(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]int64, e
 
 func logRoom(ctx context.Context, tx *sql.Tx, roomID string) error {
 	var p RoomPayload
-	if err := tx.QueryRowContext(ctx, `SELECT name, archived_at IS NOT NULL FROM rooms WHERE id = ?`, roomID).
-		Scan(&p.Name, &p.Archived); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT name, archived_at IS NOT NULL, kind FROM rooms WHERE id = ?`, roomID).
+		Scan(&p.Name, &p.Archived, &p.Kind); err != nil {
 		return err
 	}
 	return appendEvent(ctx, tx, roomID, EventRoom, p)

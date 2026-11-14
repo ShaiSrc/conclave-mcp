@@ -4,6 +4,7 @@ import { roomsPage, roomPage } from './rooms.js';
 import { keysPage, auditPage } from './keys.js';
 import { federationPage } from './federation.js';
 import { botsPage } from './bots.js';
+import { directPage } from './direct.js';
 
 const main = document.getElementById('app');
 const nav = document.getElementById('nav');
@@ -107,7 +108,7 @@ async function header() {
     if (err.status === 401) throw err;
   }
   return [
-    h('a', { href: '#/' }, 'Rooms'), h('a', { href: '#/keys' }, 'Keys'), h('a', { href: '#/bots' }, 'Bots'),
+    h('a', { href: '#/' }, 'Rooms'), h('a', { href: '#/keys' }, 'Keys'), h('a', { href: '#/bots' }, 'Bots'), h('a', { href: '#/direct' }, 'Direct'),
     h('a', { href: '#/audit' }, 'Audit'), ...(federation ? [h('a', { href: '#/federation' }, 'Federation')] : []),
     h('a', { href: '#/passkeys' }, 'Passkeys'),
     h('span', { class: 'rooms' }, rooms.map(r => h('a', { href: '#/rooms/' + encodeURIComponent(r.id) }, r.name))),
@@ -124,6 +125,7 @@ const routes = [
   [/^#\/rooms\/([^/]+)$/, roomPage],
   [/^#\/keys$/, keysPage],
   [/^#\/bots$/, botsPage],
+  [/^#\/direct$/, directPage],
   [/^#\/audit$/, auditPage],
   [/^#\/federation$/, federationPage],
   [/^#\/passkeys$/, passkeysPage],

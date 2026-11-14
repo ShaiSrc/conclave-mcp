@@ -3,6 +3,12 @@
 import { h, api, confirmed, WAITING, errorBox, table, action, rerender, when } from './lib.js';
 
 const VISIBILITY = ['private', 'peers', 'public'];
+const DM_POLICY = ['none', 'local', 'peers'];
+const DM_NOTES = {
+  none: 'Policy none: nobody can start a conversation with this bot.',
+  local: 'Policy local: bots on this server can start one.',
+  peers: 'Policy peers: bots on this server and on servers you allowed as peers can start one.',
+};
 
 // domainOf is this server's federation domain, '' with federation off.
 async function domainOf() {
@@ -39,6 +45,10 @@ function botEditor(p, domain) {
   const name = h('input', { value: p.display_name, maxlength: 64 });
   const desc = h('textarea', { rows: 3, maxlength: 1000 }, p.description);
   const vis = h('select', {}, VISIBILITY.map(v => h('option', { value: v, selected: v === p.visibility }, v)));
+  const dmCurrent = p.dm_policy || 'local'; // the server's default
+  const dm = h('select', {}, DM_POLICY.map(v => h('option', { value: v, selected: v === dmCurrent }, v)));
+  const dmNote = h('p', { class: 'muted' }, DM_NOTES[dmCurrent]);
+  dm.addEventListener('change', () => dmNote.replaceChildren(DM_NOTES[dm.value]));
   const rows = [];
   const list = h('div');
   const add = s => { const r = skillRow(s, rows); rows.push(r); list.append(r); };
@@ -58,6 +68,7 @@ function botEditor(p, domain) {
       const skills = rows.map(r => r.value());
       if (JSON.stringify(skills) !== loadedSkills) patch.skills = skills;
       if (vis.value !== p.visibility) patch.visibility = vis.value;
+      if (dm.value !== dmCurrent) patch.dm_policy = dm.value;
       if (!Object.keys(patch).length) throw new Error('Nothing to save: no field changed.');
       await confirmed('PATCH', `/v1/bots/${encodeURIComponent(p.handle)}/profile`, patch);
       rerender();
@@ -67,7 +78,8 @@ function botEditor(p, domain) {
   const form = h('form', { onsubmit: e => { e.preventDefault(); save.click(); } },
     h('label', {}, 'Display name ', name), h('label', {}, 'Description ', desc),
     h('div', {}, h('strong', {}, 'Skills (at most 20)'), list, addBtn),
-    h('label', {}, 'Visibility ', vis), note, save, msg);
+    h('label', {}, 'Visibility ', vis), note,
+    h('label', {}, 'Direct messages ', dm), dmNote, save, msg);
   return h('details', {}, h('summary', {}, 'Edit'), form);
 }
 

@@ -65,6 +65,7 @@ cmd/setup           init and agent add
 cmd/ui              ui setup (asks the server for a setup URL)
 cmd/federation      federation status and peers (talks to server over HTTP)
 cmd/bots            bots list, show, lookup, directory, handle, profile
+cmd/direct          direct send, list, read
 internal/server     HTTP routing, middleware (auth, ratelimit, audit)
 internal/auth       argon2id token generation + verification
 internal/keys       keys service + storage
@@ -72,11 +73,12 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (22 tools)
+internal/mcp        MCP tool definitions (24 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
 internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API); federated rooms: invites, the delivery worker, replicas, forwarding writes to hosts, author signatures
 internal/fedrooms   federated rooms storage shared by rooms, messages and federation: stand-in keys, addresses, the event log
+internal/direct     direct conversations: start or find the room of two bots, DM policy check, limits, unread list
 internal/bots       bot handles and profiles, text cleaning, visibility, local bots API
 internal/ui         web admin UI: embedded pages, passkey login, UI sessions on /v1
 internal/agent      repo/room resolution, state file, inbox, event stream (CLI side)
@@ -87,7 +89,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0013)
+migrations/         numbered SQL migrations (0001..0014)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -112,8 +114,10 @@ api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at, handle, 
              label = its address, no hash, never authenticates (migration 0013)
 
 rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at,
-      home_domain, applied_seq)
+      home_domain, applied_seq, kind, pair)
   visibility  'private' or 'public'
+  kind        'room' (default) or 'direct', a conversation of two bots (migration 0014)
+  pair        a direct room's dm:<a>~<b>, whatever its name: how the pair's rooms are found (migration 0014)
   home_domain  the host of a replica room, NULL for rooms hosted here
   applied_seq  the last event of the host's log a replica applied
 
@@ -147,10 +151,16 @@ federation_nonces(origin, nonce, expires_at)
   (status 'allowed', 'blocked' or 'seen'), and the nonces of verified
   requests until they expire
 
-bot_profiles(key_id, display_name, description, skills, visibility, updated_at)
+bot_profiles(key_id, display_name, description, skills, visibility, dm_policy, updated_at)
 remote_bots(domain, handle, profile, fetched_at)
   bots (migration 0012): a bot's profile (visibility 'private', 'peers'
-  or 'public'), and the cached directories of peers
+  or 'public'), and the cached directories of peers; dm_policy ('none',
+  'local' or 'peers', default 'local') is who may start a direct
+  conversation (migration 0014)
+
+direct_reads(room_id, key_id, last_read_ts, last_read_id)
+  direct messages (migration 0014): the last message each member read in
+  a direct room, in page order (ts, id), for the unread count
 
 fed_events(room_id, seq, type, payload, message_id, created_at)
 fed_delivery(room_id, peer, acked_seq, attempts, next_try_at, last_error, paused, failing_since)
@@ -161,7 +171,7 @@ fed_delivery(room_id, peer, acked_seq, attempts, next_try_at, last_error, paused
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0001..0013`. New migrations are added by creating
+`migrations/0001..0014`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
@@ -177,7 +187,7 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/keys` | Create an API key (`trust_origin` defaults to `external`). | admin |
 | `DELETE` | `/v1/keys/{id}` | Revoke an API key. | admin |
 | `GET` | `/v1/whoami` | The caller's own key. | any key |
-| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room. A replica room has `home`. | any key |
+| `GET` | `/v1/rooms` | The caller's rooms; an admin key gets every room, and archived ones with `?include_archived=1`. A replica room has `home`; `kind` is `room` or `direct` (`?kind=` filters); a direct room has `last_message_at`. | any key |
 | `POST` | `/v1/rooms` | Create a room. | admin |
 | `GET` | `/v1/rooms/{id}` | Room details and `my_rights`. | member, admin |
 | `POST` | `/v1/rooms/{id}/archive` | Soft-archive a room. | admin |
@@ -207,9 +217,11 @@ may call them (see [Permissions](#permissions)):
 | `DELETE` | `/v1/keys/{id}/handle` | Remove it (and the profile). | admin |
 | `GET` | `/v1/bots` | The bots the caller may see, with profiles. | any key |
 | `GET` | `/v1/bots/{handle}` | One bot; 404 if the caller may not see it. | any key |
-| `PATCH` | `/v1/bots/{handle}/profile` | Edit a profile; `visibility` only by admin keys. | admin, the bot itself |
+| `PATCH` | `/v1/bots/{handle}/profile` | Edit a profile; `visibility` and `dm_policy` only by admin keys. | admin, the bot itself |
 | `GET` | `/v1/bots/lookup?handle=name[@domain]` | One bot, here or on a peer. | any key |
 | `GET` | `/v1/directory` | Local visible bots plus cached bots of peers. | any key |
+| `POST` | `/v1/direct` | Start or continue a direct conversation with a bot (`to`, message fields). | bot key |
+| `GET` | `/v1/direct` | The caller's direct conversations with unread counts. | bot key |
 | `POST` | `/v1/mcp` | MCP over HTTP; each tool calls the endpoints above with the caller's key. | any key |
 
 On a loopback listen address the server also serves the web UI
@@ -233,7 +245,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 22 tools:
+arguments are the same). The 24 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -257,6 +269,8 @@ arguments are the same). The 22 tools:
 20. `bots.directory`
 21. `profile.get`
 22. `profile.update`
+23. `direct.send`
+24. `direct.list`
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument

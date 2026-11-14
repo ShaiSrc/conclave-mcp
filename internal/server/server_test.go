@@ -649,3 +649,45 @@ func TestServer_FederatedRooms(t *testing.T) {
 		t.Errorf("events: %d %s", rec.Code, rec.Body)
 	}
 }
+
+// Direct conversations are wired, with federation off too: a bot starts
+// one through the send path, the other bot lists it, and a recipient on
+// another server answers 404 federation_disabled.
+func TestServer_DirectMessages(t *testing.T) {
+	db := uiDB(t)
+	tokens := map[string]string{}
+	for _, h := range []string{"alice", "bob"} {
+		token, phc, err := auth.GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, handle) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', ?)`,
+			h, phc, token[3:11], h); err != nil {
+			t.Fatal(err)
+		}
+		tokens[h] = token
+	}
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(who, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+tokens[who])
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := do("alice", http.MethodPost, "/v1/direct", `{"to":"bob","content":"hi","message_type":"question"}`); rec.Code != http.StatusCreated ||
+		!strings.Contains(rec.Body.String(), `"content":"hi"`) {
+		t.Errorf("start: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do("bob", http.MethodGet, "/v1/direct", ""); rec.Code != http.StatusOK ||
+		!strings.Contains(rec.Body.String(), `"address":"alice"`) || !strings.Contains(rec.Body.String(), `"unread":1`) {
+		t.Errorf("list: %d %s", rec.Code, rec.Body)
+	}
+	if rec := do("alice", http.MethodPost, "/v1/direct", `{"to":"bob@peer.example","content":"hi","message_type":"question"}`); rec.Code != http.StatusNotFound ||
+		!strings.Contains(rec.Body.String(), `"federation_disabled"`) {
+		t.Errorf("remote with federation off: %d %s", rec.Code, rec.Body)
+	}
+}

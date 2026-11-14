@@ -164,31 +164,39 @@ func FetchNew(ctx context.Context, c *client.Client, roomID string, st *State) (
 
 // ListAll returns the room's messages after since (all of them when
 // since is empty), oldest first.
-// ponytail: pages through the whole room; add a newest-first or
-// per-thread query if rooms grow to many thousands of messages.
 func ListAll(ctx context.Context, c *client.Client, roomID, since string) ([]Msg, error) {
 	var all []Msg
 	for {
-		p := fmt.Sprintf("/v1/rooms/%s/messages?limit=%d", roomID, pageSize)
-		if since != "" {
-			p += "&since=" + url.QueryEscape(since)
-		}
-		var page struct {
-			Messages []Msg `json:"messages"`
-		}
-		status, err := c.Do(ctx, client.Request{Method: "GET", Path: p, Out: &page})
+		page, err := Page(ctx, c, roomID, since, pageSize)
 		if err != nil {
 			return nil, err
 		}
-		if status != http.StatusOK {
-			return nil, fmt.Errorf("list messages: expected 200, got %d", status)
-		}
-		all = append(all, page.Messages...)
-		if len(page.Messages) < pageSize {
+		all = append(all, page...)
+		if len(page) < pageSize {
 			return all, nil
 		}
-		since = page.Messages[len(page.Messages)-1].TS
+		since = page[len(page)-1].TS
 	}
+}
+
+// Page returns up to limit of the room's messages after since (from
+// the first when since is empty), oldest first.
+func Page(ctx context.Context, c *client.Client, roomID, since string, limit int) ([]Msg, error) {
+	p := fmt.Sprintf("/v1/rooms/%s/messages?limit=%d", roomID, limit)
+	if since != "" {
+		p += "&since=" + url.QueryEscape(since)
+	}
+	var page struct {
+		Messages []Msg `json:"messages"`
+	}
+	status, err := c.Do(ctx, client.Request{Method: "GET", Path: p, Out: &page})
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("list messages: expected 200, got %d", status)
+	}
+	return page.Messages, nil
 }
 
 // ReplyTo returns the id m answers (metadata.reply_to), or 0.

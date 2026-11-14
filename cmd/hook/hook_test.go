@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -29,8 +30,59 @@ type fake struct {
 	claimReqs []map[string]any
 	posted    []map[string]any
 	released  bool
-	home      string // the room's host when it is a replica
-	hostDown  bool   // claims answer 502, as a replica's host that does not answer
+	home      string                 // the room's host when it is a replica
+	hostDown  bool                   // claims answer 502, as a replica's host that does not answer
+	convs     []agent.Conversation   // direct conversations (rooms D…)
+	dmMsgs    []agent.Msg            // room D1's, unless dm has them
+	dm        map[string][]agent.Msg // per direct room
+	dmReads   []string               // the request URI of each read of a direct room
+}
+
+// direct serves direct room D…: its info, members and messages after
+// since, up to limit. A read marks the room read up to its last
+// message, as the server does.
+func (f *fake) direct(w http.ResponseWriter, r *http.Request, room string) {
+	write := func(v any) { _ = json.NewEncoder(w).Encode(v) }
+	id, rest, _ := strings.Cut(room, "/")
+	switch rest {
+	case "":
+		write(map[string]any{"id": id, "name": "dm:a~b", "home": "b.example"})
+	case "members":
+		write(map[string]any{"members": []any{}})
+	case "messages":
+		f.dmReads = append(f.dmReads, r.URL.RequestURI())
+		all, ok := f.dm[id]
+		if !ok && id == "D1" {
+			all = f.dmMsgs
+		}
+		since := r.URL.Query().Get("since")
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil {
+			limit = 50
+		}
+		out := []agent.Msg{}
+		for _, m := range all {
+			if m.TS > since && len(out) < limit {
+				out = append(out, m)
+			}
+		}
+		for i := range f.convs {
+			if cv := &f.convs[i]; cv.RoomID == id && len(out) > 0 {
+				for _, m := range out {
+					if m.Author != 1 {
+						cv.Unread = max(cv.Unread-1, 0)
+						if agent.Actionable(m) {
+							cv.Actionable = max(cv.Actionable-1, 0)
+						}
+					}
+				}
+				cv.LastReadAt = out[len(out)-1].TS
+			}
+		}
+		write(map[string]any{"messages": out})
+	default:
+		http.NotFound(w, r)
+	}
 }
 
 // add appends a message from another agent; open event streams see it.
@@ -125,7 +177,13 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.posted = append(f.posted, body)
 		w.WriteHeader(http.StatusCreated)
 		write(map[string]any{"id": 9})
+	case "GET /v1/direct":
+		write(map[string]any{"conversations": f.convs})
 	default:
+		if room, ok := strings.CutPrefix(r.URL.Path, "/v1/rooms/D"); ok && r.Method == "GET" {
+			f.direct(w, r, "D"+room)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }

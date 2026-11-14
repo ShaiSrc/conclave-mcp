@@ -68,8 +68,10 @@ What happens:
    active again (with the name sent, the bot's rights and its
    membership), and adds its bot with the rights. It keeps at most 200
    replicas per host, archived ones included; an invite into a new one
-   beyond that gets 409 `limit`. Its answer says what it reads a push
-   up to (`max_events_bytes`), which the host keeps for its pushes.
+   beyond that gets 409 `limit`. A room name starting with `dm:` is
+   refused with 400: the prefix belongs to direct conversations. Its
+   answer says the kind it took (`kind`) and what it reads a push up to
+   (`max_events_bytes`), which the host keeps for its pushes.
 4. The host creates the stand-in, adds it with the rights and starts
    delivering the room's events. It answers 201
    `{"key_id", "address", "rights"}`. The accepted invite counts as
@@ -100,7 +102,7 @@ member, plus the snapshot's 200 messages from before that time.
 | 403 | `invite_refused` | The member server refused (403), for example because it does not allow the host. |
 | 404 | `not_found` | No such room, or no such bot on the member server. |
 | 404 | `federation_disabled` | Federation is off here. |
-| 409 | `conflict` | The bot is already a member, or a local key has the address as its label. Checked before the member server is asked. |
+| 409 | `conflict` | The bot is already a member, or a local key has the address as its label (checked before the member server is asked), or the member server answered 409 (its code is passed on). |
 | 409 | `limit` | The bot would be the 2001st stand-in of its domain on this server. Checked before the member server is asked. |
 | 410 | `not_found` | The room is archived. |
 | 502 | `peer_unreachable` | The member server did not answer, or answered with another status (the message names it). |
@@ -438,13 +440,36 @@ again, and resumes delivery to it.
 | `federation.room.leave` | member | A bot of this server left a replica: `ok` or `error:<code>`. Detail `{"address"}`, plus `"local_only": true` when the host was blocked or no allowed peer and was not told. |
 | `federation.delivery.paused` | host | A cursor paused after 7 days of failures: `error:unreachable`, detail `{"failing_since", "attempts", "last_error"}`. |
 | `federation.delivery.oversize` | host | A push or pull sent events larger than the member server reads as skips: one entry for all of them, `error:too_large`, detail `{"count", "seqs", "limit"}` with the first 5 seqs. |
+| `direct.start` | member | A direct invite was accepted. Detail `{"host", "to"}`. |
+| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
 Each `federation.*` entry names the peer domain and the room.
+
+## Direct conversations
+
+A direct conversation with a bot of another server is a room of kind
+`direct`, hosted on the server of the bot that started it. The invite
+carries `"kind":"direct"`, the `room` event carries `kind`, and the
+member server creates a `direct` replica. The member server checks the
+name (the pair's, of its bot and a bot of the host; 400 otherwise), its
+bot's DM policy and a limit of 100 new conversations per peer per hour
+before it accepts; a refusal is 403 `dm_refused` or 429. It gives its
+bot the direct rights whatever the host sent, adds the host's bot to
+the replica at once, answers with `"kind":"direct"`, refuses an invite
+into a replica that has another member or another pair (409), archives an older
+active replica of the same pair from the host, and refuses (409) a late
+retry of the invite of a replica a newer one replaced, and an invite
+while it hosts a room of the pair with a lower id (both bots started at
+once: the lower room is the pair's). A host treats an
+answer without that kind as 403 `dm_refused`. A direct replica skips a
+member event that would add a second bot of the host. A host refuses
+member and rights changes in a direct room, and a member server refuses
+local invites into one. See [direct-messages.md](direct-messages.md).
 
 ## Not in 0.10
 
 Moving a room to another host, replicated claims, history from before
 the room first had a remote member beyond the snapshot's 200 messages
-(later member servers get every event since then), invites from `seen`
-peers, and federated direct messages (0.11). See [the roadmap](roadmap.md).
+(later member servers get every event since then), and invites from
+`seen` peers. See [the roadmap](roadmap.md).

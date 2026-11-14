@@ -260,10 +260,13 @@ func (s *Service) limiter(origin string) *rate.Limiter {
 
 // retryAfter is the Retry-After value for lim: the wait for its next
 // token, at least a second.
-func retryAfter(lim *rate.Limiter) string {
-	rsv := lim.Reserve()
-	delay := rsv.Delay()
-	rsv.Cancel()
+func retryAfter(lim *rate.Limiter) string { return retryAfterAt(lim, time.Now()) }
+
+// retryAfterAt is retryAfter at time now.
+func retryAfterAt(lim *rate.Limiter, now time.Time) string {
+	rsv := lim.ReserveN(now, 1)
+	delay := rsv.DelayFrom(now)
+	rsv.CancelAt(now)
 	return strconv.Itoa(int(max(delay, time.Second).Seconds()))
 }
 
