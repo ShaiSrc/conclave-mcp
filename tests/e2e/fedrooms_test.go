@@ -20,16 +20,23 @@ type fedMsg struct {
 	} `json:"metadata"`
 }
 
-// messages returns the messages of room that k reads on f, by content.
-func (f *fedEnv) messages(k apiKey, room string) map[string]fedMsg {
+// messageList returns the messages of room that k reads on f, in the
+// order f lists them.
+func (f *fedEnv) messageList(k apiKey, room string) []fedMsg {
 	f.t.Helper()
 	r := f.callAs("GET", "/v1/rooms/"+room+"/messages?limit=500", k, nil)
 	var out struct{ Messages []fedMsg }
 	if r.Status != 200 || json.Unmarshal(r.Body, &out) != nil {
 		f.t.Fatalf("messages on %s: %d %s", f.domain, r.Status, r.Body)
 	}
+	return out.Messages
+}
+
+// messages returns the messages of room that k reads on f, by content.
+func (f *fedEnv) messages(k apiKey, room string) map[string]fedMsg {
+	f.t.Helper()
 	m := map[string]fedMsg{}
-	for _, msg := range out.Messages {
+	for _, msg := range f.messageList(k, room) {
 		m[msg.Content] = msg
 	}
 	return m
