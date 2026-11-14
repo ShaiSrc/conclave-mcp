@@ -26,8 +26,14 @@ import (
 // ceremonyCookie links a ceremony's begin and finish requests.
 const ceremonyCookie = "conclave_ui_ceremony"
 
-// maxCeremonies caps the live ceremonies kept in memory.
-const maxCeremonies = 64
+// maxCeremonies caps the live ceremonies begun without a session:
+// logins and setup-token registrations. maxSessionCeremonies caps those
+// of one session (confirmations and operator messages), which logins
+// cannot take.
+const (
+	maxCeremonies        = 64
+	maxSessionCeremonies = 8
+)
 
 // operator is the one WebAuthn user: every passkey is the operator's.
 type operator struct {
@@ -266,18 +272,35 @@ func (s *Service) startCeremony(w http.ResponseWriter, r *http.Request, c ceremo
 	}
 	now := s.now()
 	c.expires = now.Add(CeremonyTTL)
+	// A full group drops its oldest ceremony that may go: among those
+	// without a session a login (a flood of login begins must not lock
+	// the operator out), in a session any of its own.
+	limit := maxCeremonies
+	if c.session != "" {
+		limit = maxSessionCeremonies
+	}
 	s.mu.Lock()
-	// ponytail: at most maxCeremonies live entries and an O(n) sweep per
-	// begin (n <= 64); a flood is refused with 503 until entries expire.
+	// ponytail: an O(n) sweep per begin; n is maxCeremonies plus
+	// maxSessionCeremonies per live session.
+	n, oldest := 0, ""
 	for k, v := range s.ceremonies {
-		if !now.Before(v.expires) {
+		switch {
+		case !now.Before(v.expires):
 			delete(s.ceremonies, k)
+		case v.session == c.session:
+			n++
+			if (v.session != "" || v.kind == kindLogin) && (oldest == "" || v.expires.Before(s.ceremonies[oldest].expires)) {
+				oldest = k
+			}
 		}
 	}
-	if len(s.ceremonies) >= maxCeremonies {
-		s.mu.Unlock()
-		writeErr(w, r, http.StatusServiceUnavailable, "unavailable", "too many passkey ceremonies in progress: try again in a few minutes")
-		return false
+	if n >= limit {
+		if oldest == "" { // only registrations: they need a setup token or a confirmed session
+			s.mu.Unlock()
+			writeErr(w, r, http.StatusServiceUnavailable, "unavailable", "too many passkey ceremonies in progress: try again in a few minutes")
+			return false
+		}
+		delete(s.ceremonies, oldest)
 	}
 	s.ceremonies[hash] = c
 	s.mu.Unlock()
