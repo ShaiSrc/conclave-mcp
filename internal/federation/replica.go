@@ -1549,10 +1549,15 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 	s.applyMu.Lock()
 	err = s.applyMessage(ctx, roomID, host, ev.Payload)
 	s.applyMu.Unlock()
-	if err != nil {
-		return 0, err
+	if err == nil {
+		err = s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, remoteID).Scan(&id)
 	}
-	err = s.db.QueryRowContext(ctx, `SELECT id FROM messages WHERE room_id = ? AND remote_id = ?`, roomID, remoteID).Scan(&id)
+	if errors.Is(err, errRefused) || errors.Is(err, sql.ErrNoRows) {
+		// The event is not the message we sent (another one, one that
+		// does not verify, a deleted one): no answer, as in ForwardMessage.
+		s.logger.Warn("federation forwarded message: answered event not stored", "room", roomID, "host", host, "err", err)
+		return 0, &fedrooms.Error{Status: http.StatusBadGateway, Code: "host_unreachable", Message: host + " did not answer with the message's event"}
+	}
 	return id, err
 }
 
