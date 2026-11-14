@@ -99,7 +99,7 @@ type pageData struct {
 }
 
 func (s *Service) view(p bots.Profile) botView {
-	v := botView{Handle: p.Handle, Name: p.DisplayName, Address: p.Handle + "@" + s.id.Domain, Description: p.Description}
+	v := botView{Handle: p.Handle, Name: p.DisplayName, Address: p.Handle + "@" + s.id().Domain, Description: p.Description}
 	if v.Name == "" {
 		v.Name = p.Handle
 	}
@@ -110,7 +110,7 @@ func (s *Service) view(p bots.Profile) botView {
 }
 
 func (s *Service) render(w http.ResponseWriter, status int, page string, d pageData) {
-	d.Domain = s.id.Domain
+	d.Domain = s.id().Domain
 	var buf bytes.Buffer
 	if err := pages[page].ExecuteTemplate(&buf, "layout", d); err != nil {
 		s.logger.Error("public page", "page", page, "err", err)
@@ -124,7 +124,7 @@ func (s *Service) render(w http.ResponseWriter, status int, page string, d pageD
 
 // notFound is the page for unknown and non-public bots alike.
 func (s *Service) notFound(w http.ResponseWriter) {
-	s.render(w, http.StatusNotFound, "notfound", pageData{Title: "Not found", Foot: s.id.Domain})
+	s.render(w, http.StatusNotFound, "notfound", pageData{Title: "Not found", Foot: s.id().Domain})
 }
 
 func (s *Service) internalError(w http.ResponseWriter, what string, err error) {
@@ -138,7 +138,7 @@ func (s *Service) handlePublicDirectory(w http.ResponseWriter, r *http.Request) 
 		s.internalError(w, "public directory", err)
 		return
 	}
-	d := pageData{Title: "Bots on " + s.id.Domain, Foot: s.id.Domain}
+	d := pageData{Title: "Bots on " + s.id().Domain, Foot: s.id().Domain}
 	for _, p := range all[:min(len(all), maxPublicBots)] {
 		d.Bots = append(d.Bots, s.view(p))
 	}
@@ -170,7 +170,7 @@ func (s *Service) publicPosts(ctx context.Context, p bots.Profile) ([]postView, 
 		JOIN rooms r ON r.id = m.room_id AND r.feed = ? AND r.home_domain IS NULL AND r.archived_at IS NULL
 		WHERE m.author_key_id = ? AND m.deleted_at IS NULL
 		AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.visibility') END = 'public'
-		ORDER BY m.ts DESC, m.id DESC LIMIT ?`, p.Handle+"@"+s.id.Domain, p.KeyID, maxPublicPosts)
+		ORDER BY m.ts DESC, m.id DESC LIMIT ?`, p.Handle+"@"+s.id().Domain, p.KeyID, maxPublicPosts)
 	if err != nil {
 		return nil, err
 	}
@@ -257,8 +257,8 @@ func (s *Service) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
 		s.notFound(w)
 		return
 	}
-	v, page := s.view(p), "https://"+s.id.Domain+"/@"+p.Handle
-	f := atomFeed{ID: "tag:" + s.id.Domain + ",2026:feed/" + p.Handle, Title: v.Name,
+	v, page := s.view(p), "https://"+s.id().Domain+"/@"+p.Handle
+	f := atomFeed{ID: "tag:" + s.id().Domain + ",2026:feed/" + p.Handle, Title: v.Name,
 		Updated: p.UpdatedAt.UTC().Format(time.RFC3339), Author: atomAuthor{v.Name, page},
 		Links: []atomLink{{"self", "application/atom+xml", page + "/feed.xml"}, {"alternate", "text/html", page}}}
 	for i, post := range posts {
@@ -271,7 +271,7 @@ func (s *Service) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
 		if rs := []rune(title); len(rs) > 80 {
 			title = string(rs[:80])
 		}
-		f.Entries = append(f.Entries, atomEntry{ID: fmt.Sprintf("tag:%s,2026:post/%d", s.id.Domain, post.ID), Title: title,
+		f.Entries = append(f.Entries, atomEntry{ID: fmt.Sprintf("tag:%s,2026:post/%d", s.id().Domain, post.ID), Title: title,
 			Updated: updated, Content: atomText{"text", post.Text}})
 	}
 	body, err := xml.Marshal(f)
@@ -307,7 +307,7 @@ func (s *Service) handlePublicCard(w http.ResponseWriter, r *http.Request) {
 		"defaultOutputModes": []string{"text/plain"},
 		"capabilities":       map[string]any{},
 		"supportedInterfaces": []map[string]string{{
-			"url": "https://" + s.id.Domain + "/@" + p.Handle, "protocolBinding": "conclave-federation/1", "protocolVersion": "1"}},
+			"url": "https://" + s.id().Domain + "/@" + p.Handle, "protocolBinding": "conclave-federation/1", "protocolVersion": "1"}},
 		"x-conclave": map[string]string{"address": v.Address},
 	})
 }

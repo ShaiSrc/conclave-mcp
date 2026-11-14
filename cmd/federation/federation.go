@@ -1,6 +1,7 @@
 // Package federation implements the `conclave-mcp federation` subcommand:
 //
 //	conclave-mcp federation status
+//	conclave-mcp federation rotate-key
 //	conclave-mcp federation peers list [--format json|table]
 //	conclave-mcp federation peers add <domain> [--fingerprint F] [--note N]
 //	conclave-mcp federation peers block|remove|ping <domain>
@@ -26,7 +27,7 @@ func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "federation", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers := &cobra.Command{Use: "peers", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers.AddCommand(newListCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd())
-	cmd.AddCommand(newStatusCmd(), peers)
+	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers)
 	return cmd
 }
 
@@ -105,12 +106,44 @@ func newStatusCmd() *cobra.Command {
 					Domain, Mode, Fingerprint string
 					KeyID                     string `json:"key_id"`
 					Peers                     map[string]int
+					Keys                      []struct {
+						KeyID                      string `json:"key_id"`
+						Fingerprint, Status, Until string
+					}
 				}
 				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: "/v1/federation", Out: &st}); err != nil {
 					return err
 				}
-				_, _ = fmt.Fprintf(out, "domain:      %s\nmode:        %s\nkey id:      %s\nfingerprint: %s\npeers:       %d allowed, %d blocked, %d seen\n",
+				_, _ = fmt.Fprintf(out, "domain:      %s\nmode:        %s\nkey id:      %s\nfingerprint: %s\npeers:       %d allowed, %d blocked, %d seen\nkeys:\n",
 					st.Domain, st.Mode, st.KeyID, st.Fingerprint, st.Peers["allowed"], st.Peers["blocked"], st.Peers["seen"])
+				for _, k := range st.Keys {
+					until := ""
+					if k.Until != "" {
+						until = " until " + k.Until
+					}
+					_, _ = fmt.Fprintf(out, "  %s  %s  %s%s\n", k.KeyID, k.Fingerprint, k.Status, until)
+				}
+				return nil
+			})
+		},
+	}
+}
+
+func newRotateKeyCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "rotate-key", Short: "Make a new key current; the old one endorses it and stays listed for 30 days", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var k struct {
+					KeyID       string `json:"key_id"`
+					Fingerprint string
+				}
+				if _, err := c.Do(ctx, client.Request{Method: "POST", Path: "/v1/federation/keys/rotate", Out: &k}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "new key id:  %s\nfingerprint: %s\n"+
+					"peers follow the new key through the old key's endorsement; the old key stays listed for 30 days, and the next rotation is possible after them\n",
+					k.KeyID, k.Fingerprint)
 				return nil
 			})
 		},

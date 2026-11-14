@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,15 +70,21 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			return
 		}
 
-		// 4. A known peer's key is its stored key, used without a fetch.
+		// 4. A known peer's key is its stored key, used without a fetch,
+		// unless it signs with a new key its pinned one endorsed (repin).
 		// 3, open mode: an unknown origin's key comes from its document
 		// (TOFU).
 		pub := peer.PublicKey
 		if known {
 			if len(pub) != ed25519.PublicKeySize || p.KeyID != KeyIDFor(pub) {
-				s.checkKeyChange(ctx, peer, p.KeyID)
-				s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "not the peer's pinned key")
-				return
+				if pub, err = s.repin(ctx, peer, p.KeyID); err != nil {
+					s.fail(w, r, err)
+					return
+				}
+				if pub == nil {
+					s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "not the peer's pinned key")
+					return
+				}
 			}
 		} else if pub, err = s.firstContactKey(ctx, origin, p.KeyID); err != nil {
 			switch {
@@ -93,7 +100,7 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 		}
 
 		// 5. Destination.
-		if d, err := NormalizeDomain(r.Host); err != nil || d != s.id.Domain {
+		if d, err := NormalizeDomain(r.Host); err != nil || d != s.id().Domain {
 			s.refuse(w, r, origin, http.StatusMisdirectedRequest, "wrong_destination", "request is for another server")
 			return
 		}
@@ -120,7 +127,7 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			}
 			return
 		}
-		if !ed25519.Verify(pub, SigningString(r.Method, r.RequestURI, s.id.Domain, origin, p.TS, p.Nonce, body), p.Sig) {
+		if !ed25519.Verify(pub, SigningString(r.Method, r.RequestURI, s.id().Domain, origin, p.TS, p.Nonce, body), p.Sig) {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "signature does not verify")
 			return
 		}
@@ -270,30 +277,73 @@ func retryAfterAt(lim *rate.Limiter, now time.Time) string {
 	return strconv.Itoa(int(max(delay, time.Second).Seconds()))
 }
 
-// checkKeyChange runs when a request for a known peer names a key
-// other than its stored one. Anyone can send that, so it is audited
-// only on evidence: the peer's own document lists the presented key.
-// The document is fetched at most once per peer a minute.
-func (s *Service) checkKeyChange(ctx context.Context, peer Peer, presented string) {
-	if !s.keyChecks.allow(peer.Domain) {
-		return
+// repin runs when a request of a known peer names a key other than its
+// pinned one, and returns the key to verify the request with, or nil to
+// refuse it. Anyone can send such a request, so the peer's document is
+// fetched at most once per peer a minute. The presented key is pinned
+// when the document lists it endorsed by the pinned key with a valid
+// signature, and the peer never had it before; the pinned key goes to
+// the peer's history (federation.key_rotated). Otherwise the change is
+// audited (federation.key_changed) when the document cannot be fetched
+// or lists the presented key; one that does not list it is no evidence.
+func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed25519.PublicKey, error) {
+	if len(peer.PublicKey) != ed25519.PublicKeySize || !s.keyChecks.allow(peer.Domain) {
+		return nil, nil
 	}
 	doc, err := s.fetch.Document(ctx, peer.Domain)
 	if err != nil {
-		return
+		s.keyChanged(ctx, peer.Domain, presented, peer.Fingerprint, "error:bad_signature", "unreachable")
+		return nil, nil
 	}
-	if pub := keyIn(doc, presented); pub != nil && KeyIDFor(pub) == presented {
-		s.keyChanged(ctx, peer.Domain, Fingerprint(pub), peer.Fingerprint, "error:bad_signature")
+	i := slices.IndexFunc(doc.Keys, func(k DocKey) bool { return k.KeyID == presented })
+	if i < 0 {
+		return nil, nil
 	}
+	k := doc.Keys[i]
+	pub, _ := b64.DecodeString(k.PublicKey) // checked by the Fetcher
+	pinned := KeyIDFor(peer.PublicKey)
+	var sig []byte
+	if k.EndorsedBy != nil {
+		sig, _ = decodeB64(k.EndorsedBy.Sig)
+	}
+	history, err := s.peers.History(ctx, peer.Domain)
+	if err != nil {
+		return nil, err
+	}
+	reason := ""
+	switch {
+	case k.EndorsedBy == nil || k.EndorsedBy.KeyID != pinned:
+		reason = "not_endorsed"
+	case len(sig) != ed25519.SignatureSize ||
+		!ed25519.Verify(peer.PublicKey, EndorsementString(peer.Domain, pinned, presented, b64.EncodeToString(pub)), sig):
+		reason = "bad_endorsement"
+	case slices.ContainsFunc(history, func(h ed25519.PublicKey) bool { return KeyIDFor(h) == presented }):
+		reason = "retired_key"
+	}
+	if reason != "" {
+		s.keyChanged(ctx, peer.Domain, Fingerprint(pub), peer.Fingerprint, "error:bad_signature", reason)
+		return nil, nil
+	}
+	if ok, err := s.peers.Repin(ctx, peer.Domain, peer.PublicKey, pub); !ok || err != nil {
+		return nil, err // !ok: the operator changed the pin meanwhile
+	}
+	detail, _ := json.Marshal(struct {
+		Previous string `json:"previous"`
+		Current  string `json:"current"`
+	}{peer.Fingerprint, Fingerprint(pub)})
+	s.audit(ctx, "federation.key_rotated", peer.Domain, "ok", string(detail))
+	return pub, nil
 }
 
 // keyChanged audits evidence that domain serves a key other than its
-// pinned one.
-func (s *Service) keyChanged(ctx context.Context, domain, presented, expected, result string) {
+// pinned one, and why it was not re-pinned (none for an operator's
+// lookup).
+func (s *Service) keyChanged(ctx context.Context, domain, presented, expected, result, reason string) {
 	detail, _ := json.Marshal(struct {
 		Presented string `json:"presented"`
 		Expected  string `json:"expected"`
-	}{presented, expected})
+		Reason    string `json:"reason,omitempty"`
+	}{presented, expected, reason})
 	s.audit(ctx, "federation.key_changed", domain, result, string(detail))
 }
 
@@ -356,7 +406,7 @@ func (s *Service) handlePing(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"domain": s.id.Domain})
+	writeJSON(w, http.StatusOK, map[string]string{"domain": s.id().Domain})
 }
 
 // pruneNonces deletes nonces that expired over a minute before now. The

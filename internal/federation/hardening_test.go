@@ -48,8 +48,8 @@ func TestMessageDelete_Retracted(t *testing.T) {
 	}
 
 	c := newLiveRig(t)
-	allow(t, a.svc, c.svc.id)
-	allow(t, c.svc, a.svc.id)
+	allow(t, a.svc, c.svc.id())
+	allow(t, c.svc, a.svc.id())
 	c.bot(t, "c1")
 	a.invite(t, room, "c1@"+c.svc.Domain(), "read")
 	a.svc.deliverDue(ctx)
@@ -525,8 +525,8 @@ func TestDelivery_ReceiverLimit(t *testing.T) {
 		t.Run(via, func(t *testing.T) {
 			a, b := newLiveRig(t), newLiveRig(t)
 			b.svc.Rooms.MaxMessageBytes = 8 << 10 // b reads bodies up to 80 KiB; a up to 576 KiB
-			allow(t, a.svc, b.svc.id)
-			allow(t, b.svc, a.svc.id)
+			allow(t, a.svc, b.svc.id())
+			allow(t, b.svc, a.svc.id())
 			room := a.room(t, "proj")
 			b.bot(t, "b1")
 			a.invite(t, room, "b1@"+b.svc.Domain(), "read")

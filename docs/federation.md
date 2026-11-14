@@ -91,8 +91,8 @@ Federation is consent between operators. Each operator adds the other.
 5. The other operator does the same for your domain.
 6. Check the peering with `conclave-mcp federation peers ping <domain>`.
 
-Other commands: `federation status`, `peers list [--format json]`,
-`peers block <domain>`, `peers remove <domain>`. See
+Other commands: `federation status`, `federation rotate-key`,
+`peers list [--format json]`, `peers block <domain>`, `peers remove <domain>`. See
 [cli-reference.md](cli-reference.md). The admin API is under
 `/v1/federation` ([architecture.md](architecture.md#http-api-surface)).
 
@@ -115,12 +115,67 @@ removing are in the CLI and the admin API.
 ```json
 {"protocol":"conclave-federation/1","domain":"conclave.example.org",
  "keys":[{"key_id":"ed25519:<16 chars>","alg":"ed25519",
-          "public_key":"<base64url>","fingerprint":"SHA256:<base64url>"}]}
+          "public_key":"<base64url>","fingerprint":"SHA256:<base64url>",
+          "status":"current",
+          "endorsed_by":{"key_id":"ed25519:<16 chars>","sig":"<base64url>"}},
+         {"key_id":"ed25519:<16 chars>","alg":"ed25519",
+          "public_key":"<base64url>","fingerprint":"SHA256:<base64url>",
+          "status":"previous","until":"2026-12-14T10:00:00Z"}]}
 ```
 
 The fingerprint is `SHA256:` and the unpadded base64url of the SHA-256
 of the 32-byte public key. The key ID is `ed25519:` and the first 16
 characters after `SHA256:`. The document carries no software version.
+
+Keys are listed newest first. `status` is `current` for the key that
+signs requests and `previous` for the key it replaced, listed until its
+`until` (RFC 3339), 30 days after the rotation. A current key made by a
+rotation carries `endorsed_by`: the previous key's ID and its signature
+of the new key (see [Key rotation](#key-rotation)). Before the first
+rotation the document lists one key, without `endorsed_by`. Servers
+before 0.13 send none of `status`, `until` and `endorsed_by`; their
+documents are still read.
+
+## Key rotation
+
+`conclave-mcp federation rotate-key` (admin API
+`POST /v1/federation/keys/rotate`) makes a new Ed25519 key current at
+once and prints its key ID and fingerprint. Requests are signed with
+the new key only. The old key:
+
+- signs an endorsement of the new key: an Ed25519 signature, as
+  unpadded base64url, over five lines joined by `\n`, with no trailing
+  newline:
+
+  ```
+  conclave-key-v1
+  <domain>
+  <old key ID>
+  <new key ID>
+  <new public key, unpadded base64url>
+  ```
+
+- stays in the document as `previous` for 30 days, and in
+  `federation_keys` for good.
+
+A second rotation within those 30 days answers 409 `rotation_too_soon`,
+so a peer never needs more than one step. `federation status` lists the
+keys with their status and, for a previous key, its end.
+
+A peer follows the rotation on our next request to it (verification
+step 4): it fetches our document, checks the endorsement with the key it
+has pinned, pins the new key, keeps the old one in its key history and
+audits `federation.key_rotated`. Nothing is asked of its operator. The
+endorsement stays on the current key after the 30 days, so a peer that
+hears from this server only later still follows, unless another
+rotation came between. A peer still pinned to an older key sees a key
+endorsed by one it never pinned and refuses it like any changed key;
+its operator re-pins it with `peers add <domain> --fingerprint ...`.
+
+Message author signatures carry no key ID. A server checks its own
+bots' signatures with any of its keys, and a peer's with the pinned key
+or a key in the peer's history, so messages signed before a rotation
+(snapshots, pulls, late proposals) still verify.
 
 ## Signed requests
 
@@ -158,12 +213,27 @@ The server checks in this order and stops at the first failure.
 2. The origin must be a valid domain in canonical form. Otherwise 401 `bad_signature`.
 3. Peer policy. Blocked, or unknown in allowlist mode: 403 `peer_not_allowed`.
    Unknown in open mode: fetch the origin's document (see the limits) and use its key.
-4. A known peer's key is the public key stored when it was added or first
-   seen; nothing is fetched. The header's key ID must be that key's.
-   Otherwise 401 `bad_signature` and a warn log line. Anyone can send
-   such a request, so the server audits it (`federation.key_changed`)
-   only on evidence: it fetches the peer's document, at most once per
-   peer per minute, and the document lists the presented key.
+4. A known peer's key is the public key pinned when it was added or
+   first seen; nothing is fetched while the header's key ID is that
+   key's. For another key ID the server fetches the peer's document, at
+   most once per peer per minute (anyone can send such a request), and
+   re-pins when all of these hold:
+   - the document lists the presented key;
+   - that key's `endorsed_by.key_id` is the pinned key's ID, and
+     `endorsed_by.sig` verifies with the pinned key
+     ([Key rotation](#key-rotation));
+   - the presented key is not in the peer's key history: a peer never
+     goes back to a key it replaced.
+
+   Re-pinning moves the pinned key into the peer's history, pins the
+   presented one (the peer keeps its status) and audits
+   `federation.key_rotated`; verification then goes on with the new key.
+   Anything else is 401 `bad_signature` and a warn log line, and the
+   server audits `federation.key_changed` when the document could not be
+   fetched or lists the presented key. A document that does not list it
+   is no evidence of a change: not audited. The operator re-pins by hand
+   with `peers add <domain> --fingerprint ...`, which also keeps the
+   replaced key in the history.
 5. The destination, taken from the request's `Host` header, must be this
    server's domain. Otherwise 421 `wrong_destination`.
 6. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
@@ -289,7 +359,9 @@ requests from the peer an hour (429 `rate_limited` with
 | `federation.peer.seen` | An open-mode origin sends its first valid request. |
 | `federation.room.*`, `federation.delivery.paused` | Federated rooms; see [federated-rooms.md](federated-rooms.md#audit-actions). |
 | `follow.request`, `follow.refused` | Follow requests of peers' bots; see [follow.md](follow.md#audit-actions). |
-| `federation.key_changed` | Evidence that a known peer serves a key other than its pinned one: a refused request presented a key that the peer's own document lists (at most one entry per peer per minute), or an operator's lookup or add found the pinned key missing from the document. Detail `{"presented":"SHA256:...","expected":"SHA256:..."}`. |
+| `federation.key.rotate` | An operator rotates the server's key. Target `federation_key`, the new key ID. Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
+| `federation.key_rotated` | A known peer was re-pinned to a new key its pinned key endorsed (verification step 4). Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
+| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document lists, or whose peer's document could not be fetched (at most one entry per peer per minute; result `error:bad_signature`), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
 
 Other refused requests go to the server log at warn, at most one line per
 origin and error code per minute.

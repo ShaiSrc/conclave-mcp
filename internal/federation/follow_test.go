@@ -168,16 +168,16 @@ func TestFollowRemote_Policy(t *testing.T) {
 // asks only allowed peers.
 func TestFollowRemote_SeenPeer(t *testing.T) {
 	a, b := newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
+	allow(t, a.svc, b.svc.id())
 	b.svc.mode = modeOpen
-	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id.Public); err != nil {
+	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id().Public); err != nil {
 		t.Fatal(err)
 	}
 	a1 := a.followBot(t, "a1", "")
 	b.followBot(t, "b1", "open")
 	wantErr(t, a.followTo(a1, "b1@"+b.svc.Domain()), http.StatusForbidden, "peer_not_allowed")
 	wantErr(t, a.followTo(a1, "b1@c.example"), http.StatusForbidden, "peer_not_allowed")
-	wantErr(t, b.fedDo(signedReq(t, a.svc.id, b.svc.Domain(), http.MethodPost, "/fed/v1/follows/withdraw",
+	wantErr(t, b.fedDo(signedReq(t, a.svc.id(), b.svc.Domain(), http.MethodPost, "/fed/v1/follows/withdraw",
 		map[string]string{"follower": "a1@" + a.svc.Domain(), "handle": "b1"})), http.StatusForbidden, "peer_not_allowed")
 	for _, g := range []*roomRig{a, b} {
 		if n := count(t, g.db, `SELECT COUNT(*) FROM follows`) + count(t, g.db, `SELECT COUNT(*) FROM rooms`); n != 0 {
@@ -749,9 +749,9 @@ func TestFollowRemote_FollowerProposalRefused(t *testing.T) {
 	author := "b1@" + b.svc.Domain()
 	for _, typ := range []string{"status_update", "question"} {
 		nonce := newNonce()
-		sig := b.svc.id.SignMessage(MessageSig{Room: feed + "@" + a.svc.Domain(), Author: author, ContentType: "text/plain",
+		sig := b.svc.id().SignMessage(MessageSig{Room: feed + "@" + a.svc.Domain(), Author: author, ContentType: "text/plain",
 			MessageType: typ, Content: "hi", Nonce: nonce})
-		wantErr(t, a.fedDo(signedReq(t, b.svc.id, a.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+feed+"/messages",
+		wantErr(t, a.fedDo(signedReq(t, b.svc.id(), a.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+feed+"/messages",
 			map[string]any{"author": author, "content": "hi", "content_type": "text/plain", "message_type": typ, "sig": sig, "nonce": nonce})),
 			http.StatusForbidden, "missing_right")
 	}
@@ -767,8 +767,8 @@ func TestFollowRemote_FollowersPrivate(t *testing.T) {
 	ctx := context.Background()
 	a, b := dmPair(t)
 	c := newLiveRig(t)
-	allow(t, a.svc, c.svc.id)
-	allow(t, c.svc, a.svc.id)
+	allow(t, a.svc, c.svc.id())
+	allow(t, c.svc, a.svc.id())
 	a1, a2 := a.followBot(t, "a1", "open"), a.followBot(t, "a2", "")
 	b1, c1 := b.followBot(t, "b1", ""), c.followBot(t, "c1", "")
 	to := "a1@" + a.svc.Domain()

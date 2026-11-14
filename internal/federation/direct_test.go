@@ -24,8 +24,8 @@ import (
 func dmPair(t *testing.T) (a, b *roomRig) {
 	t.Helper()
 	a, b = newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
-	allow(t, b.svc, a.svc.id)
+	allow(t, a.svc, b.svc.id())
+	allow(t, b.svc, a.svc.id())
 	return a, b
 }
 
@@ -158,9 +158,9 @@ func TestDirectRemote_Policy(t *testing.T) {
 // sender's server asks only allowed peers.
 func TestDirectRemote_SeenSender(t *testing.T) {
 	a, b := newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
+	allow(t, a.svc, b.svc.id())
 	b.svc.mode = modeOpen
-	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id.Public); err != nil {
+	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id().Public); err != nil {
 		t.Fatal(err)
 	}
 	a1 := a.dmBot(t, "a1", "")

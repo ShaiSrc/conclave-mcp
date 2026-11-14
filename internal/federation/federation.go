@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -36,7 +37,7 @@ type Options struct {
 // settings, the peer store, the outgoing client and the local bots.
 type Service struct {
 	db           *sql.DB
-	id           *Identity
+	ident        atomic.Pointer[Identity] // swapped by a rotation; read it through id()
 	mode         string
 	insecureHTTP bool
 	logger       *slog.Logger
@@ -86,12 +87,13 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	s := &Service{db: db, id: id, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
+	s := &Service{db: db, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
 		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{}, keyLimiters: map[int64]*rate.Limiter{},
 		botStore: bots.NewStore(db), refresh: make(chan string, 16), deliver: make(chan struct{}, 1),
 		running: map[string]bool{}, rotation: map[string]string{}, slots: make(chan struct{}, maxPeerRuns),
 		now: time.Now, jitter: rand.Float64, budget: peerBudget,
 		lookups: rate.NewLimiter(rate.Every(time.Minute/lookupsPerMinute), lookupBurst)}
+	s.ident.Store(id)
 	s.fetch = NewFetcher(opts.InsecureHTTP, func(domain string) bool {
 		p, err := s.peers.Get(context.Background(), domain)
 		return err == nil && p.Status == statusAllowed
@@ -158,7 +160,11 @@ func (s *Service) PublicRoutes(r chi.Router) {
 	})
 }
 
+// id returns the server's identity: its current key, which a rotation
+// replaces at runtime.
+func (s *Service) id() *Identity { return s.ident.Load() }
+
 func (s *Service) handleDocument(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(s.id.Document())
+	_ = json.NewEncoder(w).Encode(s.id().Document(s.now()))
 }

@@ -243,7 +243,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	var other string // the origin's bot in a direct conversation
 	if direct {
 		var ok bool
-		other, ok = fedrooms.DirectOther(in.Name, h+"@"+s.id.Domain)
+		other, ok = fedrooms.DirectOther(in.Name, h+"@"+s.id().Domain)
 		name, domain, _ := strings.Cut(other, "@")
 		if hn, err := bots.NormalizeHandle(name); !ok || err != nil || hn != name || domain != origin {
 			refuse(http.StatusBadRequest, "bad_request", "a direct conversation's name is dm:<address>~<address>, sorted, of the invited bot and one of the host's")
@@ -355,7 +355,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	detail, _ := json.Marshal(map[string]any{"handle": h, "rights": set})
 	s.auditRoom(ctx, "federation.room.invite", origin, roomID, "ok", string(detail))
 	if direct {
-		detail, _ := json.Marshal(map[string]string{"host": origin, "to": h + "@" + s.id.Domain})
+		detail, _ := json.Marshal(map[string]string{"host": origin, "to": h + "@" + s.id().Domain})
 		s.auditRoom(ctx, "direct.start", origin, roomID, "ok", string(detail))
 	}
 	// max_events_bytes is what this server reads a push up to: the host
@@ -765,7 +765,7 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, cre
 	if !ok {
 		return 0, false, refused("invalid address %q", address)
 	}
-	if domain != s.id.Domain {
+	if domain != s.id().Domain {
 		if create {
 			if id, err = fedrooms.StandIn(ctx, tx, address); errors.Is(err, fedrooms.ErrAddress) {
 				err = refused("%v", err)
@@ -858,17 +858,22 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 // checkAuthor checks the author signature of p, a message of replica
 // roomID hosted by host. A message of one of the host's keys needs none:
 // the host's request signature covers it. Any other author's server
-// signed it: we check our own with our key and a third server's with
-// its stored key, if it is an allowed or seen peer. It reports whether
-// the signature could not be checked (no key known for the author's
-// server, or that server blocked); a wrong one is errRefused.
+// signed it: we check our own with any of our keys and a third server's
+// with its stored keys (peerSigned), if it is an allowed or seen peer.
+// It reports whether the signature could not be checked (no key known
+// for the author's server, or that server blocked); a wrong one is
+// errRefused.
 func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedrooms.MessagePayload) (unverified bool, err error) {
 	_, domain, _ := strings.Cut(p.Author, "@")
 	if domain == host {
 		return false, nil
 	}
-	pub := s.id.Public
-	if domain != s.id.Domain {
+	m := MessageSig{Room: roomID + "@" + host, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
+		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo, Nonce: p.Nonce}
+	var ok bool
+	if domain == s.id().Domain {
+		ok = s.id().signed(m, p.OriginSig)
+	} else {
 		peer, err := s.peers.Get(ctx, domain)
 		switch {
 		case errors.Is(err, ErrPeerNotFound):
@@ -878,11 +883,11 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 		case peer.Status != statusAllowed && peer.Status != statusSeen, len(peer.PublicKey) != ed25519.PublicKeySize:
 			return true, nil
 		}
-		pub = peer.PublicKey
+		if ok, err = s.peerSigned(ctx, peer, m, p.OriginSig); err != nil {
+			return false, err
+		}
 	}
-	m := MessageSig{Room: roomID + "@" + host, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
-		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo, Nonce: p.Nonce}
-	if !VerifyMessage(pub, m, p.OriginSig) {
+	if !ok {
 		return false, refused("the author signature of %s does not verify", p.Author)
 	}
 	return false, nil
@@ -1070,7 +1075,7 @@ func (s *Service) leaveHosted(ctx context.Context, roomID string, keyID int64) (
 	if n, err := res.RowsAffected(); err != nil || n == 0 {
 		return false, err
 	}
-	if err := fedrooms.LogRemove(ctx, tx, roomID, keyID, s.id.Domain); err != nil {
+	if err := fedrooms.LogRemove(ctx, tx, roomID, keyID, s.id().Domain); err != nil {
 		return false, err
 	}
 	// Out of an archived feed, the follow ends only when no active feed of
@@ -1101,7 +1106,7 @@ func (s *Service) ourAuthor(ctx context.Context, roomID string, keyID int64) (ho
 		return "", "", &fedrooms.Error{Status: http.StatusForbidden, Code: "no_handle",
 			Message: "only a bot with a handle can write to a room hosted on another server"}
 	}
-	return host, handle + "@" + s.id.Domain, nil
+	return host, handle + "@" + s.id().Domain, nil
 }
 
 // unreachable is the refusal for a forwarded request the host did not
@@ -1170,7 +1175,7 @@ func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int6
 		return 0, err
 	}
 	nonce := newNonce()
-	sig := s.id.SignMessage(MessageSig{Room: roomID + "@" + host, Author: addr, ContentType: m.ContentType,
+	sig := s.id().SignMessage(MessageSig{Room: roomID + "@" + host, Author: addr, ContentType: m.ContentType,
 		MessageType: m.MessageType, Content: m.Content, Metadata: m.Metadata, ReplyTo: m.ReplyTo, Nonce: nonce})
 	body := rawJSON(struct {
 		Author      string          `json:"author"`
@@ -1394,7 +1399,7 @@ func (s *Service) eachHostClaim(ctx context.Context, roomID string, list []json.
 func (s *Service) claimHolder(ctx context.Context, roomID, address string) (int64, error) {
 	name, domain, _ := strings.Cut(address, "@")
 	q, args := `SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, []any{address, domain}
-	if domain == s.id.Domain {
+	if domain == s.id().Domain {
 		q, args = `SELECT k.id FROM api_keys k JOIN room_members m ON m.key_id = k.id AND m.room_id = ?
 			WHERE k.handle = ? AND k.remote_domain IS NULL AND k.is_admin = 0 AND k.revoked_at IS NULL`, []any{roomID, name}
 	}

@@ -29,6 +29,7 @@ func (s *Service) AdminRoutes(r chi.Router) {
 	r.Route("/federation", func(r chi.Router) {
 		r.Use(adminOnly)
 		r.Get("/", s.handleStatus)
+		r.Post("/keys/rotate", s.handleRotateKey)
 		r.Get("/peers", s.handleListPeers)
 		r.Get("/lookup", s.handleLookup)
 		r.Post("/peers", s.handleAddPeer)
@@ -134,11 +135,16 @@ func (s *Service) audit(ctx context.Context, action, domain, result, detail stri
 
 // auditRoom is audit for an entry about the peer domain in room roomID.
 func (s *Service) auditRoom(ctx context.Context, action, domain, roomID, result, detail string) {
+	s.auditTarget(ctx, action, "federation_peer", domain, roomID, result, detail)
+}
+
+// auditTarget writes an entry about the target of targetType.
+func (s *Service) auditTarget(ctx context.Context, action, targetType, targetID, roomID, result, detail string) {
 	var actor int64
 	if c, ok := auth.FromContext(ctx); ok {
 		actor = c.KeyID
 	}
-	if err := audit.Write(ctx, s.db, actor, action, "federation_peer", domain, roomID, result, detail); err != nil {
+	if err := audit.Write(ctx, s.db, actor, action, targetType, targetID, roomID, result, detail); err != nil {
 		s.logger.Error("federation audit write failed", "action", action, "err", err)
 	}
 }
@@ -153,8 +159,30 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 	for _, p := range peers {
 		n[p.Status]++
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"domain": s.id.Domain, "mode": s.mode,
-		"fingerprint": s.id.Fingerprint(), "key_id": s.id.KeyID, "peers": n})
+	id := s.id()
+	writeJSON(w, http.StatusOK, map[string]any{"domain": id.Domain, "mode": s.mode,
+		"fingerprint": id.Fingerprint(), "key_id": id.KeyID, "peers": n, "keys": id.Document(s.now()).Keys})
+}
+
+// handleRotateKey makes a new key current (Rotate) and answers it.
+func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
+	prev := s.id()
+	id, err := Rotate(r.Context(), s.db, prev, s.now())
+	switch {
+	case errors.Is(err, ErrRotationTooSoon):
+		writeErr(w, r, http.StatusConflict, "rotation_too_soon", err.Error())
+		return
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	s.ident.Store(id)
+	detail, _ := json.Marshal(struct {
+		Previous string `json:"previous"`
+		Current  string `json:"current"`
+	}{prev.Fingerprint(), id.Fingerprint()})
+	s.auditTarget(r.Context(), "federation.key.rotate", "federation_key", id.KeyID, "", "ok", string(detail))
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": id.KeyID, "fingerprint": id.Fingerprint(), "keys": id.Document(s.now()).Keys})
 }
 
 func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {
@@ -178,7 +206,7 @@ func (s *Service) peerDomain(w http.ResponseWriter, r *http.Request, raw string)
 		writeErr(w, r, http.StatusBadRequest, "invalid_domain", err.Error())
 		return "", false
 	}
-	if domain == s.id.Domain {
+	if domain == s.id().Domain {
 		writeErr(w, r, http.StatusBadRequest, "own_domain", "this is the server's own domain, not a peer")
 		return "", false
 	}
@@ -200,7 +228,7 @@ func (s *Service) lookup(w http.ResponseWriter, r *http.Request, domain string) 
 		return Document{}, false
 	}
 	if p, err := s.peers.Get(r.Context(), domain); err == nil && p.Fingerprint != "" && keyIn(doc, p.Fingerprint) == nil {
-		s.keyChanged(r.Context(), domain, doc.Keys[0].Fingerprint, p.Fingerprint, "ok")
+		s.keyChanged(r.Context(), domain, doc.Keys[0].Fingerprint, p.Fingerprint, "ok", "")
 	}
 	return doc, true
 }

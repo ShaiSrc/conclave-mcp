@@ -149,7 +149,7 @@ type botAPI struct {
 func (a botAPI) local(p bots.Profile) entry {
 	e := entry{Profile: p, Address: p.Handle}
 	if a.svc != nil {
-		e.Address += "@" + a.svc.id.Domain
+		e.Address += "@" + a.svc.id().Domain
 	}
 	return e
 }
@@ -172,7 +172,7 @@ func (a botAPI) lookup(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusBadRequest, "invalid_domain", err.Error())
 			return
 		}
-		if d != a.svc.id.Domain {
+		if d != a.svc.id().Domain {
 			a.svc.lookupRemote(w, r, c.KeyID, h, d)
 			return
 		}

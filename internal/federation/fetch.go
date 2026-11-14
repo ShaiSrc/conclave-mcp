@@ -213,7 +213,7 @@ func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if err := s.id.SignRequest(req, domain, body); err != nil {
+	if err := s.id().SignRequest(req, domain, body); err != nil {
 		return 0, err
 	}
 	start := time.Now()

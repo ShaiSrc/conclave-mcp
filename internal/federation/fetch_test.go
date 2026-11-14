@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func always(string) bool { return true }
@@ -25,7 +26,7 @@ func docServer(t *testing.T, mutate func(*Document, http.ResponseWriter) bool) (
 	var hits atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		doc := id.Document()
+		doc := id.Document(time.Now())
 		doc.Domain = r.Host
 		if mutate != nil && !mutate(&doc, w) {
 			return
@@ -88,6 +89,19 @@ func TestFetcher_PrivateAddress(t *testing.T) {
 		} else if doc.Domain != domain || len(doc.Keys) != 1 {
 			t.Errorf("%s: document %+v", domain, doc)
 		}
+	}
+}
+
+// A document of a server before key rotation, without status, until
+// and endorsed_by, is read.
+func TestFetcher_DocumentBeforeRotation(t *testing.T) {
+	port, _ := docServer(t, func(doc *Document, _ http.ResponseWriter) bool {
+		doc.Keys[0].Status = ""
+		return true
+	})
+	doc, err := NewFetcher(true, always).Document(context.Background(), "127.0.0.1:"+port)
+	if err != nil || len(doc.Keys) != 1 || doc.Keys[0].Status != "" {
+		t.Errorf("document %+v: %v", doc, err)
 	}
 }
 

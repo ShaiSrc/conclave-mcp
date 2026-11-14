@@ -81,14 +81,85 @@ func (ps *Peers) List(ctx context.Context) ([]Peer, error) {
 }
 
 // Allow makes domain an allowed peer pinned to pub, replacing any
-// earlier status, blocked included.
+// earlier status, blocked included. A key it replaces goes to the
+// peer's key history.
 func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey, note string) error {
-	_, err := ps.db.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, fingerprint, public_key, note, added_at)
+	tx, err := ps.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var old []byte
+	if err := tx.QueryRowContext(ctx, `SELECT public_key FROM federation_peers WHERE domain = ?`, domain).Scan(&old); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if len(old) == ed25519.PublicKeySize && !pub.Equal(ed25519.PublicKey(old)) {
+		if err := retireKey(ctx, tx, domain, old); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO federation_peers(domain, status, fingerprint, public_key, note, added_at)
 		VALUES (?, 'allowed', ?, ?, ?, ?)
 		ON CONFLICT(domain) DO UPDATE SET status = 'allowed', fingerprint = excluded.fingerprint,
 			public_key = excluded.public_key, note = excluded.note`,
-		domain, Fingerprint(pub), []byte(pub), note, storage.FormatTS(time.Now()))
+		domain, Fingerprint(pub), []byte(pub), note, storage.FormatTS(time.Now())); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// Repin pins domain to pub in place of old, which goes to the peer's
+// key history, keeping its status. It reports false, changing nothing,
+// when the peer is no longer pinned to old.
+func (ps *Peers) Repin(ctx context.Context, domain string, old, pub ed25519.PublicKey) (bool, error) {
+	tx, err := ps.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `UPDATE federation_peers SET fingerprint = ?, public_key = ? WHERE domain = ? AND public_key = ?`,
+		Fingerprint(pub), []byte(pub), domain, []byte(old))
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		return false, err
+	}
+	if err := retireKey(ctx, tx, domain, old); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// retireKey puts pub, the key domain was pinned to until now, in the
+// peer's key history. It was pinned when the key before it was retired,
+// or when the peer was added.
+func retireKey(ctx context.Context, tx *sql.Tx, domain string, pub ed25519.PublicKey) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO federation_peer_keys(domain, key_id, public_key, fingerprint, pinned_at, retired_at)
+		SELECT ?, ?, ?, ?, MAX(added_at, COALESCE((SELECT MAX(retired_at) FROM federation_peer_keys WHERE domain = ?), '')), ?
+		FROM federation_peers WHERE domain = ?
+		ON CONFLICT(domain, key_id) DO UPDATE SET pinned_at = excluded.pinned_at, retired_at = excluded.retired_at`,
+		domain, KeyIDFor(pub), []byte(pub), Fingerprint(pub), domain, storage.FormatTS(time.Now()), domain)
 	return err
+}
+
+// History returns the keys in domain's key history: those it was
+// pinned to before.
+func (ps *Peers) History(ctx context.Context, domain string) ([]ed25519.PublicKey, error) {
+	rows, err := ps.db.QueryContext(ctx, `SELECT public_key FROM federation_peer_keys WHERE domain = ?`, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ed25519.PublicKey
+	for rows.Next() {
+		var pub []byte
+		if err := rows.Scan(&pub); err != nil {
+			return nil, err
+		}
+		out = append(out, pub)
+	}
+	return out, rows.Err()
 }
 
 // Block makes domain a blocked peer, keeping a known key and note, and

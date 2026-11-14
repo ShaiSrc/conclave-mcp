@@ -514,12 +514,12 @@ func TestReplicaEvents_AuthorSignatures(t *testing.T) {
 		{"third server, key unknown", "d1@d.example", d, true, true, "d1@d.example"},
 		{"third server, wrong key", "c1@c.example", d, false, false, ""},
 		{"third server, no signature", "c1@c.example", nil, false, false, ""},
-		{"our bot, our signature", "b1@" + local, g.svc.id, true, false, "b1"},
+		{"our bot, our signature", "b1@" + local, g.svc.id(), true, false, "b1"},
 		{"our bot, forged", "b1@" + local, c, false, false, ""},
 		{"our bot, unsigned", "b1@" + local, nil, false, false, ""},
-		{"our operator", "operator@" + local, g.svc.id, true, false, "opbot"},
-		{"our key without handle", fmt.Sprintf("key-%d@%s", plain, local), g.svc.id, true, false, "plainbot"},
-		{"no such bot of ours", "zz@" + local, g.svc.id, false, false, ""},
+		{"our operator", "operator@" + local, g.svc.id(), true, false, "opbot"},
+		{"our key without handle", fmt.Sprintf("key-%d@%s", plain, local), g.svc.id(), true, false, "plainbot"},
+		{"no such bot of ours", "zz@" + local, g.svc.id(), false, false, ""},
 		{"invalid address", "Not An Address", nil, false, false, ""},
 	}
 	for i, tc := range cases {
@@ -721,8 +721,8 @@ func TestPeerDrop_Member(t *testing.T) {
 // messages flow and appear on b with stand-in authors.
 func TestFederatedRoom_TwoServers(t *testing.T) {
 	a, b := newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
-	allow(t, b.svc, a.svc.id)
+	allow(t, a.svc, b.svc.id())
+	allow(t, b.svc, a.svc.id())
 	ctx := context.Background()
 	room := a.room(t, "proj")
 	a1 := a.localBot(t, room, "a1-key", "read,answer")
@@ -858,8 +858,8 @@ func published(sub <-chan events.Event) int {
 func pair(t *testing.T, rights string) (a, b *roomRig, room string, b1 auth.Claims) {
 	t.Helper()
 	a, b = newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
-	allow(t, b.svc, a.svc.id)
+	allow(t, a.svc, b.svc.id())
+	allow(t, b.svc, a.svc.id())
 	room = a.room(t, "proj")
 	b1 = auth.Claims{KeyID: b.bot(t, "b1")}
 	a.invite(t, room, "b1@"+b.svc.Domain(), rights)
@@ -1024,7 +1024,7 @@ func TestReplicaPost_Proposal(t *testing.T) {
 	}
 	m := MessageSig{Room: room + "@" + h.id.Domain, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
 		Content: p.Content, Metadata: p.Metadata, Nonce: p.Nonce}
-	if !VerifyMessage(g.svc.id.Public, m, p.Sig) {
+	if !VerifyMessage(g.svc.id().Public, m, p.Sig) {
 		t.Error("author signature does not verify with our key")
 	}
 	ms := storedMessages(t, g, room)
@@ -1255,8 +1255,8 @@ func TestReplicaClaims_ForgedLabel(t *testing.T) {
 func TestReplicaClaims_LocalKeyIDs(t *testing.T) {
 	a, b, room, b1 := pair(t, "read,claim")
 	c := newLiveRig(t)
-	allow(t, a.svc, c.svc.id)
-	allow(t, c.svc, a.svc.id)
+	allow(t, a.svc, c.svc.id())
+	allow(t, c.svc, a.svc.id())
 	c1 := auth.Claims{KeyID: c.bot(t, "c1")}
 	a.invite(t, room, "c1@"+c.svc.Domain(), "read,claim")
 	a.svc.deliverDue(context.Background())

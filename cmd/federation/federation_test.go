@@ -40,10 +40,26 @@ func runCmd(t *testing.T, status int, body string, args ...string) (out, req str
 }
 
 func TestStatus(t *testing.T) {
-	out, req, err := runCmd(t, 200, `{"domain":"a.example","mode":"open","fingerprint":"SHA256:f","key_id":"ed25519:k","peers":{"allowed":2,"blocked":1,"seen":0}}`, "status")
+	out, req, err := runCmd(t, 200, `{"domain":"a.example","mode":"open","fingerprint":"SHA256:f","key_id":"ed25519:k","peers":{"allowed":2,"blocked":1,"seen":0},
+		"keys":[{"key_id":"ed25519:k","fingerprint":"SHA256:f","status":"current"},
+		{"key_id":"ed25519:o","fingerprint":"SHA256:o","status":"previous","until":"2026-12-14T10:00:00Z"}]}`, "status")
 	if err != nil || !strings.HasPrefix(req, "GET /v1/federation ") ||
-		!strings.Contains(out, "a.example") || !strings.Contains(out, "2 allowed, 1 blocked, 0 seen") {
+		!strings.Contains(out, "a.example") || !strings.Contains(out, "2 allowed, 1 blocked, 0 seen") ||
+		!strings.Contains(out, "ed25519:k  SHA256:f  current\n") ||
+		!strings.Contains(out, "ed25519:o  SHA256:o  previous until 2026-12-14T10:00:00Z\n") {
 		t.Errorf("err=%v req=%q out=%q", err, req, out)
+	}
+}
+
+func TestRotateKey(t *testing.T) {
+	out, req, err := runCmd(t, 200, `{"key_id":"ed25519:n","fingerprint":"SHA256:n"}`, "rotate-key")
+	if err != nil || !strings.HasPrefix(req, "POST /v1/federation/keys/rotate ") ||
+		!strings.Contains(out, "new key id:  ed25519:n\nfingerprint: SHA256:n\n") || !strings.Contains(out, "30 days") {
+		t.Errorf("err=%v req=%q out=%q", err, req, out)
+	}
+	_, _, err = runCmd(t, 409, `{"error":{"code":"rotation_too_soon","message":"m"}}`, "rotate-key")
+	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "rotation_too_soon") {
+		t.Errorf("409: err=%v", err)
 	}
 }
 

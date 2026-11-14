@@ -64,8 +64,8 @@ func TestAdmin_StatusAndList(t *testing.T) {
 	}
 	rec := adminDo(svc, admin, "GET", "/v1/federation", "")
 	_ = json.Unmarshal(rec.Body.Bytes(), &st)
-	if rec.Code != 200 || st.Domain != local || st.Mode != "allowlist" || st.Fingerprint != svc.id.Fingerprint() ||
-		st.KeyID != svc.id.KeyID || st.Peers["allowed"] != 1 || st.Peers["blocked"] != 1 || st.Peers["seen"] != 1 {
+	if rec.Code != 200 || st.Domain != local || st.Mode != "allowlist" || st.Fingerprint != svc.id().Fingerprint() ||
+		st.KeyID != svc.id().KeyID || st.Peers["allowed"] != 1 || st.Peers["blocked"] != 1 || st.Peers["seen"] != 1 {
 		t.Errorf("status: %d %s", rec.Code, rec.Body)
 	}
 	var l struct{ Peers []peerView }

@@ -14,6 +14,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -59,7 +60,7 @@ type RoomHooks struct {
 }
 
 // Domain returns this server's federation domain.
-func (s *Service) Domain() string { return s.id.Domain }
+func (s *Service) Domain() string { return s.id().Domain }
 
 // MessageSig is what the author's server signs for a message in a
 // federated room. ContentType and MessageType are as stored: text/plain
@@ -108,15 +109,29 @@ func VerifyMessage(pub ed25519.PublicKey, m MessageSig, sig string) bool {
 		ed25519.Verify(pub, m.SigningString(), b)
 }
 
-// authorSigned reports whether sig on m verifies with the stored key of
-// the author's server. An unknown server's is false.
+// authorSigned reports whether sig on m verifies with a key of the
+// author's server (peerSigned). An unknown server's is false.
 func (s *Service) authorSigned(ctx context.Context, m MessageSig, sig string) (bool, error) {
 	_, domain, _ := strings.Cut(m.Author, "@")
 	p, err := s.peers.Get(ctx, domain)
 	if errors.Is(err, ErrPeerNotFound) {
 		return false, nil
 	}
-	return err == nil && VerifyMessage(p.PublicKey, m, sig), err
+	if err != nil {
+		return false, err
+	}
+	return s.peerSigned(ctx, p, m, sig)
+}
+
+// peerSigned reports whether sig on m verifies with p's pinned key or,
+// for a message signed before a rotation, a key in its history, which
+// is loaded only then.
+func (s *Service) peerSigned(ctx context.Context, p Peer, m MessageSig, sig string) (bool, error) {
+	if VerifyMessage(p.PublicKey, m, sig) {
+		return true, nil
+	}
+	keys, err := s.peers.History(ctx, p.Domain)
+	return err == nil && slices.ContainsFunc(keys, func(k ed25519.PublicKey) bool { return VerifyMessage(k, m, sig) }), err
 }
 
 // InviteRemote asks the server of address (name@domain, lowercase) to
@@ -136,7 +151,7 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	switch {
 	case herr != nil || derr != nil || h+"@"+d != address:
 		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "invalid_address", Message: "address must be name@domain, name a bot's handle"}
-	case d == s.id.Domain:
+	case d == s.id().Domain:
 		return 0, &fedrooms.Error{Status: http.StatusBadRequest, Code: "own_domain", Message: "a bot of this server is invited by its key_id"}
 	}
 	peer, err := s.peers.Get(ctx, d)
@@ -230,7 +245,7 @@ func (s *Service) signed(ctx context.Context, client *http.Client, method, domai
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if err := s.id.SignRequest(req, domain, body); err != nil {
+	if err := s.id().SignRequest(req, domain, body); err != nil {
 		return 0, nil, err
 	}
 	return s.fetch.send(client, req, s.fetch.isAllowed(domain), limit)
@@ -339,7 +354,7 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 		p.MessageType = rights.System
 	}
 	ctx := r.Context()
-	signed, err := s.authorSigned(ctx, MessageSig{Room: roomID + "@" + s.id.Domain, Author: p.Author, ContentType: p.ContentType,
+	signed, err := s.authorSigned(ctx, MessageSig{Room: roomID + "@" + s.id().Domain, Author: p.Author, ContentType: p.ContentType,
 		MessageType: p.MessageType, Content: p.Content, Metadata: wire, ReplyTo: p.ReplyTo, Nonce: p.Nonce}, p.Sig)
 	if err != nil {
 		s.fail(w, r, err)
@@ -427,7 +442,7 @@ func (s *Service) handleRoomClaims(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(c["key_id"], &id) != nil {
 			return nil
 		}
-		addr, err := fedrooms.Address(ctx, s.db, id, s.id.Domain)
+		addr, err := fedrooms.Address(ctx, s.db, id, s.id().Domain)
 		c["address"] = rawJSON(addr)
 		return err
 	})
