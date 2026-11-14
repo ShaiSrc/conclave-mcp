@@ -31,6 +31,10 @@ const (
 	retryEvery     = time.Minute      // at most one refresh retried by a peer's contact
 	lookupsPerKey  = 60               // remote lookups per key and minute
 	lookupKeyBurst = 10
+	// lookupsPerPeer caps the lookups sent to one peer, whichever keys
+	// ask, well under what the peer takes from us.
+	lookupsPerPeer  = 20
+	lookupPeerBurst = 5
 )
 
 // entry is a bot as a lookup or the directory return it: its profile,
@@ -218,10 +222,10 @@ func (a botAPI) directory(w http.ResponseWriter, r *http.Request) {
 
 // lookupRemote asks domain for its bot name, for key keyID. Only an
 // allowed peer, or a seen one in open mode, is asked: a lookup cannot
-// make the server contact any other host. Each key has its own limit.
-// A bot the operator blocked is not asked about: 404.
+// make the server contact any other host. Each key has its own limit,
+// and each peer. A bot the operator blocked is not asked about: 404.
 func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int64, name, domain string) {
-	if lim := s.lookupLimiter(keyID); !lim.Allow() {
+	if lim := lookupLimiter(s, s.keyLimiters, keyID, lookupsPerKey, lookupKeyBurst); !lim.Allow() {
 		w.Header().Set("Retry-After", retryAfter(lim))
 		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "too many remote lookups, try again later")
 		return
@@ -241,6 +245,11 @@ func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int
 		return
 	case blocked: // as if its server had no such bot
 		writeErr(w, r, http.StatusNotFound, "not_found", "no such bot on "+domain)
+		return
+	}
+	if lim := lookupLimiter(s, s.peerLookups, domain, lookupsPerPeer, lookupPeerBurst); !lim.Allow() {
+		w.Header().Set("Retry-After", retryAfter(lim))
+		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "too many lookups on "+domain+", try again later")
 		return
 	}
 	status, body, err := s.getSigned(r.Context(), domain, "/fed/v1/bots/"+name)
@@ -272,15 +281,17 @@ func (s *Service) getSigned(ctx context.Context, domain, path string) (int, []by
 	return s.signed(ctx, s.fetch.client, http.MethodGet, domain, path, nil, maxBotsBody)
 }
 
-// lookupLimiter returns the remote-lookup limiter of key keyID.
-// ponytail: one per key, never evicted; keys are bounded by the table.
-func (s *Service) lookupLimiter(keyID int64) *rate.Limiter {
+// lookupLimiter returns the remote-lookup limiter of k in m, made with
+// perMinute and burst on first use.
+// ponytail: one per key and per peer asked, never evicted; both are
+// bounded by their tables.
+func lookupLimiter[K comparable](s *Service, m map[K]*rate.Limiter, k K, perMinute, burst int) *rate.Limiter {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	lim := s.keyLimiters[keyID]
+	lim := m[k]
 	if lim == nil {
-		lim = rate.NewLimiter(rate.Every(time.Minute/lookupsPerKey), lookupKeyBurst)
-		s.keyLimiters[keyID] = lim
+		lim = rate.NewLimiter(rate.Every(time.Minute/time.Duration(perMinute)), burst)
+		m[k] = lim
 	}
 	return lim
 }

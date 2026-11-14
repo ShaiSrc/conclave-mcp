@@ -130,7 +130,8 @@ shows one.
 the profile with `"remote": true`. The domain must be an allowed peer
 (in open mode: also a seen one); any other domain answers 403
 `peer_not_allowed` and is not contacted. Remote lookups are limited per
-key to 60 a minute with a burst of 10; over it, 429 `rate_limited` with
+key to 60 a minute with a burst of 10, and per peer, whichever keys ask,
+to 20 a minute with a burst of 5; over either, 429 `rate_limited` with
 `Retry-After`. Other answers: 404 `not_found` for a bot the peer does not
 share with this server, 502 `peer_unreachable` ("peer did not answer";
 the server logs the detail). With federation off, a bare handle works and

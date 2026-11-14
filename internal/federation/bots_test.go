@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/bots"
@@ -367,6 +368,30 @@ func TestLookup_PerKeyLimit(t *testing.T) {
 	}
 }
 
+// Remote lookups are limited per peer too, whichever keys ask: a burst
+// of 5, then 429 with Retry-After. Other peers are not affected.
+func TestLookup_PerPeerLimit(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	var hits atomic.Int32
+	answer := func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, `{"handle":"bob"}`)
+	}
+	d, other := fakePeer(t, svc, answer), fakePeer(t, svc, answer)
+	for i := range 5 {
+		entryOf(t, lookup(svc, svc.db, auth.Claims{KeyID: 100 + int64(i)}, "bob@"+d))
+	}
+	rec := lookup(svc, svc.db, auth.Claims{KeyID: 200}, "bob@"+d)
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if ra, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || ra < 1 {
+		t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+	entryOf(t, lookup(svc, svc.db, auth.Claims{KeyID: 200}, "bob@"+other))
+	if n := hits.Load(); n != 6 {
+		t.Errorf("requests to the peers: %d, want 6", n)
+	}
+}
+
 // A peer that does not answer gets a generic 502; the detail goes to
 // the log only.
 func TestLookup_UnreachableIsGeneric(t *testing.T) {
@@ -471,6 +496,7 @@ func TestLookup_RemoteAnswerChecked(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, body)
 	})
+	svc.peerLookups[d] = rate.NewLimiter(rate.Inf, 0) // more lookups than the per-peer burst
 	if e := entryOf(t, lookup(svc, svc.db, plainKey, "bob@"+d)); e.DisplayName != "Bob" || e.Description != "hi" ||
 		len(e.Skills) != 1 || e.Skills[0].ID != "x" || e.Address != "bob@"+d || !e.Remote {
 		t.Errorf("bob: %+v", e)
