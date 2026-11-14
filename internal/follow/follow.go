@@ -26,6 +26,15 @@
 // as Send, and deleted through its Delete, so this package does not
 // import it. A rejected request reads as pending to its follower: a
 // rejection tells nobody.
+//
+// A bot of another server: following it stores a pending follow and
+// sends the request to its server (Request), which decides by the bot's
+// policy and, when it accepts, invites our bot into the feed; that
+// invite (internal/federation) makes the follow accepted here. A
+// follower of another server is its stand-in key: its requests come
+// through Remote, and accepting one invites its server into the feed
+// (InviteRemote) before the stand-in joins. Unfollowing a bot of
+// another server leaves the feed's replica through its host (Leave).
 package follow
 
 import (
@@ -93,6 +102,14 @@ type Service struct {
 	// push; a refusal is a *fedrooms.Error. It brings in a follower of
 	// another server once its follow is accepted.
 	InviteRemote func(ctx context.Context, roomID, name, address string, rights []string) (int, error)
+	// Request sends the follow request of follower, our bot's address, to
+	// the server of address (name@domain); nil with federation off. A
+	// refusal is a *fedrooms.Error with the peer's status and code; no
+	// answer is one with status 502.
+	Request func(ctx context.Context, follower, address string) error
+	// Leave tells the host of replica roomID that our bot keyID leaves
+	// it; nil with federation off. A refusal is a *fedrooms.Error.
+	Leave func(ctx context.Context, roomID string, keyID int64) error
 	// FedNotify, when set, wakes the federation delivery worker after a
 	// feed's members changed.
 	FedNotify func()
@@ -268,8 +285,12 @@ func (s *Service) follow(w http.ResponseWriter, r *http.Request) {
 			"only a bot (a key with a handle) follows")
 		return
 	}
-	handle, ok := s.handle(w, r, req.To)
-	if !ok {
+	handle, domain, ok := s.handle(w, r, req.To)
+	switch {
+	case !ok:
+		return
+	case domain != "":
+		s.followRemote(w, r, caller, handle+"@"+domain, domain)
 		return
 	}
 	var (
@@ -346,35 +367,229 @@ func (s *Service) follow(w http.ResponseWriter, r *http.Request) {
 }
 
 // handle returns the handle of the bot to names, by its name or its
-// address on this server, or answers 400 or 404 itself.
-func (s *Service) handle(w http.ResponseWriter, r *http.Request, to string) (string, bool) {
+// address, and the domain of its server, "" for this one, or answers 400
+// or 404 itself.
+func (s *Service) handle(w http.ResponseWriter, r *http.Request, to string) (string, string, bool) {
 	name, domain, qualified := strings.Cut(strings.TrimSpace(to), "@")
 	if qualified {
 		d, err := fedrooms.NormalizeDomain(domain)
 		switch {
-		case s.FedDomain == "" || err == nil && d != s.FedDomain:
+		case s.FedDomain == "":
 			writeErr(w, r, http.StatusNotFound, "federation_disabled", "following bots of other servers is not enabled on this server")
-			return "", false
+			return "", "", false
 		case err != nil:
 			writeErr(w, r, http.StatusBadRequest, "invalid_domain", err.Error())
-			return "", false
+			return "", "", false
+		}
+		if domain = d; d == s.FedDomain {
+			domain = ""
 		}
 	}
 	h, err := bots.NormalizeHandle(name)
 	if err != nil {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "to: "+err.Error())
-		return "", false
+		return "", "", false
 	}
-	return h, true
+	return h, domain, true
+}
+
+// followRemote has bot caller follow the bot at address on server
+// domain, an allowed peer. The follow is stored pending, then the peer
+// is asked, which checks its bot, its policy and its own limit, and
+// invites our bot into the feed before it answers when it accepts. On a
+// refusal the follow is deleted and the peer's status and code passed
+// on; without an answer it stays pending, and the next follow asks
+// again. An accepted follow is answered as it is.
+func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller int64, address, domain string) {
+	ctx := r.Context()
+	if s.Request == nil {
+		writeErr(w, r, http.StatusNotFound, "federation_disabled", "following bots of other servers is not enabled on this server")
+		return
+	}
+	var allowed bool
+	if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM federation_peers WHERE domain = ? AND status = 'allowed')`,
+		domain).Scan(&allowed); err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "peer lookup")
+		return
+	}
+	if !allowed {
+		writeErr(w, r, http.StatusForbidden, "peer_not_allowed", domain+" is not an allowed peer")
+		return
+	}
+	pair := func() ([]followView, error) {
+		return s.views(ctx, `follower_key_id = ? AND target = ?`, caller, address)
+	}
+	existing, err := pair()
+	switch {
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow lookup")
+		return
+	case len(existing) == 1 && existing[0].Status != "pending":
+		writeJSON(w, http.StatusCreated, existing[0])
+		return
+	}
+	// A new follow, or one without a clear answer: it takes a token, and
+	// the peer is asked (again), which answers the same follow.
+	if lim := s.limiter(false, caller); !lim.Allow() {
+		w.Header().Set("Retry-After", retryAfter(lim))
+		s.refuse(w, r, caller, address, "limit", http.StatusTooManyRequests, "rate_limited", "too many follow requests, try again later")
+		return
+	}
+	res, err := s.DB.ExecContext(ctx, `INSERT INTO follows(follower_key_id, target, status, created_at)
+		VALUES (?, ?, 'pending', ?) ON CONFLICT(follower_key_id, target) DO NOTHING`, caller, address, storage.FormatTS(time.Now()))
+	var created int64
+	if err == nil {
+		created, err = res.RowsAffected()
+	}
+	var from string
+	if err == nil {
+		from, err = s.address(ctx, caller)
+	}
+	if err == nil {
+		err = s.Request(ctx, from, address)
+	}
+	var fe *fedrooms.Error
+	reason := map[int]string{http.StatusForbidden: "policy", http.StatusNotFound: "not a bot", http.StatusTooManyRequests: "limit"}
+	switch {
+	case err == nil:
+	case errors.As(err, &fe) && fe.Status == http.StatusBadGateway: // the peer may have taken it: it stays pending
+		writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		return
+	case errors.As(err, &fe):
+		_, _ = s.DB.ExecContext(context.WithoutCancel(ctx), `DELETE FROM follows WHERE follower_key_id = ? AND target = ? AND status = 'pending'`,
+			caller, address)
+		if reason[fe.Status] != "" {
+			s.refuse(w, r, caller, address, reason[fe.Status], fe.Status, fe.Code, fe.Message)
+		} else {
+			writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		}
+		return
+	default:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow request")
+		return
+	}
+	if existing, err = pair(); err != nil || len(existing) == 0 {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow")
+		return
+	}
+	if created == 1 {
+		s.audit(r, "follow.request", existing[0])
+	}
+	writeJSON(w, http.StatusCreated, existing[0])
+}
+
+// Remote takes the follow request of follower, a bot of another server
+// (name@domain, its domain the signing server's: the federation listener
+// checks it), toward our bot handle, as that bot's policy decides, and
+// returns the follow's status as the follower sees it. Following again
+// answers the existing follow; under policy open a pending one is
+// accepted again, and an accepted one invites its server again: that
+// server asks only while its follow is pending, so it lacks the feed. A
+// refusal is a *fedrooms.Error: 404 for no such bot, 403 follow_refused
+// for policy none.
+func (s *Service) Remote(ctx context.Context, follower, handle string) (string, error) {
+	var (
+		to, key int64
+		policy  string
+	)
+	h, err := bots.NormalizeHandle(handle)
+	if err == nil {
+		err = s.DB.QueryRowContext(ctx, `SELECT k.id, COALESCE(p.follow_policy, 'approve'),
+			COALESCE((SELECT id FROM api_keys WHERE label = ? AND remote_domain IS NOT NULL), 0)
+			FROM api_keys k LEFT JOIN bot_profiles p ON p.key_id = k.id
+			WHERE k.handle = ? AND k.revoked_at IS NULL AND k.remote_domain IS NULL AND k.is_admin = 0`, follower, h).Scan(&to, &policy, &key)
+	}
+	switch {
+	case errors.Is(err, sql.ErrNoRows), errors.Is(err, bots.ErrInvalid):
+		s.refused(ctx, 0, follower, handle[:min(len(handle), 300)], "not a bot", "not_found")
+		return "", &fedrooms.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no such bot"}
+	case err != nil:
+		return "", err
+	}
+	toAddr := h + "@" + s.FedDomain
+	pair := func() ([]followView, error) {
+		return s.views(ctx, `follower_key_id = ? AND target = ?`, key, toAddr)
+	}
+	existing, err := pair()
+	switch {
+	case err != nil:
+		return "", err
+	case len(existing) == 0 && policy == bots.FollowNone:
+		s.refused(ctx, key, follower, toAddr, "policy", "follow_refused")
+		return "", &fedrooms.Error{Status: http.StatusForbidden, Code: "follow_refused", Message: toAddr + " takes no followers"}
+	case len(existing) == 0:
+		var created int64
+		if key, created, err = s.store(ctx, follower, toAddr, to); err != nil {
+			return "", err
+		}
+		if existing, err = pair(); err != nil || len(existing) == 0 {
+			return "", cmp.Or(err, errNotPending)
+		}
+		if created == 1 {
+			s.auditAs(ctx, key, "follow.request", existing[0])
+		}
+	}
+	switch v := existing[0]; {
+	case v.Status == "pending" && policy == bots.FollowOpen:
+		err = s.accept(ctx, v.ID)
+	case v.Status == "accepted":
+		var feed string
+		if feed, err = s.feed(ctx, to); err == nil {
+			_, err = s.invite(ctx, feed, key)
+		}
+	}
+	// An invite without an answer leaves the follow as it is: the
+	// follower's next request tries again.
+	if fe := (*fedrooms.Error)(nil); err != nil && !errors.As(err, &fe) && !errors.Is(err, errNotPending) {
+		return "", err
+	}
+	if existing, err = pair(); err != nil || len(existing) == 0 {
+		return "", cmp.Or(err, errNotPending)
+	}
+	return hidden(existing[0]).Status, nil
+}
+
+// store stores a pending follow of follower, a bot of another server,
+// toward to, our bot at toAddr, and returns its stand-in and whether it
+// stored one (1) or found one (0).
+func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) (int64, int64, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	key, err := fedrooms.StandIn(ctx, tx, follower)
+	if errors.Is(err, fedrooms.ErrAddress) {
+		return 0, 0, &fedrooms.Error{Status: http.StatusConflict, Code: "conflict", Message: err.Error()}
+	}
+	var res sql.Result
+	if err == nil {
+		res, err = tx.ExecContext(ctx, `INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+			VALUES (?, ?, ?, 'pending', ?) ON CONFLICT(follower_key_id, target) DO NOTHING`, key, toAddr, to, storage.FormatTS(time.Now()))
+	}
+	var created int64
+	if err == nil {
+		created, err = res.RowsAffected()
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	return key, created, err
 }
 
 // accept makes follow id, a pending request to a bot of ours, accepted:
-// the follower joins the bot's feed, made if needed, with read. It is
-// errNotPending when the follow is no longer a pending request.
+// the follower joins the bot's feed, made if needed, with read. A
+// follower of another server is its stand-in: as for an invite by
+// address, its server is invited into the feed first, and the stand-in
+// joins with what that server reads a push up to; a refused invite (a
+// *fedrooms.Error) leaves the follow pending. It is errNotPending when
+// the follow is no longer a pending request.
 func (s *Service) accept(ctx context.Context, id int64) error {
 	var follower, target int64
-	err := s.DB.QueryRowContext(ctx, `SELECT follower_key_id, target_key_id FROM follows
-		WHERE id = ? AND status = 'pending' AND target_key_id IS NOT NULL`, id).Scan(&follower, &target)
+	var remote bool
+	err := s.DB.QueryRowContext(ctx, `SELECT f.follower_key_id, f.target_key_id, k.remote_domain IS NOT NULL
+		FROM follows f JOIN api_keys k ON k.id = f.follower_key_id
+		WHERE f.id = ? AND f.status = 'pending' AND f.target_key_id IS NOT NULL`, id).Scan(&follower, &target, &remote)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errNotPending
 	}
@@ -384,6 +599,17 @@ func (s *Service) accept(ctx context.Context, id int64) error {
 	feed, err := s.feed(ctx, target)
 	if err != nil {
 		return err
+	}
+	readLimit := 0
+	if remote {
+		if readLimit, err = s.invite(ctx, feed, follower); err != nil {
+			return err
+		}
+		// The follower's server has the replica now: the stand-in joins
+		// even if the request ends meanwhile. ponytail: a follow ended
+		// while the invite was out leaves that server a replica its host
+		// does not feed; its bot unfollows to drop it.
+		ctx = context.WithoutCancel(ctx)
 	}
 	now := storage.FormatTS(time.Now())
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -404,7 +630,7 @@ func (s *Service) accept(ctx context.Context, id int64) error {
 	}
 	if n, err := res.RowsAffected(); err != nil || n == 1 {
 		if err == nil {
-			err = fedrooms.LogJoin(ctx, tx, feed, follower, s.FedDomain, s.MaxMessageBytes, 0)
+			err = fedrooms.LogJoin(ctx, tx, feed, follower, s.FedDomain, s.MaxMessageBytes, readLimit)
 		}
 		if err != nil {
 			return err
@@ -415,6 +641,20 @@ func (s *Service) accept(ctx context.Context, id int64) error {
 	}
 	s.notify()
 	return nil
+}
+
+// invite asks the server of follower, a stand-in, to take its bot into
+// feed with read, and returns what that server reads a push up to.
+func (s *Service) invite(ctx context.Context, feed string, follower int64) (int, error) {
+	if s.InviteRemote == nil {
+		return 0, &fedrooms.Error{Status: http.StatusNotFound, Code: "federation_disabled", Message: "federation is not enabled on this server"}
+	}
+	var name, address string
+	if err := s.DB.QueryRowContext(ctx, `SELECT r.name, k.label FROM rooms r, api_keys k WHERE r.id = ? AND k.id = ?`,
+		feed, follower).Scan(&name, &address); err != nil {
+		return 0, err
+	}
+	return s.InviteRemote(ctx, feed, name, address, []string{rights.Read})
 }
 
 // feed returns the active feed of bot, a bot of ours, made if needed:
@@ -532,9 +772,13 @@ func (s *Service) decide(accept bool) http.HandlerFunc {
 				}
 			}
 		}
+		var fe *fedrooms.Error
 		switch {
 		case errors.Is(err, sql.ErrNoRows), errors.Is(err, errNotPending):
 			writeErr(w, r, http.StatusNotFound, "not_found", "no such pending follow request")
+			return
+		case errors.As(err, &fe): // the follower's server refused the feed, or did not answer
+			writeErr(w, r, fe.Status, fe.Code, fe.Message)
 			return
 		case err != nil:
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "answer request")
@@ -561,11 +805,11 @@ func (s *Service) unfollow(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusForbidden, "forbidden", "only a bot (a key with a handle) follows")
 		return
 	}
-	handle, ok := s.handle(w, r, chi.URLParam(r, "to"))
+	handle, domain, ok := s.handle(w, r, chi.URLParam(r, "to"))
 	if !ok {
 		return
 	}
-	s.end(w, r, caller, strings.TrimSuffix(handle+"@"+s.FedDomain, "@"))
+	s.end(w, r, caller, strings.TrimSuffix(handle+"@"+cmp.Or(domain, s.FedDomain), "@"))
 }
 
 // removeFollower ends the follow of the bot at {address} toward the
@@ -591,9 +835,9 @@ func (s *Service) removeFollower(w http.ResponseWriter, r *http.Request) {
 	s.end(w, r, follower, target)
 }
 
-// end ends the follow of follower toward target, the address of a bot
-// of ours, whatever its status, and takes the follower out of the bot's
-// feed; 404 when there is none.
+// end ends the follow of follower toward target, whatever its status,
+// and takes the follower out of the target's feed; 404 when there is
+// none.
 func (s *Service) end(w http.ResponseWriter, r *http.Request, follower int64, target string) {
 	v, err := s.views(r.Context(), `follower_key_id = ? AND target = ?`, follower, target)
 	switch {
@@ -605,7 +849,11 @@ func (s *Service) end(w http.ResponseWriter, r *http.Request, follower int64, ta
 		return
 	}
 	if err := s.remove(r.Context(), v[0].ID, follower, target); err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", "remove follow")
+		if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) { // the host of the feed refused the leave, or did not answer
+			writeErr(w, r, fe.Status, fe.Code, fe.Message)
+		} else {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "remove follow")
+		}
 		return
 	}
 	s.audit(r, "follow.remove", v[0])
@@ -613,8 +861,23 @@ func (s *Service) end(w http.ResponseWriter, r *http.Request, follower int64, ta
 }
 
 // remove deletes follow id, of follower toward target, and takes the
-// follower out of target's active feed.
+// follower out of target's active feed it is a member of: a feed of
+// ours, whose log tells a follower's server, or the replica of a feed of
+// another server, whose host is told first, as a member removal does; a
+// replica left without a bot of ours is archived.
 func (s *Service) remove(ctx context.Context, id, follower int64, target string) error {
+	var feed string
+	var replica bool
+	err := s.DB.QueryRowContext(ctx, `SELECT r.id, r.home_domain IS NOT NULL FROM rooms r JOIN room_members m ON m.room_id = r.id AND m.key_id = ?
+		WHERE r.feed = ? AND r.archived_at IS NULL`, follower, target).Scan(&feed, &replica)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if replica && s.Leave != nil { // the host first: if it cannot be told, nothing changes here
+		if err := s.Leave(ctx, feed, follower); err != nil {
+			return err
+		}
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -623,13 +886,8 @@ func (s *Service) remove(ctx context.Context, id, follower int64, target string)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE id = ?`, id); err != nil {
 		return err
 	}
-	var feed string
-	err = tx.QueryRowContext(ctx, `SELECT id FROM rooms WHERE feed = ? AND home_domain IS NULL AND archived_at IS NULL`, target).Scan(&feed)
-	if errors.Is(err, sql.ErrNoRows) {
+	if feed == "" {
 		return tx.Commit()
-	}
-	if err != nil {
-		return err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND key_id = ?`, feed, follower)
 	if err != nil {
@@ -640,6 +898,13 @@ func (s *Service) remove(ctx context.Context, id, follower int64, target string)
 			err = fedrooms.LogRemove(ctx, tx, feed, follower, s.FedDomain)
 		}
 		if err != nil {
+			return err
+		}
+	}
+	if replica {
+		if _, err := tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ? AND NOT EXISTS
+			(SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id WHERE m.room_id = ? AND k.remote_domain IS NULL)`,
+			storage.FormatTS(time.Now()), feed, feed); err != nil {
 			return err
 		}
 	}
@@ -828,19 +1093,34 @@ func (s *Service) notify() {
 	}
 }
 
-// audit writes action for follow v, after the change.
+// audit writes action for follow v, after the change, as the caller.
 func (s *Service) audit(r *http.Request, action string, v followView) {
 	c, _ := auth.FromContext(r.Context())
+	s.auditAs(r.Context(), c.KeyID, action, v)
+}
+
+// auditAs writes action for follow v as actor.
+func (s *Service) auditAs(ctx context.Context, actor int64, action string, v followView) {
 	detail, _ := json.Marshal(map[string]string{"from": v.From, "to": v.To, "status": v.Status})
-	_ = audit.Write(r.Context(), s.DB, c.KeyID, action, "follow", strconv.FormatInt(v.ID, 10), "", "ok", string(detail))
+	_ = audit.Write(ctx, s.DB, actor, action, "follow", strconv.FormatInt(v.ID, 10), "", "ok", string(detail))
 }
 
 // refuse audits a refused follow (reason: not a bot, policy, limit) and
 // answers it.
 func (s *Service) refuse(w http.ResponseWriter, r *http.Request, caller int64, to, reason string, status int, code, msg string) {
-	detail, _ := json.Marshal(map[string]string{"to": to, "reason": reason})
-	_ = audit.Write(r.Context(), s.DB, caller, "follow.refused", "bot", to, "", "error:"+code, string(detail))
+	s.refused(r.Context(), caller, "", to, reason, code)
 	writeErr(w, r, status, code, msg)
+}
+
+// refused audits a refused follow of actor toward to; from is the
+// address of a follower of another server, "" for a bot of ours.
+func (s *Service) refused(ctx context.Context, actor int64, from, to, reason, code string) {
+	d := map[string]string{"to": to, "reason": reason}
+	if from != "" {
+		d["from"] = from
+	}
+	detail, _ := json.Marshal(d)
+	_ = audit.Write(ctx, s.DB, actor, "follow.refused", "bot", to, "", "error:"+code, string(detail))
 }
 
 // limitKey names a limiter: a bot's posts or its new follow requests.

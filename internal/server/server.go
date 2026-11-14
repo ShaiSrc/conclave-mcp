@@ -246,6 +246,10 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	if fedSvc != nil {
 		roomsSvc.FedDomain, messagesSvc.FedDomain, directSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain(), fedSvc.Domain()
 		followSvc.FedDomain, followSvc.FedNotify = fedSvc.Domain(), fedSvc.DeliverSoon
+		// Follows of bots of peers: a signed follow request out, and a feed
+		// invite to bring in a follower of a peer; unfollowing leaves the
+		// replica through its host.
+		followSvc.Request, followSvc.InviteRemote, followSvc.Leave = fedSvc.FollowRemote, fedSvc.InviteRemote, fedSvc.LeaveRemote
 		roomsSvc.MaxMessageBytes = messagesSvc.MaxMessageBytes
 		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		// Direct conversations with bots of peers start with a direct
@@ -256,7 +260,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		claimsLocal := chi.NewRouter()
 		claimsSvc.Routes(claimsLocal)
 		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,
-			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica}
+			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica, Follow: followSvc.Remote}
 	}
 
 	r.Route("/v1", func(r chi.Router) {

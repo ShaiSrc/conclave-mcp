@@ -747,4 +747,19 @@ func TestServer_Follows(t *testing.T) {
 		!strings.Contains(rec.Body.String(), `"federation_disabled"`) {
 		t.Errorf("remote with federation off: %d %s", rec.Code, rec.Body)
 	}
+	// With federation on, a follow goes to allowed peers only, and the
+	// federation listener takes signed follow requests.
+	if s, err = New(Config{Host: "127.0.0.1", Port: 7432, FederationDomain: "conclave.example.org", FederationHost: "127.0.0.1",
+		FederationPort: 7433}, Deps{DB: db}); err != nil {
+		t.Fatal(err)
+	}
+	if rec := do("alice", http.MethodPost, "/v1/follows", `{"to":"bob@peer.example"}`); rec.Code != http.StatusForbidden ||
+		!strings.Contains(rec.Body.String(), `"peer_not_allowed"`) {
+		t.Errorf("remote with federation on: %d %s", rec.Code, rec.Body)
+	}
+	rec = httptest.NewRecorder()
+	s.fed.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/fed/v1/follows", strings.NewReader(`{}`)))
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("unsigned follow request: %d, want 401", rec.Code)
+	}
 }

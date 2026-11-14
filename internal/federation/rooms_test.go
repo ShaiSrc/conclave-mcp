@@ -27,6 +27,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/direct"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
+	"github.com/hermes/conclave-mcp/internal/follow"
 	"github.com/hermes/conclave-mcp/internal/messages"
 	"github.com/hermes/conclave-mcp/internal/rooms"
 )
@@ -106,6 +107,7 @@ type roomRig struct {
 	fed    chi.Router
 	broker *events.Broker
 	direct *direct.Service
+	follow *follow.Service
 }
 
 func newRoomRig(t *testing.T) *roomRig {
@@ -148,9 +150,12 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	cs.Forward = svc.ForwardClaims
 	cl := chi.NewRouter()
 	cs.Routes(cl)
-	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica}
 	ds := &direct.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.Send,
 		InviteRemote: svc.InviteRemote, FedNotify: svc.DeliverSoon}
+	fs := &follow.Service{DB: db, FedDomain: svc.Domain(), MaxMessageBytes: ms.MaxMessageBytes, Send: ms.Send, Delete: ms.Delete,
+		InviteRemote: svc.InviteRemote, Request: svc.FollowRemote, Leave: svc.LeaveRemote, FedNotify: svc.DeliverSoon}
+	svc.Rooms = RoomHooks{Send: ms.SendFromPeer, Claims: cl, MaxMessageBytes: ms.MaxMessageBytes, Replicate: ms.StoreReplica,
+		Follow: fs.Remote}
 	fed := chi.NewRouter()
 	svc.PublicRoutes(fed)
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', 'x', 'p-root', '2026-01-01T00:00:00Z', 1)`)
@@ -159,7 +164,7 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 	}
 	adminID, _ := res.LastInsertId()
 	return &roomRig{svc: svc, db: db, admin: auth.Claims{KeyID: adminID, Scopes: admin}, fed: fed, broker: broker, direct: ds,
-		routes: func(r chi.Router) { rs.Routes(r); ms.Routes(r); cs.Routes(r); ds.Routes(r) }}
+		follow: fs, routes: func(r chi.Router) { rs.Routes(r); ms.Routes(r); cs.Routes(r); ds.Routes(r); fs.Routes(r) }}
 }
 
 // bot adds a local bot with handle and returns its key.

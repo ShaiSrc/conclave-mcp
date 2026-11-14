@@ -59,10 +59,11 @@ type Service struct {
 	// Rooms connects federated rooms to the local services.
 	Rooms RoomHooks
 
-	mu          sync.Mutex
-	limiters    map[string]*rate.Limiter // per verified peer
-	dmLimits    map[string]*rate.Limiter // direct invites, per peer
-	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
+	mu           sync.Mutex
+	limiters     map[string]*rate.Limiter // per verified peer
+	dmLimits     map[string]*rate.Limiter // direct invites, per peer
+	followLimits map[string]*rate.Limiter // follow requests, per peer
+	keyLimiters  map[int64]*rate.Limiter  // remote lookups, per key
 
 	warnLog, keyChecks minuteGate
 }
@@ -152,6 +153,7 @@ func (s *Service) PublicRoutes(r chi.Router) {
 		r.Post("/rooms/{id}/claims", s.handleRoomClaims)
 		r.Post("/rooms/{id}/claims/heartbeat", s.handleRoomClaims)
 		r.Post("/rooms/{id}/claims/release", s.handleRoomClaims)
+		r.Post("/follows", s.handleFollow)
 	})
 }
 
