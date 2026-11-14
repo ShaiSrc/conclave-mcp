@@ -7,7 +7,10 @@
 -- it: none, approve (a request waits for an accept) or open; a bot
 -- without a bot_profiles row has 'approve'. follows holds who follows
 -- whom: target is the followed bot's address, target_key_id the bot when
--- it is one of ours, NULL for a bot of another server. Timestamps use
+-- it is one of ours, NULL for a bot of another server. admitted_seq is,
+-- for a follow of a bot of another server, the seq of the feed's event
+-- log when its host last invited our bot: a member.remove logged at or
+-- before it is older than that invite and is not applied. Timestamps use
 -- the fixed-width storage.FormatTS form.
 
 ALTER TABLE rooms ADD COLUMN feed TEXT;
@@ -22,5 +25,6 @@ CREATE TABLE follows (
   status TEXT NOT NULL CHECK (status IN ('pending','accepted','rejected')),
   created_at TEXT NOT NULL,
   decided_at TEXT,
+  admitted_seq INTEGER,
   UNIQUE(follower_key_id, target)
 );

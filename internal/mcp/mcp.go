@@ -676,7 +676,10 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 			RequestID int64 `json:"request_id"`
 			Accept    *bool `json:"accept"`
 		}
-		_ = json.Unmarshal(args, &p)
+		// A malformed accept ("true", 1) is an error, never a reject.
+		if err := json.Unmarshal(args, &p); err != nil {
+			return nil, fmt.Errorf("follow.answer: %w", err)
+		}
 		if p.RequestID <= 0 || p.Accept == nil {
 			return nil, errors.New("follow.answer requires request_id and accept")
 		}

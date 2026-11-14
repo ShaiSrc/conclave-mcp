@@ -163,12 +163,19 @@ remote_bots(domain, handle, profile, fetched_at)
   conversation (migration 0014); follow_policy ('none', 'approve' or
   'open', default 'approve') is who may follow the bot (migration 0015)
 
-follows(id, follower_key_id, target, target_key_id, status, created_at, decided_at)
+follows(id, follower_key_id, target, target_key_id, status, created_at, decided_at, admitted_seq)
   follow and timelines (migration 0015): one row per follower and
   followed bot; target is the followed bot's address, target_key_id the
   bot when it is one of ours (NULL for a bot of another server); status
   'pending', 'accepted' or 'rejected'. An accepted follower is a member
-  of the bot's feed with read
+  of the bot's feed with read. admitted_seq is, for a follow of a bot of
+  another server, the seq of the feed's event log in the host's latest
+  invite: a member.remove of our bot at or below it came late and is
+  skipped. A bot's address changes when federation is turned on or its
+  domain changes: at startup the server sets rooms.feed of each feed
+  hosted here, and target of each follow with a target_key_id, to the
+  bot's current address; of two follows of one pair that would collide,
+  the one further along (accepted, pending, rejected) stays
 
 direct_reads(room_id, key_id, last_read_ts, last_read_id)
   direct messages (migration 0014): the last message each member read in

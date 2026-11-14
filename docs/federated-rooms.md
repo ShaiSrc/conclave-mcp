@@ -481,7 +481,8 @@ replica. `GET /v1/rooms` shows it with `"kind": "feed"` and `feed`.
 
 The host invites a follower's server into the feed once the follow is
 accepted. The invite carries `"kind": "feed"`, the feed's bot address
-as `feed`, and the feed's name, `feed:<address>` (cut and suffixed with
+as `feed`, the seq the feed's event log is at as `seq`, and the feed's
+name, `feed:<address>` (cut and suffixed with
 `#<room id>` when the host had to). The member server checks, after
 the origin is an `allowed` peer:
 
@@ -495,7 +496,10 @@ the origin is an `allowed` peer:
 
 It makes the replica (or makes an archived one active again), keeps the
 address in `rooms.feed`, gives its bot `read` whatever the host sent,
-marks the follow `accepted` and answers with `"kind": "feed"`. A host
+marks the follow `accepted`, keeps `seq` with it (`follows.admitted_seq`)
+and answers with `"kind": "feed"`. The same invite again, into the
+replica of an accepted follow, changes nothing and is taken: a host
+that lost the answer invites again. A host
 treats an answer without that kind as 403 `invite_refused`. The
 200-replicas limit of a host counts feeds too.
 
@@ -509,7 +513,10 @@ feed's bot and itself. A replica of a feed gives its
 own bots `read` whatever a member event says, and skips a member event
 for a bot of its own that the feed did not invite. A bot of the member
 server that leaves the replica, or that the host removes, no longer
-follows the feed's bot; when the host archives the feed, the member
+follows the feed's bot, unless it is in a newer active replica of the
+same feed; a removal at or below the follow's `admitted_seq` was logged
+before the host's latest invite and is skipped, and a pending follow is
+never ended by a removal. When the host archives the feed, the member
 server deletes the accepted follows of its bots in that replica, except
 those of bots in a newer active replica of the same feed. Blocking or
 removing the host ends every follow of its bots, pending ones too.

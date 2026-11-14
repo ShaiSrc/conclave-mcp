@@ -732,8 +732,13 @@ func (s *Service) removeMember(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "event log")
 		return
 	}
-	// A member leaving a feed ends its follow.
-	if _, err := tx.ExecContext(r.Context(), `DELETE FROM follows WHERE follower_key_id = ? AND target = (SELECT feed FROM rooms WHERE id = ?)`,
+	// A member leaving a feed ends its follow: leaving the active feed, or
+	// an archived one while in no active feed of that bot. A member of the
+	// bot's next feed keeps the follow it holds there.
+	if _, err := tx.ExecContext(r.Context(), `DELETE FROM follows WHERE follower_key_id = ?1 AND target = (SELECT feed FROM rooms WHERE id = ?2)
+		AND (EXISTS (SELECT 1 FROM rooms WHERE id = ?2 AND archived_at IS NULL)
+		OR NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = ?1
+			WHERE o.feed = follows.target AND o.archived_at IS NULL))`,
 		keyid, id); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "end follow")
 		return

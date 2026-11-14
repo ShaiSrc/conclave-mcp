@@ -121,9 +121,11 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // cut and suffixed with #<room id> by its host (400 otherwise); from a
 // host that sends no feed, the address is read from the name. It needs a
 // follow of our bot toward that address, on the origin's domain (403
-// invite_refused otherwise), which it makes accepted. The bot gets read,
-// whatever the host sent, and the replica keeps the address in
-// rooms.feed.
+// invite_refused otherwise), which it makes accepted, keeping the seq
+// the invite says the feed's log is at as its admitted_seq. The bot gets
+// read, whatever the host sent, and the replica keeps the address in
+// rooms.feed. The same invite again, into the replica with an accepted
+// follow, changes nothing and is taken.
 //
 // A direct invite (kind direct) starts a conversation with our bot: it
 // takes one only from an allowed peer (seen ones get 403 dm_refused,
@@ -143,6 +145,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		Rights []string `json:"rights"`
 		Kind   string   `json:"kind"`
 		Feed   string   `json:"feed"` // a feed's bot
+		Seq    int64    `json:"seq"`  // where a feed's log is: a removal of our bot up to it is older than this invite
 	}
 	derr := json.NewDecoder(r.Body).Decode(&in)
 	in.Kind = cmp.Or(in.Kind, "room")
@@ -310,8 +313,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if feed { // the follow of our bot toward the feed's bot is accepted now; without one, no replica
-		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?)
-			WHERE follower_key_id = ? AND target = ? AND target_key_id IS NULL`, storage.FormatTS(time.Now()), keyID, feedOf)
+		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?),
+			admitted_seq = MAX(COALESCE(admitted_seq, 0), ?)
+			WHERE follower_key_id = ? AND target = ? AND target_key_id IS NULL`, storage.FormatTS(time.Now()), max(in.Seq, 0), keyID, feedOf)
 		var n int64
 		if err == nil {
 			n, err = res.RowsAffected()
@@ -570,7 +574,7 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 	case fedrooms.EventMember:
 		err = s.applyMember(ctx, tx, roomID, host, ev.Payload)
 	case fedrooms.EventMemberRemove:
-		err = s.applyRemove(ctx, tx, roomID, ev.Payload)
+		err = s.applyRemove(ctx, tx, roomID, host, ev.Seq, ev.Payload)
 	case fedrooms.EventMessageDelete, fedrooms.EventMessage:
 		err = applyDelete(ctx, tx, roomID, ev.Payload)
 	default:
@@ -693,8 +697,15 @@ const localMember = `EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.i
 
 // applyRemove removes a member from the replica. When no bot of ours is
 // left, the replica is archived. A bot of ours out of a feed no longer
-// follows the feed's bot.
-func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID string, payload json.RawMessage) error {
+// follows the feed's bot, unless it is in a newer active replica of that
+// feed from host; a pending follow is newer than any membership, so it
+// stays. A removal of our bot from a feed at seq, logged at or
+// before the host's latest invite of it (its follow's admitted_seq), is
+// older than that invite: it came late, after our bot unfollowed and
+// followed again, and changes nothing. ponytail: admitted_seq is one per
+// follow, compared in any replica of the feed; at worst our bot stays a
+// member of an older replica, as an archived one keeps its members.
+func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID, host string, seq int64, payload json.RawMessage) error {
 	var p fedrooms.RemovePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return refused("member.remove event: bad payload")
@@ -703,11 +714,20 @@ func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID string, pa
 	if err != nil || key == 0 {
 		return err
 	}
+	if local {
+		var stale bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM follows WHERE follower_key_id = ? AND target_key_id IS NULL
+			AND target = (SELECT feed FROM rooms WHERE id = ?) AND admitted_seq >= ?)`, key, roomID, seq).Scan(&stale); err != nil || stale {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND key_id = ?`, roomID, key); err != nil || !local {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ? AND target_key_id IS NULL
-		AND target = (SELECT feed FROM rooms WHERE id = ?)`, key, roomID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ?1 AND target_key_id IS NULL AND status = 'accepted'
+		AND target = (SELECT feed FROM rooms WHERE id = ?2)
+		AND NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = ?1
+			WHERE o.feed = follows.target AND o.home_domain = ?3 AND o.id != ?2 AND o.archived_at IS NULL)`, key, roomID, host); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ? AND NOT `+localMember,

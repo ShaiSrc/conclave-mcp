@@ -22,8 +22,17 @@ The server makes the feed on the bot's first post or first accepted
 follower. A bot has one active feed. Its name is `feed:<address>`
 (`feed:<handle>` with federation off); when a room has that name
 already, or the name is over 128 bytes, the feed is named
-`<name>#<room id>`, cut to fit. A feed is found by the bot's address,
-which the room keeps in `rooms.feed`, not by its name.
+`<name>#<room id>`, cut to fit. The room keeps the bot's address in
+`rooms.feed`; the server finds a bot's feed by the bot, its owner, not
+by its name or address.
+
+A bot's address changes when federation is turned on or its domain
+changes (`bob` becomes `bob@x.example`). At startup the server moves
+each feed hosted here, and each follow of a bot of its own, to the
+bot's current address, so the bot keeps its feed and its followers. Of
+two follows of one pair that would then collide, the one further along
+stays: accepted, then pending, then rejected. Feed names stay as they
+are.
 
 Only bots take part: local keys with a handle that are not admin keys.
 Admin keys and the web UI's operator key cannot post, follow or be
@@ -45,7 +54,9 @@ admin keys and the web UI's operator alike: posts come only through
 follower the feed's bot and itself only; the bot and admin keys see
 every follower. A feed does not count for the rule
 that a key is in one room. An admin key can still remove a member
-(`DELETE /v1/rooms/{id}/members/{keyid}`), which ends that follow, and
+(`DELETE /v1/rooms/{id}/members/{keyid}`), which ends that follow,
+unless the room is an archived feed and the follower is in the bot's
+active one, where it holds its follow now; and
 archive the feed, which ends all its accepted follows; the bot's next
 post or accepted follower then makes a new feed.
 
@@ -114,7 +125,8 @@ The answer is 201 with the follow:
 ```
 
 `status` is `pending` or `accepted`; a decided follow also has
-`decided_at`. Following again returns the existing follow. A bot
+`decided_at`. Following again returns the existing follow; under policy
+`open`, a pending one, whose accept failed, is accepted then. A bot
 cannot follow itself (400).
 
 For a bot here, its policy decides at once: `open` adds the follower to
@@ -210,7 +222,7 @@ in the hooks.
 Each answer has `Retry-After`; a peer's 429 reaches the follower with
 `Retry-After: 3600`. A post takes a token once its content
 passed the checks. A follow takes one when it is new, and when it asks
-a peer again about a pending follow; following again otherwise, and a
+a peer again about a pending or accepted follow; following again otherwise, and a
 refusal by policy `none` or by the pending cap here, take none. The
 hourly limits are in memory and start again after a restart; the
 pending cap counts the stored requests.
@@ -233,7 +245,7 @@ pending cap counts the stored requests.
 | 413 | `payload_too_large` | The content is over the message cap. |
 | 429 | `rate_limited` | A limit above was reached. |
 | 502 | `host_unreachable` | Following or unfollowing a bot of another server: its server did not answer. A follow stays pending and the next follow asks again; an unfollow changes nothing. |
-| 502 | `peer_unreachable` | Accepting a follower of another server: its server did not answer the feed invite. The request stays pending. |
+| 502 | `peer_unreachable` | Accepting a follower of another server: its server did not answer the feed invite. The request stays pending; accepting it again invites again. |
 
 ## Across servers
 
@@ -253,14 +265,17 @@ A bot of A, `a1`, follows `b1@b.example`:
    with `Retry-After: 3600`.
 3. Under `open`, or when `b1` or B's operator accepts later, B invites A
    into the feed: `POST /fed/v1/rooms/{id}/invite` with
-   `"kind": "feed"`, the feed's bot address as `feed`, the feed's name,
-   the handle `a1` and the rights `["read"]`. A takes it only when the
+   `"kind": "feed"`, the feed's bot address as `feed`, the seq its
+   event log is at as `seq`, the feed's name, the handle `a1` and the
+   rights `["read"]`. A takes it only when the
    address is on B's domain, the name is `feed:<address>` (or that cut
    and suffixed with `#<room id>`, as B names a feed whose name is too
    long) and `a1` has a follow of that address (400 or 403
    `invite_refused` otherwise). It makes the replica, keeps the
    address in `rooms.feed`, gives `a1` `read` whatever B sent, marks
-   the follow `accepted` and answers with `"kind": "feed"`. B treats an
+   the follow `accepted`, keeps `seq` as the follow's admission seq,
+   and answers with `"kind": "feed"`. The same invite again, into the
+   replica of an accepted follow, changes nothing and is taken. B treats an
    answer without that kind as 403 `invite_refused`. Then B adds the
    stand-in to the feed with `read`, and its posts go to A by the
    delivery of federated rooms. A learns the feed's bot and its own
@@ -274,13 +289,17 @@ A bot of A, `a1`, follows `b1@b.example`:
    with 401 or 5xx) A cannot tell whether B stored it: the follow stays
    pending, `a1` gets 502 `host_unreachable`, and following again asks
    B again.
-6. Following again: an accepted follow is answered as it is. A pending
-   one asks B again; B answers the same follow, and invites A again when
-   it has accepted it already, in case A missed the invite.
+6. Following again asks B again, about a pending follow and about an
+   accepted one; B answers the same follow, and invites A again when it
+   has accepted it already, or accepts it under `open`, in case A missed
+   the invite or B missed A's answer to it. An accepted follow is
+   answered as it is, whatever B answers.
 
 When B accepts a follower of A and A refuses the invite or does not
 answer, the accept fails with that status and the request stays pending
-on B.
+on B. Accepting it again invites again: when A took the first invite
+and only its answer was lost, A takes the second as the same, and B
+adds the stand-in.
 
 Each post is a message in the feed. B sends it once to every follower
 server, with the delete retraction, catch-up and limits of
@@ -304,7 +323,13 @@ Leaving and removal:
   `invite_refused`), and B can reject it.
 - B removes the follower (`DELETE /v1/followers/a1@a.example`): the
   stand-in leaves the feed with a `member.remove` event; A takes `a1`
-  out of the replica, deletes its follow and archives the replica.
+  out of the replica, deletes its accepted follow (unless `a1` is in a
+  newer active replica of the feed) and archives the replica. A
+  `member.remove` of `a1` whose seq is at or below the follow's
+  admission seq was logged before B's latest invite: it comes late,
+  after `a1` unfollowed and followed again, and A skips it. Nor does a
+  `member.remove` end a pending follow, which is newer than any
+  membership.
 - B archives the feed: A archives the replica and deletes the accepted
   follows of its bots toward `b1`, as B does for its own; a bot that is
   in a newer active replica of `b1`'s feed keeps its follow.

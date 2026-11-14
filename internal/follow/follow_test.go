@@ -42,6 +42,14 @@ func newEnv(t *testing.T, domain string) *env {
 	}
 	e := &env{t: t, db: db}
 	e.admin = e.key("root", "", true)
+	e.serve(domain)
+	return e
+}
+
+// serve has e's handler serve as a server whose federation domain is
+// domain ("" for off) and returns its follow service.
+func (e *env) serve(domain string) *Service {
+	db := e.db
 	msgs := messages.NewService(db, 1024, nil)
 	msgs.FedDomain = domain
 	svc := &Service{DB: db, FedDomain: domain, MaxMessageBytes: msgs.MaxMessageBytes, Send: msgs.SendPost, Delete: msgs.Delete}
@@ -62,7 +70,7 @@ func newEnv(t *testing.T, domain string) *env {
 	rs.FedDomain = domain
 	rs.Routes(r)
 	e.h = r
-	return e
+	return svc
 }
 
 // key adds a key labelled label with handle ("" for none).
@@ -225,6 +233,47 @@ func TestFollow_PolicyMatrix(t *testing.T) {
 	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{"to":"bad name"}`), http.StatusBadRequest, "bad_request")
 	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{"to":"open@peer.example"}`), http.StatusNotFound, "federation_disabled")
 	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{`), http.StatusBadRequest, "bad_request")
+}
+
+// Under policy open, a follow whose accept failed stays pending; following
+// again accepts it.
+func TestFollow_OpenRetry(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "open")
+	e.exec(`CREATE TRIGGER no_reader BEFORE INSERT ON room_members WHEN NEW.role = 'reader' BEGIN SELECT RAISE(ABORT, 'no'); END`)
+	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{"to":"bob"}`), http.StatusInternalServerError, "internal_error")
+	if n := e.count(`SELECT COUNT(*) FROM follows WHERE status = 'pending'`); n != 1 {
+		t.Fatalf("%d pending follows, want 1", n)
+	}
+	e.exec(`DROP TRIGGER no_reader`)
+	if f := e.follow(alice, "bob"); f.Status != "accepted" {
+		t.Errorf("following again: %+v", f)
+	}
+	if got := e.member(e.feed(bob), alice); got != "read" {
+		t.Errorf("alice's rights in bob's feed: %q", got)
+	}
+}
+
+// An accept that commits while a follow is being removed does not leave
+// the follower in the feed: the trigger stands for an accept that
+// committed after the removal looked at the feed's members.
+func TestFollow_RemoveRacesAccept(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "")
+	e.post(bob, "first", "")
+	feed := e.feed(bob)
+	e.exec(fmt.Sprintf(`CREATE TRIGGER accept_race BEFORE DELETE ON follows BEGIN
+		INSERT OR IGNORE INTO room_members(room_id, key_id, role, joined_at, rights)
+		VALUES ('%s', OLD.follower_key_id, 'reader', '2026-01-01T00:00:00Z', 'read'); END`, feed))
+	for key, path := range map[int64]string{alice: "/follows/bob", bob: "/followers/alice"} {
+		e.follow(alice, "bob")
+		if rec := e.do(key, http.MethodDelete, path, ""); rec.Code != http.StatusNoContent {
+			t.Fatalf("%s: %d %s", path, rec.Code, rec.Body)
+		}
+		if got := e.member(feed, alice); got != "" {
+			t.Errorf("%s: alice is still in bob's feed with %q", path, got)
+		}
+	}
 }
 
 // Only bots follow and are followed: admin keys and keys without a
@@ -583,6 +632,92 @@ func TestTimeline_AdminAndOrder(t *testing.T) {
 	e.exec(`UPDATE rooms SET home_domain = 'peer.example' WHERE id = ?`, e.feed(carol))
 	if got, _ := page(e.admin, ""); got != "alice:a1 bob:b1 alice:a2" {
 		t.Errorf("admin with a replica: %s", got)
+	}
+}
+
+// Turning federation on changes a bot's address from its handle to
+// handle@domain: the startup reconciliation moves its feed and the
+// follows of it to the new address, so posts stay in the same feed and
+// its followers keep reading them. Of two follows of one pair that would
+// then collide, the one further along stays.
+func TestReconcile_AddressChange(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob, carol := e.bot("alice", ""), e.bot("bob", ""), e.bot("carol", "")
+	fa := e.follow(alice, "bob")
+	if rec := e.do(bob, http.MethodPost, fmt.Sprintf("/follows/requests/%d/accept", fa.ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("accept: %d %s", rec.Code, rec.Body)
+	}
+	fc := e.follow(carol, "bob")
+	e.post(bob, "before", "")
+	feed := e.feed(bob)
+	// A pending follow of alice under the new address, as a server before
+	// the reconciliation could store it.
+	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		VALUES (?, 'bob@x.example', ?, 'pending', '2026-01-01T00:00:00Z')`, alice, bob)
+
+	svc := e.serve("x.example")
+	if err := svc.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM rooms WHERE id = ? AND feed = 'bob@x.example'`, feed); n != 1 {
+		t.Error("the feed keeps its old address")
+	}
+	if f := e.follow(alice, "bob"); f.ID != fa.ID || f.Status != "accepted" || f.To != "bob@x.example" {
+		t.Errorf("alice's follow: %+v", f)
+	}
+	if f := e.follow(carol, "bob"); f.ID != fc.ID || f.Status != "pending" {
+		t.Errorf("carol's follow: %+v", f)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM follows`); n != 2 {
+		t.Errorf("%d follows, want 2", n)
+	}
+	e.post(bob, "after", "")
+	if got := e.feed(bob); got != feed {
+		t.Errorf("bob posts into %s, not his feed %s", got, feed)
+	}
+	if body := e.do(alice, http.MethodGet, "/timeline", "").Body.String(); !strings.Contains(body, `"content":"after"`) {
+		t.Errorf("alice's timeline: %s", body)
+	}
+	if rec := e.do(bob, http.MethodPost, fmt.Sprintf("/follows/requests/%d/accept", fc.ID), ""); rec.Code != http.StatusOK {
+		t.Fatalf("accept carol: %d %s", rec.Code, rec.Body)
+	}
+	if e.member(feed, carol) != "read" {
+		t.Error("carol did not join bob's feed")
+	}
+	if n := e.count(`SELECT COUNT(*) FROM rooms WHERE feed IS NOT NULL`); n != 1 {
+		t.Errorf("%d feeds, want 1", n)
+	}
+}
+
+// Removing a follower from an archived feed leaves its follow into the
+// bot's next feed, and its membership there.
+func TestRooms_ArchivedFeedRemoval(t *testing.T) {
+	e := newEnv(t, "")
+	alice, bob := e.bot("alice", ""), e.bot("bob", "open")
+	e.follow(alice, "bob")
+	old := e.feed(bob)
+	if rec := e.do(e.admin, http.MethodPost, "/rooms/"+old+"/archive", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("archive: %d %s", rec.Code, rec.Body)
+	}
+	if f := e.follow(alice, "bob"); f.Status != "accepted" {
+		t.Fatalf("following again: %+v", f)
+	}
+	feed := e.feed(bob)
+	if rec := e.do(e.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", old, alice), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove from the archived feed: %d %s", rec.Code, rec.Body)
+	}
+	if got := e.list(alice, "/follows", "follows"); len(got) != 1 || got[0].Status != "accepted" {
+		t.Errorf("alice's follows: %+v", got)
+	}
+	if got := e.member(feed, alice); got != "read" {
+		t.Errorf("alice's rights in the new feed: %q", got)
+	}
+	// Out of the active feed, the follow ends.
+	if rec := e.do(e.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", feed, alice), ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("remove from the feed: %d %s", rec.Code, rec.Body)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM follows`); n != 0 {
+		t.Errorf("%d follows left", n)
 	}
 }
 

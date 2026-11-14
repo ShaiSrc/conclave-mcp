@@ -668,6 +668,14 @@ func TestFollowTools(t *testing.T) {
 			t.Errorf("%s %s must fail: %q", c[0], c[1], text)
 		}
 	}
+	// accept must be a JSON boolean: anything else sends nothing, so a
+	// malformed accept never rejects.
+	for _, args := range []string{`{"request_id":4,"accept":"true"}`, `{"request_id":4,"accept":1}`, `{"request_id":"4","accept":true}`} {
+		gotReq = ""
+		if text, isErr := toolText(t, s, "follow.answer", args); !isErr || gotReq != "" {
+			t.Errorf("follow.answer %s: isErr %v, sent %q: %q", args, isErr, gotReq, text)
+		}
+	}
 
 	// follow.list is text: one line per follow, addresses on one line,
 	// the external note when an address is on another server, and a note

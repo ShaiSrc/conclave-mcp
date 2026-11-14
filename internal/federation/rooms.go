@@ -127,7 +127,8 @@ func (s *Service) authorSigned(ctx context.Context, m MessageSig, sig string) (b
 // allowed peers are asked. The invite names the room's kind: direct,
 // feed for a feed, else room; an answer that does not name it back is
 // a refusal (403). A feed's invite carries its bot's address too, which
-// its name may hold cut. A refusal is a *fedrooms.Error.
+// its name may hold cut, and the seq its log is at. A refusal is a
+// *fedrooms.Error.
 func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string, set []string) (int, error) {
 	handle, domain, _ := strings.Cut(address, "@")
 	h, herr := bots.NormalizeHandle(handle)
@@ -145,9 +146,13 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	if peer.Status != statusAllowed {
 		return 0, &fedrooms.Error{Status: http.StatusForbidden, Code: "peer_not_allowed", Message: d + " is not an allowed peer"}
 	}
+	// A feed's invite carries the seq of its log now: the member server
+	// skips a removal of the bot logged before it.
 	var kind, feed string
-	if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(feed, '') FROM rooms WHERE id = ?`,
-		roomID).Scan(&kind, &feed); err != nil {
+	var seq int64
+	if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(feed, ''),
+		CASE WHEN feed IS NOT NULL THEN (SELECT COALESCE(MAX(seq), 0) FROM fed_events WHERE room_id = rooms.id) ELSE 0 END
+		FROM rooms WHERE id = ?`, roomID).Scan(&kind, &feed, &seq); err != nil {
 		return 0, err
 	}
 	body, _ := json.Marshal(struct {
@@ -156,7 +161,8 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 		Rights []string `json:"rights"`
 		Kind   string   `json:"kind"`
 		Feed   string   `json:"feed,omitempty"`
-	}{name, h, set, kind, feed})
+		Seq    int64    `json:"seq,omitempty"`
+	}{name, h, set, kind, feed, seq})
 	status, out, err := s.sendSigned(ctx, http.MethodPost, d, "/fed/v1/rooms/"+roomID+"/invite", body, maxBody)
 	var refusal *fedrooms.Error
 	switch {

@@ -343,7 +343,19 @@ func (s *Service) follow(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow lookup")
 		return
-	case len(existing) == 1: // a narrower policy keeps existing follows; it stops new ones
+	case len(existing) == 1 && (existing[0].Status != "pending" || policy != bots.FollowOpen):
+		// a narrower policy keeps existing follows; it stops new ones
+		writeJSON(w, http.StatusCreated, hidden(existing[0]))
+		return
+	case len(existing) == 1: // pending under open: its accept failed, so again, as Remote does
+		if err := s.accept(ctx, existing[0].ID); err != nil && !errors.Is(err, errNotPending) {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow")
+			return
+		}
+		if existing, err = pair(); err != nil || len(existing) == 0 {
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow")
+			return
+		}
 		writeJSON(w, http.StatusCreated, hidden(existing[0]))
 		return
 	case policy == bots.FollowNone:
@@ -422,7 +434,8 @@ func (s *Service) handle(w http.ResponseWriter, r *http.Request, to string) (str
 // invites our bot into the feed before it answers when it accepts. On a
 // refusal the follow is deleted and the peer's status and code passed
 // on; without an answer it stays pending, and the next follow asks
-// again. An accepted follow is answered as it is.
+// again. An accepted follow is answered as it is, after the peer was
+// asked again, best effort, in case it lost the answer to its invite.
 func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller int64, address, domain string) {
 	ctx := r.Context()
 	if s.Request == nil {
@@ -443,19 +456,25 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 		return s.views(ctx, `follower_key_id = ? AND target = ?`, caller, address)
 	}
 	existing, err := pair()
-	switch {
-	case err != nil:
+	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", "follow lookup")
 		return
-	case len(existing) == 1 && existing[0].Status != "pending":
-		writeJSON(w, http.StatusCreated, existing[0])
-		return
 	}
-	// A new follow, or one without a clear answer: it takes a token, and
-	// the peer is asked (again), which answers the same follow.
+	// A new follow, one without a clear answer, or an accepted one: it
+	// takes a token, and the peer is asked (again), which answers the same
+	// follow. An accepted one is asked about because the answer to its
+	// invite may have been lost: the peer then keeps the request pending
+	// and invites again, which this server takes as the same.
 	if lim := s.limiter(false, caller); !lim.Allow() {
 		w.Header().Set("Retry-After", retryAfter(lim))
 		s.refuse(w, r, caller, address, "limit", http.StatusTooManyRequests, "rate_limited", "too many follow requests, try again later")
+		return
+	}
+	if len(existing) == 1 && existing[0].Status == "accepted" { // best effort: it stays accepted here either way
+		if from, err := s.address(ctx, caller); err == nil {
+			_ = s.Request(ctx, from, address)
+		}
+		writeJSON(w, http.StatusCreated, existing[0])
 		return
 	}
 	res, err := s.DB.ExecContext(ctx, `INSERT INTO follows(follower_key_id, target, status, created_at)
@@ -720,7 +739,8 @@ func (s *Service) invite(ctx context.Context, feed string, follower int64) (int,
 
 // feed returns the active feed of bot, a bot of ours, made if needed:
 // named feed:<address>, or with its id as a suffix when that name is
-// taken or too long, with the bot as its owner.
+// taken or too long, with the bot as its owner. It is found by its
+// owner, not its address, which changes with the federation domain.
 func (s *Service) feed(ctx context.Context, bot int64) (string, error) {
 	addr, err := s.address(ctx, bot)
 	if err != nil {
@@ -728,7 +748,8 @@ func (s *Service) feed(ctx context.Context, bot int64) (string, error) {
 	}
 	find := func() (string, error) {
 		var id string
-		err := s.DB.QueryRowContext(ctx, `SELECT id FROM rooms WHERE feed = ? AND home_domain IS NULL AND archived_at IS NULL`, addr).Scan(&id)
+		err := s.DB.QueryRowContext(ctx, `SELECT id FROM rooms WHERE owner_key_id = ? AND feed IS NOT NULL AND home_domain IS NULL
+			AND archived_at IS NULL`, bot).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
 		}
@@ -768,6 +789,42 @@ func (s *Service) feed(ctx context.Context, bot int64) (string, error) {
 		err = tx.Commit()
 	}
 	return id, err
+}
+
+// Reconcile moves feeds and follows to the current addresses of their
+// bots, which change when federation is turned on or its domain
+// changes; the server runs it at startup. Each feed hosted here takes
+// its owner's address, and each follow of a bot of ours that bot's. Of
+// two follows of one pair that would collide, the one further along
+// stays (accepted, then pending, then rejected; the older on a tie).
+// Room names are left as they are.
+func (s *Service) Reconcile(ctx context.Context) error {
+	suffix := "" // a bot's address is handle@domain, the bare handle with federation off
+	if s.FedDomain != "" {
+		suffix = "@" + s.FedDomain
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rank := func(f string) string {
+		return `CASE ` + f + `.status WHEN 'accepted' THEN 2 WHEN 'pending' THEN 1 ELSE 0 END`
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE rooms SET feed = COALESCE((SELECT handle || ? FROM api_keys WHERE id = rooms.owner_key_id), feed)
+		WHERE feed IS NOT NULL AND home_domain IS NULL`, suffix); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE target_key_id IS NOT NULL AND EXISTS (SELECT 1 FROM follows g
+		WHERE g.follower_key_id = follows.follower_key_id AND g.target_key_id = follows.target_key_id AND g.id != follows.id
+		AND (`+rank("g")+` > `+rank("follows")+` OR `+rank("g")+` = `+rank("follows")+` AND g.id < follows.id))`); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE follows SET target = COALESCE((SELECT handle || ? FROM api_keys WHERE id = follows.target_key_id), target)
+		WHERE target_key_id IS NOT NULL`, suffix); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // list answers a page of the follows of where, which takes the
@@ -944,20 +1001,22 @@ func (s *Service) end(w http.ResponseWriter, r *http.Request, follower int64, ta
 }
 
 // remove deletes follow id, of follower toward target, and takes the
-// follower out of target's active feed it is a member of: a feed of
-// ours, whose log tells a follower's server, or the replica of a feed of
-// another server, whose host is told first, as a member removal does; a
-// replica left without a bot of ours is archived.
+// follower out of target's active feed it is a member of, whatever the
+// follow's status: a feed of ours, whose log tells a follower's server,
+// or the replica of a feed of another server, whose host is told first,
+// as a member removal does; a replica left without a bot of ours is
+// archived. The membership is looked up again in the transaction, which
+// holds the write lock: an accept that committed after the first look
+// is undone with the follow.
 func (s *Service) remove(ctx context.Context, id, follower int64, target string) error {
-	var feed string
-	var replica bool
-	err := s.DB.QueryRowContext(ctx, `SELECT r.id, r.home_domain IS NOT NULL FROM rooms r JOIN room_members m ON m.room_id = r.id AND m.key_id = ?
-		WHERE r.feed = ? AND r.archived_at IS NULL`, follower, target).Scan(&feed, &replica)
+	var left string
+	err := s.DB.QueryRowContext(ctx, `SELECT r.id FROM rooms r JOIN room_members m ON m.room_id = r.id AND m.key_id = ?
+		WHERE r.feed = ? AND r.home_domain IS NOT NULL AND r.archived_at IS NULL`, follower, target).Scan(&left)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if replica && s.Leave != nil { // the host first: if it cannot be told, nothing changes here
-		if err := s.Leave(ctx, feed, follower); err != nil {
+	if left != "" && s.Leave != nil { // the host first: if it cannot be told, nothing changes here
+		if err := s.Leave(ctx, left, follower); err != nil {
 			return err
 		}
 	}
@@ -969,8 +1028,15 @@ func (s *Service) remove(ctx context.Context, id, follower int64, target string)
 	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE id = ?`, id); err != nil {
 		return err
 	}
-	if feed == "" {
+	var feed string
+	var replica bool
+	err = tx.QueryRowContext(ctx, `SELECT r.id, r.home_domain IS NOT NULL FROM rooms r JOIN room_members m ON m.room_id = r.id AND m.key_id = ?
+		WHERE r.feed = ? AND r.archived_at IS NULL`, follower, target).Scan(&feed, &replica)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
 		return tx.Commit()
+	case err != nil:
+		return err
 	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND key_id = ?`, feed, follower)
 	if err != nil {

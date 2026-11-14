@@ -513,6 +513,154 @@ func TestFollowRemote_Unfollow(t *testing.T) {
 	}
 }
 
+// A feed invite whose answer is lost leaves the follow accepted on the
+// follower's server and pending on the host's. Following again asks the
+// host again, which invites again; under approve the bot accepts again.
+// The receiver takes the invite again as the same, and the host's posts
+// then arrive.
+func TestFollowRemote_LostInviteAnswer(t *testing.T) {
+	a, b := dmPair(t)
+	ctx := context.Background()
+	open, appr, b1 := a.followBot(t, "open", "open"), a.followBot(t, "appr", "approve"), b.followBot(t, "b1", "")
+	invite := a.follow.InviteRemote
+	lose := func() {
+		a.follow.InviteRemote = func(ctx context.Context, roomID, name, address string, rights []string) (int, error) {
+			if _, err := invite(ctx, roomID, name, address, rights); err != nil {
+				return 0, err
+			}
+			return 0, &fedrooms.Error{Status: http.StatusBadGateway, Code: "peer_unreachable", Message: "peer did not answer"}
+		}
+	}
+	hostStatus := func(handle string) string {
+		var st string
+		if err := a.db.QueryRow(`SELECT status FROM follows WHERE target = ?`, handle+"@"+a.svc.Domain()).Scan(&st); err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	timeline := func(post string) bool {
+		return strings.Contains(b.do(b1, http.MethodGet, "/timeline", "").Body.String(), `"content":"`+post+`"`)
+	}
+
+	// Policy open: the answer to the invite of the follow request is lost.
+	lose()
+	if v := followOf(t, b.followTo(b1, "open@"+a.svc.Domain())); v.Status != "accepted" {
+		t.Fatalf("follow: %+v", v)
+	}
+	if st := hostStatus("open"); st != "pending" {
+		t.Fatalf("host: %s", st)
+	}
+	a.follow.InviteRemote = invite
+	if v := followOf(t, b.followTo(b1, "open@"+a.svc.Domain())); v.Status != "accepted" {
+		t.Fatalf("following again: %+v", v)
+	}
+	if st := hostStatus("open"); st != "accepted" {
+		t.Errorf("host after following again: %s", st)
+	}
+	if rec := a.do(open, http.MethodPost, "/posts", `{"content":"open post"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("post: %d %s", rec.Code, rec.Body)
+	}
+	a.svc.deliverDue(ctx)
+	if !timeline("open post") {
+		t.Error("b1 does not read open's post")
+	}
+
+	// Policy approve: the answer to the invite of the accept is lost. The
+	// accept fails and the request stays pending on the host; following
+	// again changes nothing there; accepting again completes it.
+	followOf(t, b.followTo(b1, "appr@"+a.svc.Domain()))
+	reqs := a.follows(t, appr, "/follows/requests", "requests")
+	if len(reqs) != 1 {
+		t.Fatalf("appr's requests: %+v", reqs)
+	}
+	path := fmt.Sprintf("/follows/requests/%d/accept", reqs[0].ID)
+	lose()
+	wantErr(t, a.do(appr, http.MethodPost, path, ""), http.StatusBadGateway, "peer_unreachable")
+	a.follow.InviteRemote = invite
+	if v := followOf(t, b.followTo(b1, "appr@"+a.svc.Domain())); v.Status != "accepted" {
+		t.Fatalf("following again: %+v", v)
+	}
+	if st := hostStatus("appr"); st != "pending" {
+		t.Fatalf("host: %s", st)
+	}
+	if v := followOf(t, a.do(appr, http.MethodPost, path, "")); v.Status != "accepted" {
+		t.Fatalf("accepting again: %+v", v)
+	}
+	if rec := a.do(appr, http.MethodPost, "/posts", `{"content":"appr post"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("post: %d %s", rec.Code, rec.Body)
+	}
+	a.svc.deliverDue(ctx)
+	if !timeline("appr post") {
+		t.Error("b1 does not read appr's post")
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM rooms WHERE feed IS NOT NULL`); n != 2 {
+		t.Errorf("b has %d replicas, want 2", n)
+	}
+}
+
+// A member.remove that arrives after our bot unfollowed and followed
+// again is stale: the host logged it before its new invite, whose seq
+// the follow keeps. The follow and the membership stay, and posts still
+// arrive.
+func TestFollowRemote_LateRemoveAfterRefollow(t *testing.T) {
+	a, b := dmPair(t)
+	ctx := context.Background()
+	a1, b1, feed := openFollow(t, a, b)
+	to := "a1@" + a.svc.Domain()
+	if rec := b.do(b1, http.MethodDelete, "/follows/"+to, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("unfollow: %d %s", rec.Code, rec.Body)
+	}
+	if v := followOf(t, b.followTo(b1, to)); v.Status != "accepted" { // a's member.remove is not delivered yet
+		t.Fatalf("following again: %+v", v)
+	}
+	a.svc.deliverDue(ctx)
+	if got := b.follows(t, b1, "/follows", "follows"); len(got) != 1 || got[0].Status != "accepted" {
+		t.Errorf("b1's follows: %+v", got)
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, feed, b1.KeyID); n != 1 {
+		t.Error("b1 is out of the replica")
+	}
+	if rec := a.do(a1, http.MethodPost, "/posts", `{"content":"still here"}`); rec.Code != http.StatusCreated {
+		t.Fatalf("post: %d %s", rec.Code, rec.Body)
+	}
+	a.svc.deliverDue(ctx)
+	if body := b.do(b1, http.MethodGet, "/timeline", "").Body.String(); !strings.Contains(body, `"content":"still here"`) {
+		t.Errorf("b1's timeline: %s", body)
+	}
+}
+
+// A late member.remove does not end a new, still pending follow either:
+// accepted later, it brings our bot back into the feed.
+func TestFollowRemote_LateRemoveKeepsPendingFollow(t *testing.T) {
+	a, b := dmPair(t)
+	ctx := context.Background()
+	a1, b1 := a.followBot(t, "a1", "approve"), b.followBot(t, "b1", "")
+	to := "a1@" + a.svc.Domain()
+	accept := func() *httptest.ResponseRecorder {
+		reqs := a.follows(t, a1, "/follows/requests", "requests")
+		if len(reqs) != 1 {
+			t.Fatalf("a1's requests: %+v", reqs)
+		}
+		return a.do(a1, http.MethodPost, fmt.Sprintf("/follows/requests/%d/accept", reqs[0].ID), "")
+	}
+	followOf(t, b.followTo(b1, to))
+	followOf(t, accept())
+	a.svc.deliverDue(ctx)
+	if rec := b.do(b1, http.MethodDelete, "/follows/"+to, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("unfollow: %d %s", rec.Code, rec.Body)
+	}
+	if v := followOf(t, b.followTo(b1, to)); v.Status != "pending" {
+		t.Fatalf("following again: %+v", v)
+	}
+	a.svc.deliverDue(ctx) // the member.remove of the unfollow
+	if v := followOf(t, accept()); v.Status != "accepted" {
+		t.Fatalf("accept: %+v", v)
+	}
+	if got := b.follows(t, b1, "/follows", "follows"); len(got) != 1 || got[0].Status != "accepted" {
+		t.Errorf("b1's follows: %+v", got)
+	}
+}
+
 // Removing a remote follower takes its stand-in out of the feed, which
 // archives the replica; the follower's server then drops its follow.
 func TestFollowRemote_RemoveFollower(t *testing.T) {
@@ -706,6 +854,15 @@ func TestFollowRemote_OldReplicaArchived(t *testing.T) {
 	}
 	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ?`, b2.KeyID); n != 0 {
 		t.Error("b2's follow, in the archived replica only, is kept")
+	}
+	// Removed from the old replica, b1 keeps the follow it holds through
+	// the newer one.
+	h.push(t, g, old, removeEv(2, "b1@"+g.svc.Domain()))
+	if n := count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, old, b1.KeyID); n != 0 {
+		t.Error("b1 is still in the old replica")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ? AND status = 'accepted'`, b1.KeyID); n != 1 {
+		t.Error("b1's follow ended with its removal from the old replica")
 	}
 }
 
