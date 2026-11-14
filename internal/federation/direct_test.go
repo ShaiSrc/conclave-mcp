@@ -606,28 +606,55 @@ func TestDirectRemote_LowerRoomWins(t *testing.T) {
 	}
 }
 
-// Both bots start at once across two servers: one conversation is left.
+// Both bots start at once across two servers: one conversation is left,
+// and the refused bot's next start uses it. So too with the longest
+// handles and the pair's name taken on both servers, where the rooms get
+// suffixed names and are found by their pair.
 func TestDirectRemote_SimultaneousStarts(t *testing.T) {
-	a, b := dmPair(t)
-	ctx := context.Background()
-	a1 := a.dmBot(t, "a1", "peers")
-	b1 := b.dmBot(t, "b1", "peers")
-	invite := a.direct.InviteRemote
-	a.direct.InviteRemote = func(ctx context.Context, roomID, name, address string, rights []string) (int, error) {
-		a.direct.InviteRemote = invite
-		// b1 starts before a's invite arrives: b's room has the higher id.
-		wantErr(t, b.dm(b1, "a1@"+a.svc.Domain(), "hello a1"), http.StatusConflict, "conflict")
-		return invite(ctx, roomID, name, address, rights)
-	}
-	room := dmRoom(t, a.dm(a1, "b1@"+b.svc.Domain(), "hello b1"))
-	a.svc.deliverDue(ctx)
-	if again := dmRoom(t, b.dm(b1, "a1@"+a.svc.Domain(), "hello a1")); again != room {
-		t.Errorf("b1's next start went to %s, want %s", again, room)
-	}
-	for _, g := range []*roomRig{a, b} {
-		if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND archived_at IS NULL`); n != 1 {
-			t.Errorf("%s has %d active conversations, want 1", g.svc.Domain(), n)
-		}
+	for _, tc := range []struct {
+		name, ha, hb string
+		squat        bool
+	}{
+		{"plain", "a1", "b1", false},
+		{"long taken name", strings.Repeat("a", 32), strings.Repeat("b", 32), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, b := dmPair(t)
+			ctx := context.Background()
+			a1 := a.dmBot(t, tc.ha, "peers")
+			b1 := b.dmBot(t, tc.hb, "peers")
+			toA, toB := tc.ha+"@"+a.svc.Domain(), tc.hb+"@"+b.svc.Domain()
+			if tc.squat {
+				for _, g := range []*roomRig{a, b} {
+					if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at) VALUES (?, ?, ?, '2026-01-01T00:00:00Z')`,
+						ulid.Make().String(), dmName(toA, toB), g.admin.KeyID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			invite := a.direct.InviteRemote
+			a.direct.InviteRemote = func(ctx context.Context, roomID, name, address string, rights []string) (int, error) {
+				a.direct.InviteRemote = invite
+				// b1 starts before a's invite arrives: b's room has the higher id.
+				wantErr(t, b.dm(b1, toA, "hello a1"), http.StatusConflict, "conflict")
+				return invite(ctx, roomID, name, address, rights)
+			}
+			room := dmRoom(t, a.dm(a1, toB, "hello b1"))
+			a.svc.deliverDue(ctx)
+			if again := dmRoom(t, b.dm(b1, toA, "hello a1")); again != room {
+				t.Errorf("b1's next start went to %s, want %s", again, room)
+			}
+			for _, g := range []*roomRig{a, b} {
+				if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND archived_at IS NULL`); n != 1 {
+					t.Errorf("%s has %d active conversations, want 1", g.svc.Domain(), n)
+				}
+			}
+			if tc.squat {
+				if n := count(t, b.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND name != pair`, room); n != 1 {
+					t.Errorf("b's replica should have a name other than its pair")
+				}
+			}
+		})
 	}
 }
 
