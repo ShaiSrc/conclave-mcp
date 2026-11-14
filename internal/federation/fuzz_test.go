@@ -429,6 +429,12 @@ func FuzzApplyEvents(f *testing.F) {
 			}
 			return
 		}
+		if !json.Valid(body) { // a payload nested right under the limit is over it in the envelope
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("a push the decoder cannot read: %d, want 400", rec.Code)
+			}
+			return
+		}
 		var out struct{ Applied int64 }
 		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Applied != applied+2 {
 			t.Fatalf("%s: %d %s, want 200 applied %d", body, rec.Code, rec.Body, applied+2)
