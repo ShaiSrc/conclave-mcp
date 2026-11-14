@@ -212,7 +212,7 @@ start, last activity, host, state); each opens as a room.
 | Action | When |
 |---|---|
 | `direct.start` | A conversation was made. On the server of the sender: detail `{"from", "to"}`. On the recipient's server, for an accepted invite: detail `{"host", "to"}`. |
-| `direct.refused` | A start was refused. Detail `{"to", "reason"}`, reason `not a bot`, `policy`, `limit` or `blocked`; result `error:<code>`. |
+| `direct.refused` | A start was refused. Detail `{"to", "reason"}`, reason `not a bot`, `policy`, `limit`, `blocked` or `refused`; result `error:<code>`. A peer's 403 is `policy` for its `dm_refused`, `blocked` for its `bot_blocked` (it blocked the caller) and `refused` for any other code. |
 | `bot.profile.update` | Also records a changed `dm_policy`. |
 
 ## Not included

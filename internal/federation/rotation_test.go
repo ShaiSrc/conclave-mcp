@@ -8,11 +8,15 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/oklog/ulid/v2"
+
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 )
 
 // rotatedPeer is a peer on 127.0.0.1 that rotated its key from old to
@@ -474,5 +478,151 @@ func TestReplicaEvents_AuthorRepinRefused(t *testing.T) {
 	}
 	if n := hits.Load(); n != 1 {
 		t.Errorf("document fetched %d times", n)
+	}
+}
+
+// Anyone can send a request in a peer's name with a key its document
+// does not list. That fetch of the document is kept for a minute and
+// every key presented meanwhile is judged against it, so the peer's own
+// request with its rotated key still goes through, without a second
+// fetch.
+func TestVerify_RepinAfterJunkKey(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	old, cur, hits := rotatedPeer(t, nil)
+	allow(t, svc, old)
+	junk := testIdentity(t, old.Domain)
+	wantErr(t, serve(svc, signed(t, junk, local, "{}")), http.StatusUnauthorized, "bad_signature")
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+	if p, err := svc.peers.Get(context.Background(), old.Domain); err != nil || p.Fingerprint != cur.Fingerprint() {
+		t.Errorf("pinned %s %v, want %s", p.Fingerprint, err, cur.Fingerprint())
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("document fetched %d times, want 1", n)
+	}
+}
+
+// Requests that arrive together right after a peer's rotation all go
+// through: they share one fetch of the document, and one that loses the
+// re-pin to another reads the pin again.
+func TestVerify_RepinConcurrent(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	// The slow document lets every request read the old pin first.
+	old, cur, hits := rotatedPeer(t, func(_, _ *Identity, _ *Document) bool { time.Sleep(300 * time.Millisecond); return true })
+	allow(t, svc, old)
+	reqs := make([]*http.Request, 8)
+	for i := range reqs {
+		reqs[i] = signed(t, cur, local, "{}")
+	}
+	codes, bodies := make([]int, len(reqs)), make([]string, len(reqs))
+	var wg sync.WaitGroup
+	for i, req := range reqs {
+		wg.Add(1)
+		go func() { defer wg.Done(); rec := serve(svc, req); codes[i], bodies[i] = rec.Code, rec.Body.String() }()
+	}
+	wg.Wait()
+	for i, c := range codes {
+		if c != http.StatusOK {
+			t.Errorf("request %d: %d %s", i, c, bodies[i])
+		}
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("document fetched %d times, want 1", n)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_rotated'`); n != 1 {
+		t.Errorf("key_rotated rows %d, want 1", n)
+	}
+}
+
+// A failed fetch of the document is kept for the minute too: later
+// requests, with any key, fetch nothing and are refused, and the failure
+// is audited once.
+func TestVerify_RepinFetchFailureGated(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	old, cur, hits := rotatedPeer(t, func(_, _ *Identity, _ *Document) bool { return false })
+	allow(t, svc, old)
+	for _, id := range []*Identity{cur, cur, testIdentity(t, old.Domain)} {
+		wantErr(t, serve(svc, signed(t, id, local, "{}")), http.StatusUnauthorized, "bad_signature")
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("document fetched %d times, want 1", n)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_changed' AND detail LIKE '%unreachable%'`); n != 1 {
+		t.Errorf("key_changed rows %d, want 1", n)
+	}
+}
+
+// A host that relays messages in the name of many third servers' bots,
+// signed with keys none of them has, causes at most 5 fetches of their
+// documents a minute; every event is still applied (refused).
+func TestReplicaEvents_RepinFetchesPerHost(t *testing.T) {
+	g, h, room, _ := replica(t, "read")
+	var evs []fedrooms.Event
+	var hits []*atomic.Int32
+	for i := range 8 {
+		old, _, n := rotatedPeer(t, nil)
+		allow(t, g.svc, old)
+		hits = append(hits, n)
+		evs = append(evs, msg(int64(i+1), int64(100+i), room, h.id.Domain, "c1@"+old.Domain, "x", nil, "", testIdentity(t, old.Domain)))
+	}
+	if got := h.push(t, g, room, evs...); got != 8 {
+		t.Fatalf("applied %d, want 8", got)
+	}
+	total := 0
+	for _, n := range hits {
+		total += int(n.Load())
+	}
+	if total != repinsPerMinute {
+		t.Errorf("%d document fetches, want %d", total, repinsPerMinute)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, room); n != 0 {
+		t.Errorf("%d messages stored", n)
+	}
+}
+
+// A slow fetch of a third server's document, for an author signature,
+// holds up no other replica: it runs outside the lock that applies
+// replica events. The message waits for it and is then applied.
+func TestReplicaEvents_SlowRepinFetch(t *testing.T) {
+	g, h, room, _ := replica(t, "read")
+	other := newFakeHost(t, g)
+	room2 := ulid.Make().String()
+	if rec := other.invite(t, g, room2, "other", "b1", "read"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	asked, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	old, cur, _ := rotatedPeer(t, func(_, _ *Identity, _ *Document) bool {
+		once.Do(func() { close(asked) })
+		<-release
+		return true
+	})
+	allow(t, g.svc, old)
+	slow := signedReq(t, h.id, g.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+room+"/events",
+		map[string]any{"events": []fedrooms.Event{msg(1, 100, room, h.id.Domain, "c1@"+old.Domain, "slow", nil, "", cur)}})
+	fast := signedReq(t, other.id, g.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+room2+"/events",
+		map[string]any{"events": []fedrooms.Event{msg(1, 1, room2, other.id.Domain, other.addr("o1"), "fast", nil, "", nil)}})
+	slowDone, fastDone := make(chan int), make(chan int)
+	go func() { slowDone <- g.fedDo(slow).Code }()
+	select {
+	case <-asked:
+	case code := <-slowDone:
+		t.Fatalf("the slow push ended without a fetch: %d", code)
+	}
+	go func() { fastDone <- g.fedDo(fast).Code }()
+	select {
+	case code := <-fastDone:
+		if code != http.StatusOK || appliedSeq(t, g, room2) != 1 {
+			t.Errorf("the other replica: %d, applied %d", code, appliedSeq(t, g, room2))
+		}
+	case <-time.After(3 * time.Second):
+		t.Error("the other replica waited for the fetch")
+		defer func() { <-fastDone }()
+	}
+	close(release)
+	if code := <-slowDone; code != http.StatusOK {
+		t.Errorf("the slow push: %d", code)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'slow' AND unverified = 0`, room); n != 1 {
+		t.Errorf("%d copies of the slow message", n)
 	}
 }

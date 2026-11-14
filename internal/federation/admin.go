@@ -46,6 +46,7 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Post("/peers/{domain}/ping", s.handlePingPeer)
 		r.Post("/peers/{domain}/retry", s.handleRetryPeer)
 		r.Post("/peers/{domain}/purge", s.handlePurgePeer)
+		r.Delete("/peers/{domain}/keys/history", s.handleForgetKeys)
 		r.Get("/blocked-bots", s.handleListBlocked)
 		r.Post("/blocked-bots", s.handleBlockBot)
 		r.Delete("/blocked-bots/{address}", s.handleUnblockBot)
@@ -512,6 +513,29 @@ func (s *Service) handlePurgePeer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, n)
 }
 
+// handleForgetKeys drops domain's key history, the keys it was pinned
+// to before: author signatures made with them no longer verify here.
+// It is the remedy when a retired key may have leaked. It answers how
+// many keys were dropped; audit federation.peer.keys_forget.
+func (s *Service) handleForgetKeys(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
+	if !ok {
+		return
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM federation_peer_keys WHERE domain = ?`, domain)
+	var n int64
+	if err == nil {
+		n, err = res.RowsAffected()
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	s.audit(ctx, "federation.peer.keys_forget", domain, "ok", fmt.Sprintf(`{"dropped":%d}`, n))
+	writeJSON(w, http.StatusOK, map[string]any{"domain": domain, "dropped": n})
+}
+
 func (s *Service) handlePingPeer(w http.ResponseWriter, r *http.Request) {
 	domain, ok := s.peerDomain(w, r, pathParam(r, "domain"))
 	if !ok {
@@ -558,11 +582,11 @@ func (s *Service) blockedBots(ctx context.Context, address string) ([]blockedBot
 }
 
 // botAddress returns the canonical form of raw, the address of a bot of
-// another server (name@domain, name a bot's handle), or answers 400
-// itself.
+// another server (name@domain, name a bot's handle, operator or
+// key-<id>), or answers 400 itself.
 func (s *Service) botAddress(w http.ResponseWriter, r *http.Request, raw string) (string, bool) {
 	name, domain, _ := strings.Cut(raw, "@")
-	h, herr := bots.NormalizeHandle(name)
+	h, herr := bots.NormalizeRemoteName(name)
 	d, derr := NormalizeDomain(domain)
 	switch {
 	case herr != nil || derr != nil:

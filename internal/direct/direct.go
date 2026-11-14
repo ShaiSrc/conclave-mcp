@@ -25,6 +25,7 @@ package direct
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -292,7 +293,7 @@ func (s *Service) startRemote(w http.ResponseWriter, r *http.Request, caller int
 	if pending {
 		readLimit, accepted, err := s.invite(ctx, roomID, roomName, toAddr)
 		var fe *fedrooms.Error
-		reason := map[int]string{http.StatusForbidden: "policy", http.StatusNotFound: "not a bot", http.StatusTooManyRequests: "limit"}
+		reason := map[int]string{http.StatusForbidden: "refused", http.StatusNotFound: "not a bot", http.StatusTooManyRequests: "limit"}
 		switch {
 		case err == nil:
 			undo = func() { s.abandon(ctx, roomID, toAddr, readLimit) }
@@ -309,8 +310,12 @@ func (s *Service) startRemote(w http.ResponseWriter, r *http.Request, caller int
 			writeErr(w, r, fe.Status, fe.Code, fe.Message)
 			return
 		case errors.As(err, &fe) && reason[fe.Status] != "":
+			why := reason[fe.Status]
+			if fe.Status == http.StatusForbidden { // by the peer's code
+				why = cmp.Or(map[string]string{"dm_refused": "policy", "bot_blocked": "blocked"}[fe.Code], why)
+			}
 			s.drop(ctx, roomID)
-			s.refuse(w, r, caller, toAddr, reason[fe.Status], fe.Status, fe.Code, fe.Message)
+			s.refuse(w, r, caller, toAddr, why, fe.Status, fe.Code, fe.Message)
 			return
 		case errors.As(err, &fe):
 			s.drop(ctx, roomID)

@@ -91,7 +91,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	if action != "" {
 		// `action` is treated as a prefix, so we escape the
 		// SQL wildcard in the input.
-		q2 += " AND action LIKE ?"
+		q2 += ` AND action LIKE ? ESCAPE '\'`
 		args = append(args, escapeLikePrefix(action)+"%")
 	}
 	if roomID != "" {

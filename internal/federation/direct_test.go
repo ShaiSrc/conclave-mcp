@@ -796,3 +796,18 @@ func TestDirectRemote_PeerAnswers(t *testing.T) {
 		t.Errorf("a keeps %d active rooms", n)
 	}
 }
+
+// A peer's 403 to a direct invite is audited by its code: policy for
+// dm_refused, blocked for bot_blocked, refused for any other.
+func TestDirectRemote_RefusalReasons(t *testing.T) {
+	a := newLiveRig(t)
+	h := newFakeHost(t, a)
+	a1 := a.dmBot(t, "a1", "")
+	for _, c := range []struct{ code, reason string }{{"dm_refused", "policy"}, {"bot_blocked", "blocked"}, {"peer_not_allowed", "refused"}} {
+		h.setAnswer(answerWith(http.StatusForbidden, `{"error":{"code":"`+c.code+`","message":"m"}}`))
+		wantErr(t, a.dm(a1, h.addr("x"), "hi"), http.StatusForbidden, c.code)
+		if n := audited(t, a, "direct.refused", c.reason); n != 1 {
+			t.Errorf("%s: %d refusals audited as %s, want 1", c.code, n, c.reason)
+		}
+	}
+}

@@ -11,7 +11,9 @@
 -- last_out_at is the last successful outbound request to the peer.
 -- api_keys.remote_via is the host that introduced a stand-in, NULL for
 -- one made by an invite or follow of ours. Timestamps use the
--- fixed-width storage.FormatTS form.
+-- fixed-width storage.FormatTS form. A membership that ends takes its
+-- claims in that room along (trg_room_members_claims), whichever path
+-- ends it: a removal, a leave, a bot or peer block.
 
 ALTER TABLE federation_keys ADD COLUMN endorsement TEXT;
 ALTER TABLE federation_peers ADD COLUMN last_out_at TEXT;
@@ -41,3 +43,8 @@ CREATE TABLE blocked_bots (
     created_at    TEXT NOT NULL,
     created_by    INTEGER
 );
+
+CREATE TRIGGER trg_room_members_claims AFTER DELETE ON room_members
+BEGIN
+    DELETE FROM claims WHERE room_id = OLD.room_id AND key_id = OLD.key_id;
+END;

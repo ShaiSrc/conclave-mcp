@@ -226,3 +226,18 @@ func TestPeersPurge(t *testing.T) {
 		t.Errorf("409: err=%v", err)
 	}
 }
+
+func TestPeersForgetKeys(t *testing.T) {
+	out, req, err := runCmd(t, 200, `{"domain":"b.example","dropped":2}`, "peers", "forget-keys", "b.example")
+	if err != nil || !strings.HasPrefix(req, "DELETE /v1/federation/peers/b.example/keys/history ") ||
+		out != "peer b.example: 2 retired keys forgotten\n" {
+		t.Errorf("err=%v req=%q out=%q", err, req, out)
+	}
+	_, _, err = runCmd(t, 400, `{"error":{"code":"own_domain","message":"m"}}`, "peers", "forget-keys", "a.example")
+	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "own_domain") {
+		t.Errorf("400: err=%v", err)
+	}
+	if _, req, err := runCmd(t, 200, `{}`, "peers", "forget-keys"); err == nil || req != "" {
+		t.Errorf("no domain: err=%v req=%q", err, req)
+	}
+}

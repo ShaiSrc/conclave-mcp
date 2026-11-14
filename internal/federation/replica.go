@@ -518,10 +518,27 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 
 // applyBatch applies evs to replica roomID of host in seq order. Events
 // it has are skipped; at a gap it stops and reports it. A refused event
-// counts as applied and goes to rf. It returns the last seq applied.
+// counts as applied and goes to rf. It returns the last seq applied. An
+// author signature that may verify with a third server's rotated key
+// needs that server's document (needDocError): it is fetched outside
+// applyMu, so a slow server holds up no other replica, and the batch
+// goes on from that event.
+func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fedrooms.Event, rf *refusals) (applied int64, gap bool, err error) {
+	for {
+		applied, gap, err = s.applyLocked(ctx, roomID, host, evs, rf)
+		var need *needDocError
+		if !errors.As(err, &need) {
+			return applied, gap, err
+		}
+		_, _, _ = s.docs.get(ctx, need.domain, s.fetch.Document) // repinAuthor judges it, or its failure
+	}
+}
+
+// applyLocked is applyBatch under applyMu, up to an event that returns
+// needDocError, which it returns.
 // ponytail: one lock for all replicas; one per room if applying ever
 // gets slow.
-func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fedrooms.Event, rf *refusals) (applied int64, gap bool, err error) {
+func (s *Service) applyLocked(ctx context.Context, roomID, host string, evs []fedrooms.Event, rf *refusals) (applied int64, gap bool, err error) {
 	s.applyMu.Lock()
 	defer s.applyMu.Unlock()
 	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ? AND home_domain = ?`, roomID, host).
@@ -760,10 +777,9 @@ func applyDelete(ctx context.Context, tx *sql.Tx, roomID string, payload json.Ra
 // whether it is a key of this server. An address of this server is our
 // own key: handle@, operator@ (the operator key) or key-<id>@. Any other
 // is its stand-in, created when via, the replica's host, is set, and
-// recorded as introduced by it; a bot the operator blocked, or whose
-// stand-in is revoked (a block or a purge of its server), is refused
-// then, so it is never added again and its messages are not taken. It
-// returns 0 for an address without a key.
+// recorded as introduced by it; an address refusedBot refuses is
+// refused then, so it is never added again and its messages are not
+// taken. It returns 0 for an address without a key.
 func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address, via string) (id int64, local bool, err error) {
 	name, domain, ok := strings.Cut(address, "@")
 	if !ok {
@@ -771,17 +787,8 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address, via string
 	}
 	if domain != s.id().Domain {
 		if via != "" {
-			var revoked bool
-			blocked, err := fedrooms.Blocked(ctx, tx, address)
-			if err == nil {
-				err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE label = ? AND remote_domain = ?
-					AND revoked_at IS NOT NULL)`, address, domain).Scan(&revoked)
-			}
-			switch {
-			case err != nil:
+			if err := refusedBot(ctx, tx, address); err != nil {
 				return 0, false, err
-			case blocked || revoked:
-				return 0, false, refused("%s is blocked", address)
 			}
 			if id, err = fedrooms.StandInVia(ctx, tx, address, via); errors.Is(err, fedrooms.ErrAddress) {
 				err = refused("%v", err)
@@ -805,6 +812,23 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address, via string
 		return 0, local, nil
 	}
 	return id, local, err
+}
+
+// refusedBot refuses address, a bot of another server, when the operator
+// blocked it, its stand-in is revoked (a block or a purge of its server)
+// or its server is a blocked peer: no host brings it into a replica or
+// brings its messages, at an address new here or not.
+func refusedBot(ctx context.Context, db fedrooms.DB, address string) error {
+	_, domain, _ := strings.Cut(address, "@")
+	blocked, err := fedrooms.Blocked(ctx, db, address)
+	if err == nil && !blocked {
+		err = db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE label = ?1 AND remote_domain = ?2 AND revoked_at IS NOT NULL)
+			OR EXISTS (SELECT 1 FROM federation_peers WHERE domain = ?2 AND status = 'blocked')`, address, domain).Scan(&blocked)
+	}
+	if err == nil && blocked {
+		err = refused("%s is blocked", address)
+	}
+	return err
 }
 
 // applyMessage stores a message of the replica. Its author signature is
@@ -872,17 +896,20 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 }
 
 // checkAuthor checks the author signature of p, a message of replica
-// roomID hosted by host. A message of one of the host's keys needs none:
-// the host's request signature covers it. Any other author's server
-// signed it: we check our own with any of our keys and a third server's
-// with its stored keys (peerSigned), if it is an allowed or seen peer;
-// when none verifies, that server may have rotated its key, which it
-// then shows us no request to re-pin from, so its document is asked
-// (repinAuthor).
+// roomID hosted by host. An author refusedBot refuses (a blocked bot,
+// or of a blocked peer) is refused first. A message of one of the host's
+// keys needs no signature: the host's request signature covers it. Any
+// other author's server signed it: we check our own with any of our keys
+// and a third server's with its stored keys (peerSigned), if it is an
+// allowed or seen peer; when none verifies, that server may have rotated
+// its key, which it then shows us no request to re-pin from, so its
+// document is asked (repinAuthor, which may return needDocError).
 // It reports whether the signature could not be checked (no key known
-// for the author's server, or that server blocked); a wrong one is
-// errRefused.
+// for the author's server); a wrong one is errRefused.
 func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedrooms.MessagePayload) (unverified bool, err error) {
+	if err := refusedBot(ctx, s.db, p.Author); err != nil {
+		return false, err
+	}
 	_, domain, _ := strings.Cut(p.Author, "@")
 	if domain == host {
 		return false, nil
@@ -906,7 +933,7 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 			return false, err
 		}
 		if !ok {
-			pub, err := s.repinAuthor(ctx, peer)
+			pub, err := s.repinAuthor(ctx, host, peer)
 			if err != nil {
 				return false, err
 			}
@@ -1142,9 +1169,9 @@ func (s *Service) purgePeer(ctx context.Context, domain string) (purgeCounts, er
 			err = fedrooms.LogDelete(ctx, tx, m.room, m.id)
 		}
 	}
+	exec(&n.Claims, `DELETE FROM claims WHERE key_id IN `+standIns, domain) // before memberships, which take theirs along
 	exec(&n.Members, `DELETE FROM room_members WHERE key_id IN `+standIns+`
 		AND room_id IN (SELECT id FROM rooms WHERE home_domain IS NOT NULL)`, domain)
-	exec(&n.Claims, `DELETE FROM claims WHERE key_id IN `+standIns, domain)
 	exec(&n.Follows, `DELETE FROM follows WHERE follower_key_id IN `+standIns+`
 		OR target_key_id IS NULL AND substr(target, instr(target, '@') + 1) = ?1`, domain)
 	exec(&n.Cursors, `DELETE FROM fed_delivery WHERE peer = ?1`, domain)

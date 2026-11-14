@@ -2,6 +2,7 @@ package federation
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -83,6 +84,12 @@ func TestPurgePeer_NothingRemains(t *testing.T) {
 		if _, err := g.db.Exec(q, rep, b1); err != nil {
 			t.Fatal(err)
 		}
+	}
+	// c2 holds a claim in the replica, which the block leaves; c1's in the
+	// room hosted here ends with its membership at the block.
+	if _, err := g.db.Exec(`INSERT INTO claims(room_id, key_id, path, created_at, expires_at)
+		SELECT ?, id, 'z/', '2026-11-14T00:00:00Z', 4102444800 FROM api_keys WHERE label = ?`, rep, m.addr("c2")); err != nil {
+		t.Fatal(err)
 	}
 	// A third host e has d's bot c3 in its room, which b1 replicates.
 	e := newFakeHost(t, g)
@@ -300,5 +307,69 @@ func TestStandInCap_PerHost(t *testing.T) {
 	}
 	if n := count(t, g.db, `SELECT COUNT(*) FROM api_keys WHERE label = ? AND remote_via = ?`, h.addr("x"), host); n != 1 {
 		t.Error("the direct invite's bot does not record its host")
+	}
+}
+
+// A third host brings no bot of a blocked peer in, not even one at an
+// address it never named before: its member and message events are
+// refused, both after the block and after the purge.
+func TestBlockedPeer_ThirdHostNewAddress(t *testing.T) {
+	g, e, room, _ := replica(t, "read")
+	p := testIdentity(t, "p.example")
+	allow(t, g.svc, p)
+	g.blockPeer(t, p.Domain)
+	for i, step := range []string{"blocked", "purged"} {
+		if step == "purged" {
+			wantStatus(t, g.purge(p.Domain), http.StatusOK)
+		}
+		addr, seq := fmt.Sprintf("new%d@%s", i, p.Domain), int64(2*i)
+		if got := e.push(t, g, room, memberEv(seq+1, addr, "read"), msg(seq+2, seq+2, room, e.id.Domain, addr, "spam", nil, "", p)); got != seq+2 {
+			t.Fatalf("%s: applied %d, want %d", step, got, seq+2)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM api_keys WHERE label = ?`, addr); n != 0 {
+			t.Errorf("%s: a stand-in for %s", step, addr)
+		}
+		if got := members(t, g, room); got != "b1" {
+			t.Errorf("%s: members %s", step, got)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, room); n != 0 {
+			t.Errorf("%s: %d messages stored", step, n)
+		}
+	}
+}
+
+// A peer allowed again after a purge, whether it stayed blocked or was
+// removed in between, takes part again: its stand-ins are no longer
+// revoked, except those of bots the operator blocked.
+func TestAllowAfterPurge(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		g, m, room, c1 := fedRoom(t, "read")
+		c2 := g.invite(t, room, m.addr("c2"), "read")
+		g.block(t, m.addr("c2"))
+		g.blockPeer(t, m.id.Domain)
+		wantStatus(t, g.purge(m.id.Domain), http.StatusOK)
+		if removed {
+			wantStatus(t, adminDo(g.svc, admin, http.MethodDelete, "/v1/federation/peers/"+m.id.Domain, ""), http.StatusNoContent)
+		}
+		allow(t, g.svc, m.id)
+		if n := count(t, g.db, `SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NULL`, c1); n != 1 {
+			t.Errorf("removed %v: c1's stand-in is still revoked", removed)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM api_keys WHERE id = ? AND revoked_at IS NOT NULL`, c2); n != 1 {
+			t.Errorf("removed %v: the blocked c2's stand-in is no longer revoked", removed)
+		}
+		// A third host's room takes c1 again, not c2.
+		e := newFakeHost(t, g)
+		g.bot(t, "b1")
+		rep := ulid.Make().String()
+		if rec := e.invite(t, g, rep, "elsewhere", "b1", "read"); rec.Code != http.StatusCreated {
+			t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+		}
+		if got := e.push(t, g, rep, memberEv(1, m.addr("c1"), "read"), memberEv(2, m.addr("c2"), "read")); got != 2 {
+			t.Fatalf("applied %d", got)
+		}
+		if got := members(t, g, rep); got != "b1 "+m.addr("c1") {
+			t.Errorf("removed %v: members %s", removed, got)
+		}
 	}
 }

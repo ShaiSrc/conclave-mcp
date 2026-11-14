@@ -64,7 +64,8 @@ type Service struct {
 	limiters    map[string]*peerLimiters // per verified peer (limitersOf)
 	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
 
-	warnLog, keyChecks minuteGate
+	warnLog, keyAudits minuteGate
+	docs               docCache // peers' documents, for re-pinning
 }
 
 // New returns the federation service for opts.Domain, loading the

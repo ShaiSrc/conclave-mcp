@@ -51,7 +51,7 @@ func TestBlockedBots_API(t *testing.T) {
 	post := func(address string) *httptest.ResponseRecorder {
 		return do(http.MethodPost, blockedPath, fmt.Sprintf(`{"address":%q,"note":"spam"}`, address))
 	}
-	for _, bad := range []string{"", "c1", "c1@", "@a.example", "operator@a.example", "key-3@a.example", "c 1@a.example",
+	for _, bad := range []string{"", "c1", "c1@", "@a.example", "admin@a.example", "directory@a.example", "c 1@a.example",
 		"c1@a_b.example", "c1@a.example:443", "c1@x@a.example"} {
 		wantErr(t, post(bad), http.StatusBadRequest, "invalid_address")
 	}
@@ -337,5 +337,74 @@ func TestBlockedBot_LocalPaths(t *testing.T) {
 	}
 	if audited(t, g, "direct.refused", "blocked") != 1 || audited(t, g, "follow.refused", "blocked") != 1 {
 		t.Error("the refusals are not audited")
+	}
+}
+
+// operator@ and key-<id>@ address keys of another server too, so they
+// can be blocked, in any case of ASCII letters; a host's events of them
+// are then refused. Other reserved names are no bot's.
+func TestBlockedBots_ReservedNames(t *testing.T) {
+	g, h, room, _ := replica(t, "read")
+	post := func(address string) *httptest.ResponseRecorder {
+		return adminDo(g.svc, admin, http.MethodPost, blockedPath, fmt.Sprintf(`{"address":%q}`, address))
+	}
+	for raw, want := range map[string]string{"Operator@" + h.id.Domain: h.addr("operator"), "KEY-3@" + h.id.Domain: h.addr("key-3")} {
+		var out blockedBot
+		if rec := post(raw); rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Address != want {
+			t.Errorf("block %s: %d %s, want %s", raw, rec.Code, rec.Body, want)
+		}
+	}
+	wantErr(t, post("admin@a.example"), http.StatusBadRequest, "invalid_address")
+	wantErr(t, post("key-3@"+g.svc.Domain()), http.StatusBadRequest, "own_domain")
+	if got := h.push(t, g, room, memberEv(1, h.addr("operator"), "read"), memberEv(2, h.addr("key-3"), "read")); got != 2 {
+		t.Fatalf("applied %d, want 2", got)
+	}
+	if got := members(t, g, room); got != "b1" {
+		t.Errorf("members: %s", got)
+	}
+	wantStatus(t, adminDo(g.svc, admin, http.MethodDelete, blockedPath+"/operator@"+h.id.Domain, ""), http.StatusNoContent)
+	if n := count(t, g.db, `SELECT COUNT(*) FROM blocked_bots`); n != 1 {
+		t.Errorf("%d blocked bots after the unblock, want 1", n)
+	}
+}
+
+// Claims do not outlive a membership: a bot block, a peer block and a
+// member removal delete the claims the member held in the room hosted
+// here; another member's stay.
+func TestClaims_EndWithMembership(t *testing.T) {
+	for _, end := range []string{"bot block", "peer block", "member removal"} {
+		g, m, room, c1 := fedRoom(t, "read,answer,claim")
+		if rec := g.fedDo(m.req(t, http.MethodPost, "/fed/v1/rooms/"+room+"/claims?author="+m.addr("c1"),
+			map[string]any{"paths": []string{"x/"}})); rec.Code/100 != 2 {
+			t.Fatalf("%s: claim: %d %s", end, rec.Code, rec.Body)
+		}
+		l1 := g.localBot(t, room, "l1", "read,claim")
+		if rec := g.do(l1, http.MethodPost, "/rooms/"+room+"/claims", `{"paths":["y/"]}`); rec.Code/100 != 2 {
+			t.Fatalf("%s: local claim: %d %s", end, rec.Code, rec.Body)
+		}
+		switch end {
+		case "bot block":
+			g.block(t, m.addr("c1"))
+		case "peer block":
+			g.blockPeer(t, m.id.Domain)
+		case "member removal":
+			wantStatus(t, g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, c1), ""), http.StatusNoContent)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM claims WHERE key_id = ?`, c1); n != 0 {
+			t.Errorf("%s: c1 keeps %d claims", end, n)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM claims WHERE key_id = ?`, l1.KeyID); n != 1 {
+			t.Errorf("%s: l1 has %d claims, want 1", end, n)
+		}
+	}
+	// A local member's removal ends its claims too.
+	g, _, room, _ := fedRoom(t, "read")
+	l1 := g.localBot(t, room, "l1", "read,claim")
+	if rec := g.do(l1, http.MethodPost, "/rooms/"+room+"/claims", `{"paths":["y/"]}`); rec.Code/100 != 2 {
+		t.Fatalf("local claim: %d %s", rec.Code, rec.Body)
+	}
+	wantStatus(t, g.do(g.admin, http.MethodDelete, fmt.Sprintf("/rooms/%s/members/%d", room, l1.KeyID), ""), http.StatusNoContent)
+	if n := count(t, g.db, `SELECT COUNT(*) FROM claims WHERE key_id = ?`, l1.KeyID); n != 0 {
+		t.Errorf("l1 keeps %d claims", n)
 	}
 }

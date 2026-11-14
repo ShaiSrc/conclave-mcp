@@ -95,10 +95,11 @@ Other commands: `federation status`, `federation rotate-key`,
 `peers list [--format json]`, `peers show <domain>`, `peers retry <domain>`,
 `peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]`,
 `peers block <domain>`, `peers remove <domain>`, `peers purge <domain> [--yes]`,
+`peers forget-keys <domain>`,
 `bots block <address> [--note N]`, `bots unblock <address>`, `bots blocked`
 ([Peer health and limits](#peer-health-and-limits), [Blocking, removing
 and purging a peer](#blocking-removing-and-purging-a-peer), [Blocking a
-bot](#blocking-a-bot)). See
+bot](#blocking-a-bot), [Key rotation](#key-rotation)). See
 [cli-reference.md](cli-reference.md). The admin API is under
 `/v1/federation` ([architecture.md](architecture.md#http-api-surface)).
 
@@ -186,15 +187,34 @@ or a key in the peer's history, so messages signed before a rotation
 
 A third server may see a peer's bots only through rooms another server
 hosts, and get no request from the peer itself. When a peer's bot's
-author signature verifies with none of its keys, the server fetches the
-peer's document, under the same limit of one fetch per peer per minute,
-and adopts its current key by the same rules as verification step 4:
-endorsed by the pinned key with a valid signature, and not in the
-peer's history. It then re-pins (`federation.key_rotated`) and checks
-the signature again with the new key. When the current key is the
-pinned one, the signature is simply wrong; any other refusal is audited
-as `federation.key_changed`. Either way the event is skipped, as for
-any wrong author signature.
+author signature verifies with none of its keys, the server needs the
+peer's document, the one kept for verification step 4 (fetched at most
+once per peer per minute), and adopts its current key by the same
+rules: endorsed by the pinned key with a valid signature, and not in
+the peer's history. It then re-pins (`federation.key_rotated`) and
+checks the signature again with the new key. When the current key is
+the pinned one, the signature is simply wrong; any other refusal is
+audited as `federation.key_changed`. Either way the event is skipped,
+as for any wrong author signature.
+
+Replica events are applied one batch at a time, so a document is never
+fetched while a batch is being applied: a slow or hostile server would
+hold up every replica. Without a document from the last minute the
+batch stops before that event, the document is fetched, and the batch
+goes on from the event, which is then judged against it. One host's
+events cause at most 5 such fetches a minute, whatever domains their
+authors name; past that, an author signature that verifies with none of
+the stored keys is skipped as wrong.
+
+The key history keeps retired keys trusted for author signatures, so
+old messages still verify. When a retired key may have leaked, the
+operator drops a peer's history: `DELETE
+/v1/federation/peers/{domain}/keys/history` (admin; CLI `federation
+peers forget-keys <domain>`) answers `{"domain", "dropped"}`, the number
+of keys dropped, and audits `federation.peer.keys_forget`. From then on
+only the pinned key verifies the peer's bots' signatures; messages
+signed with a dropped key, in a later snapshot or pull, are skipped as
+wrongly signed.
 
 ## Peer health and limits
 
@@ -283,10 +303,14 @@ percent-encoded, as the web UI sends them (`%3A` for a port's colon,
 A block keeps the peer's row with status `blocked` and its overrides;
 its requests get 403 `peer_not_allowed`. It cuts the rooms shared with
 it ([federated-rooms.md](federated-rooms.md#blocking-removing-and-purging-a-peer)),
-ends our bots' follows of its bots, and deletes its cached bots and its
-bots' pending and rejected follow requests. A removal deletes the row
-and its overrides and cuts the same. Peering again undoes either; its
-content stays here.
+its stand-ins' claims in rooms hosted here ending with their
+memberships, ends our bots' follows of its bots, and deletes its cached
+bots and its bots' pending and rejected follow requests. While it is
+blocked, no other host brings its bots in: replica events that add any
+of its addresses, one never seen here included, or carry a message of
+one are skipped as refused events (`federation.room.event_refused`). A
+removal deletes the row and its overrides and cuts the same. Peering
+again undoes either; its content stays here.
 
 A purge is for a peer the operator gave up on, and cannot be undone. It
 takes a blocked peer only, which stays blocked: suspending a peer is a
@@ -296,9 +320,10 @@ block and a purge. In one transaction it:
   delete does, with a `message.delete` event for each, so the other
   member servers retract them; in replicas of other hosts here only,
   since their host decides there;
-- ends its stand-ins' memberships of replicas, and deletes their claims,
-  the follows from and to its bots, its delivery cursors, its key
-  history and its limits;
+- deletes its stand-ins' claims (those in rooms hosted here ended with
+  the block), ends their memberships of replicas, and deletes the
+  follows from and to its bots, its delivery cursors, its key history
+  and its limits;
 - deletes this server's replicas of its rooms, with their messages,
   members, claims and reads;
 - revokes its stand-ins: its bots', and `operator@<domain>`, which owns
@@ -306,12 +331,15 @@ block and a purge. In one transaction it:
 
 Then its stand-ins leave the rooms hosted here, each with a
 `member.remove` event (the block did that already; a purge ends what is
-left), and its limiters are dropped. A revoked stand-in never comes
-back: a host's events that add one of its bots or carry a message of
-one are skipped as refused events, unblocking one of its bots
-([Blocking a bot](#blocking-a-bot)) keeps the stand-in revoked while the
-peer is blocked, and its stand-ins stay revoked if the peer is peered
-again.
+left), and its limiters are dropped. While the peer is blocked, no
+stand-in of it comes back: a host's events that add one of its bots, at
+any address, or carry a message of one are skipped as refused events,
+and unblocking one of its bots ([Blocking a bot](#blocking-a-bot)) keeps
+the stand-in revoked. When the operator peers it again (`peers add`,
+blocked or removed in between), its stand-ins are no longer revoked,
+except those of bots the operator blocked: its bots can be invited and
+taken from other hosts' rooms again, though nothing the purge deleted
+comes back.
 
 What remains of the peer: its blocked row, its revoked stand-ins, its
 bots' soft-deleted messages (kept for audit, as every deleted message
@@ -351,14 +379,19 @@ server:
 | `DELETE /v1/federation/blocked-bots/{address}` | `federation bots unblock <address>` | 204; 404 `not_found` when the bot is not blocked. |
 
 The address is `name@domain`, the name a bot's handle and the domain a
-federation domain; both are normalized (lowercased). Anything else is
-400 `invalid_address`, a bot of this server 400 `own_domain`.
+federation domain; both are normalized (lowercased). The name may also
+be `operator` or `key-<digits>`: these address the other server's
+operator key and its keys without a handle, which reach us like bots
+(handles reserve them, so no bot has them). Anything else, another
+reserved name included, is 400 `invalid_address`, a bot of this server
+400 `own_domain`.
 
 A block stores the row and cuts the bot off:
 
 - its stand-in is revoked;
 - the stand-in leaves every room hosted here, each with a
-  `member.remove` event, which reaches the other member servers;
+  `member.remove` event, which reaches the other member servers, and
+  its claims there end;
 - it leaves the replicas held here;
 - its follows of our bots end, pending and accepted;
 - our bots' follows of it end, pending and accepted: our bots leave the
@@ -425,10 +458,16 @@ The server checks in this order and stops at the first failure.
    Unknown in open mode: fetch the origin's document (see the limits) and use its key.
 4. A known peer's key is the public key pinned when it was added or
    first seen; nothing is fetched while the header's key ID is that
-   key's. For another key ID the server fetches the peer's document, at
-   most once per peer per minute (anyone can send such a request), and
-   re-pins when all of these hold:
-   - the document lists the presented key;
+   key's. For another key ID the server needs the peer's document.
+   Anyone can send such a request, so the document is fetched at most
+   once per peer per minute and kept in memory for that minute (a failed
+   fetch too, for at most 1000 peers); every key presented meanwhile is
+   judged against the kept document, and requests that arrive while it
+   is fetched wait for that one fetch. A request with a made-up key thus
+   costs the peer nothing: its own request with its new key, a moment
+   later, is judged against the same document. The server re-pins when
+   all of these hold:
+   - the presented key is the document's current key (its first);
    - that key's `endorsed_by.key_id` is the pinned key's ID, and
      `endorsed_by.sig` verifies with the pinned key
      ([Key rotation](#key-rotation));
@@ -438,12 +477,16 @@ The server checks in this order and stops at the first failure.
    Re-pinning moves the pinned key into the peer's history, pins the
    presented one (the peer keeps its status) and audits
    `federation.key_rotated`; verification then goes on with the new key.
-   Anything else is 401 `bad_signature` and a warn log line, and the
-   server audits `federation.key_changed` when the document could not be
-   fetched or lists the presented key. A document that does not list it
-   is no evidence of a change: not audited. The operator re-pins by hand
-   with `peers add <domain> --fingerprint ...`, which also keeps the
-   replaced key in the history.
+   A request that finds the peer re-pinned meanwhile by a concurrent
+   request reads the pin again: if it is now the presented key, it goes
+   on with it. Anything else is 401 `bad_signature` and a warn log line,
+   and the server audits `federation.key_changed` when the document
+   could not be fetched (once, by the request that fetched it) or names
+   the presented key as current without a valid endorsement (once per
+   key a minute). A document whose current key is another, the peer's
+   previous one included, is no evidence of a change: not audited. The
+   operator re-pins by hand with `peers add <domain> --fingerprint ...`,
+   which also keeps the replaced key in the history.
 5. The destination, taken from the request's `Host` header, must be this
    server's domain. Otherwise 421 `wrong_destination`.
 6. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
@@ -575,6 +618,7 @@ requests from the peer an hour, or the peer's limit
 | `federation.peer.block` | An operator blocks a peer. |
 | `federation.peer.remove` | An operator removes a peer. |
 | `federation.peer.purge` | An operator purged a blocked peer. Detail `{"rooms", "messages", "members", "follows", "claims", "cursors", "stand_ins"}`: [Blocking, removing and purging a peer](#blocking-removing-and-purging-a-peer). |
+| `federation.peer.keys_forget` | An operator dropped a peer's key history. Detail `{"dropped": n}`, the keys dropped: [Key rotation](#key-rotation). |
 | `federation.peer.seen` | An open-mode origin sends its first valid request. |
 | `federation.room.*`, `federation.delivery.paused` | Federated rooms; see [federated-rooms.md](federated-rooms.md#audit-actions). |
 | `follow.request`, `follow.refused` | Follow requests of peers' bots; see [follow.md](follow.md#audit-actions). |
@@ -584,7 +628,7 @@ requests from the peer an hour, or the peer's limit
 | `federation.delivery.retry` | An operator retried delivery to a peer. Detail `{"cursors": n}`, the cursors made due. |
 | `federation.bot.block` | An operator blocked a bot of another server (again). Target `bot`, its address. Detail `{"note", "rooms", "replicas", "follows"}`: [Blocking a bot](#blocking-a-bot). |
 | `federation.bot.unblock` | An operator unblocked a bot of another server. Target `bot`, its address. |
-| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document lists, or whose peer's document could not be fetched, or an author signature of its bot while its document's current key is another one (at most one entry per peer per minute; result `error:bad_signature`), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
+| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document names as current, or whose peer's document could not be fetched, or an author signature of its bot while its document's current key is another one (result `error:bad_signature`; a failed fetch once per peer a minute, a refused key once per peer and key a minute), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
 
 Other refused requests go to the server log at warn, at most one line per
 origin and error code per minute.
@@ -598,6 +642,8 @@ origin and error code per minute.
 | Rate per verified peer | 120 per minute, burst 30; a `seen` peer 30, burst 10; per peer: [Peer health and limits](#peer-health-and-limits) |
 | Document fetches for domains that are not allowed | 10 per minute on average, bursts of up to 10, server-wide |
 | Operator lookups and adds | 30 per minute, burst 10, apart from the fetches above |
+| A known peer's document, on a key change | at most one fetch per peer per minute, kept for that minute, at most 1000 peers kept ([Verification order](#verification-order), step 4) |
+| Third servers' documents that one host's replica events cause | 5 per minute, burst 5 ([Key rotation](#key-rotation)) |
 | Federation listener | read timeout 10 seconds, write timeout 15 seconds, headers at most 16 KiB |
 | Fetch timeout | 5 seconds, no redirects; room requests 30 seconds ([federated-rooms.md](federated-rooms.md#limits)); connecting and the TLS handshake 5 seconds for every request |
 | Nonce storage | until 5 minutes after `ts`; pruned every minute, one minute after expiry |

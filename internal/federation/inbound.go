@@ -270,36 +270,53 @@ func retryAfterAt(lim *rate.Limiter, now time.Time) string {
 // repin runs when a request of a known peer names a key other than its
 // pinned one, and returns the key to verify the request with, or nil to
 // refuse it. Anyone can send such a request, so the peer's document is
-// fetched at most once per peer a minute. The presented key is pinned
-// when the document lists it and adopt takes it. The change is audited
-// (federation.key_changed) too when the document cannot be fetched; one
-// that does not list the presented key is no evidence.
+// fetched at most once a minute (docs), and every key presented
+// meanwhile is judged against that fetch. The presented key is pinned
+// when it is the document's current key and adopt takes it. The change
+// is audited (federation.key_changed) too when the document cannot be
+// fetched, by the request that fetched it; a document whose current key
+// is another, the peer's previous key included, is no evidence.
 func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed25519.PublicKey, error) {
-	if len(peer.PublicKey) != ed25519.PublicKeySize || !s.keyChecks.allow(peer.Domain) {
+	if len(peer.PublicKey) != ed25519.PublicKeySize {
 		return nil, nil
 	}
-	doc, err := s.fetch.Document(ctx, peer.Domain)
+	doc, fetched, err := s.docs.get(ctx, peer.Domain, s.fetch.Document)
 	if err != nil {
-		s.keyChanged(ctx, peer.Domain, presented, peer.Fingerprint, "error:bad_signature", "unreachable")
+		if fetched {
+			s.keyChanged(ctx, peer.Domain, presented, peer.Fingerprint, "error:bad_signature", "unreachable")
+		}
 		return nil, nil
 	}
-	i := slices.IndexFunc(doc.Keys, func(k DocKey) bool { return k.KeyID == presented })
-	if i < 0 {
+	if doc.Keys[0].KeyID != presented { // newest first
 		return nil, nil
 	}
-	return s.adopt(ctx, peer, doc.Keys[i])
+	return s.adopt(ctx, peer, doc.Keys[0])
 }
 
-// repinAuthor runs when the author signature of a bot of peer, a third
-// server we may see only through rooms hosted elsewhere, verifies with
-// none of its keys: the peer may have rotated without a request to us.
-// Under the same gate as repin, it adopts the current key of the peer's
-// document and returns it, or nil when there is none to adopt.
-func (s *Service) repinAuthor(ctx context.Context, peer Peer) (ed25519.PublicKey, error) {
-	if !s.keyChecks.allow(peer.Domain) {
-		return nil, nil
+// needDocError is repinAuthor's error when the document of domain must
+// be fetched first, outside applyMu (applyBatch).
+type needDocError struct{ domain string }
+
+func (e *needDocError) Error() string { return "the document of " + e.domain + " is needed" }
+
+// repinAuthor runs, under applyMu, when the author signature of a bot of
+// peer, a third server we may see only through rooms hosted elsewhere,
+// verifies with none of its keys: the peer may have rotated without a
+// request to us. It adopts the current key of the peer's document from
+// the last minute (docs) and returns it, or nil when there is none to
+// adopt. It fetches nothing: without such a document it returns
+// needDocError, for the caller to fetch one outside the lock and apply the
+// event again, at most repinsPerMinute times a minute for each host;
+// past that the signature is wrong.
+func (s *Service) repinAuthor(ctx context.Context, host string, peer Peer) (ed25519.PublicKey, error) {
+	doc, ok, err := s.docs.peek(peer.Domain)
+	if !ok {
+		lims, err := s.limitersOf(ctx, host)
+		if err != nil || !lims.repins.Allow() {
+			return nil, err
+		}
+		return nil, &needDocError{peer.Domain}
 	}
-	doc, err := s.fetch.Document(ctx, peer.Domain)
 	if err != nil || doc.Keys[0].KeyID == KeyIDFor(peer.PublicKey) {
 		return nil, nil // unreachable, or no rotation: the signature is wrong
 	}
@@ -309,7 +326,8 @@ func (s *Service) repinAuthor(ctx context.Context, peer Peer) (ed25519.PublicKey
 // adopt pins k, a key of peer's document, when it is endorsed by the
 // pinned key with a valid signature and the peer never had it before;
 // the pinned key goes to the peer's history (federation.key_rotated).
-// Otherwise it audits why not (federation.key_changed) and returns nil.
+// Otherwise it audits why not (federation.key_changed, once per key a
+// minute) and returns nil.
 func (s *Service) adopt(ctx context.Context, peer Peer, k DocKey) (ed25519.PublicKey, error) {
 	pub, _ := b64.DecodeString(k.PublicKey) // checked by the Fetcher
 	pinned := KeyIDFor(peer.PublicKey)
@@ -332,11 +350,25 @@ func (s *Service) adopt(ctx context.Context, peer Peer, k DocKey) (ed25519.Publi
 		reason = "retired_key"
 	}
 	if reason != "" {
-		s.keyChanged(ctx, peer.Domain, Fingerprint(pub), peer.Fingerprint, "error:bad_signature", reason)
+		if s.keyAudits.allow(peer.Domain + " " + k.KeyID) {
+			s.keyChanged(ctx, peer.Domain, Fingerprint(pub), peer.Fingerprint, "error:bad_signature", reason)
+		}
 		return nil, nil
 	}
-	if ok, err := s.peers.Repin(ctx, peer.Domain, peer.PublicKey, pub); !ok || err != nil {
-		return nil, err // !ok: the operator changed the pin meanwhile
+	if ok, err := s.peers.Repin(ctx, peer.Domain, peer.PublicKey, pub); err != nil {
+		return nil, err
+	} else if !ok {
+		// The pin changed meanwhile: a concurrent request re-pinned the
+		// peer, maybe to this key, or the operator did.
+		switch now, err := s.peers.Get(ctx, peer.Domain); {
+		case errors.Is(err, ErrPeerNotFound):
+			return nil, nil
+		case err != nil:
+			return nil, err
+		case !bytes.Equal(now.PublicKey, pub):
+			return nil, nil
+		}
+		return pub, nil
 	}
 	detail, _ := json.Marshal(struct {
 		Previous string `json:"previous"`
@@ -376,6 +408,82 @@ func (s *Service) fail(w http.ResponseWriter, r *http.Request, err error) {
 // maxGateKeys bounds a minuteGate: origins on the log path are chosen
 // by strangers.
 const maxGateKeys = 1000
+
+// docCache keeps the documents of known peers fetched for repin and
+// repinAuthor, a failed fetch too, each for a minute: anyone can
+// present a key in a peer's name, so the document is fetched at most
+// once a minute and every key presented meanwhile is judged against it.
+// Concurrent callers share one fetch. It holds at most maxGateKeys
+// documents, dropping stale ones when full.
+type docCache struct {
+	mu   sync.Mutex
+	docs map[string]*cachedDoc
+}
+
+type cachedDoc struct {
+	at   time.Time     // when the fetch started
+	done chan struct{} // closed once doc and err are set
+	doc  Document
+	err  error
+}
+
+var errDocCacheFull = errors.New("too many peer documents cached")
+
+// get returns domain's document, fetching it with fetch unless one
+// from the last minute is cached; fetched reports whether this call
+// fetched it. The fetch does not end with ctx: a caller that goes away
+// must not leave a failure for the minute.
+func (c *docCache) get(ctx context.Context, domain string, fetch func(context.Context, string) (Document, error)) (doc Document, fetched bool, err error) {
+	now := time.Now()
+	c.mu.Lock()
+	e, ok := c.docs[domain]
+	if !ok || now.Sub(e.at) >= time.Minute {
+		if c.docs == nil {
+			c.docs = make(map[string]*cachedDoc)
+		}
+		if len(c.docs) >= maxGateKeys {
+			for k, e := range c.docs {
+				if now.Sub(e.at) >= time.Minute {
+					delete(c.docs, k)
+				}
+			}
+			if len(c.docs) >= maxGateKeys {
+				c.mu.Unlock()
+				return Document{}, false, errDocCacheFull
+			}
+		}
+		e = &cachedDoc{at: now, done: make(chan struct{})}
+		c.docs[domain] = e
+		c.mu.Unlock()
+		e.doc, e.err = fetch(context.WithoutCancel(ctx), domain)
+		close(e.done)
+		return e.doc, true, e.err
+	}
+	c.mu.Unlock()
+	select {
+	case <-e.done:
+		return e.doc, false, e.err
+	case <-ctx.Done():
+		return Document{}, false, ctx.Err()
+	}
+}
+
+// peek returns domain's document from the last minute, or its fetch's
+// error, without fetching; ok is false when there is none yet.
+func (c *docCache) peek(domain string) (doc Document, ok bool, err error) {
+	c.mu.Lock()
+	e, found := c.docs[domain]
+	c.mu.Unlock()
+	if !found || time.Since(e.at) >= time.Minute {
+		return Document{}, false, nil
+	}
+	select {
+	case <-e.done:
+		return e.doc, true, e.err
+	default:
+		return Document{}, false, nil
+	}
+}
 
 // minuteGate lets one event per key through each minute.
 type minuteGate struct {

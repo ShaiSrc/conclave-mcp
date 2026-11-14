@@ -30,3 +30,18 @@ func TestNormalizeHandle(t *testing.T) {
 		}
 	}
 }
+
+// The name of another server's address may be operator or key-<id> too;
+// other reserved names and invalid ones stay refused.
+func TestNormalizeRemoteName(t *testing.T) {
+	for in, want := range map[string]string{"c1": "c1", "Operator": "operator", "KEY-12": "key-12", "key-x": "key-x"} {
+		if got, err := NormalizeRemoteName(in); err != nil || got != want {
+			t.Errorf("NormalizeRemoteName(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{"", "admin", "lookup", "\u212Aey-1", "key-" + strings.Repeat("1", 29), "a b"} {
+		if got, err := NormalizeRemoteName(in); err == nil {
+			t.Errorf("NormalizeRemoteName(%q) = %q, want an error", in, got)
+		}
+	}
+}

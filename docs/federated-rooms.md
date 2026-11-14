@@ -126,6 +126,9 @@ member, plus the snapshot's 200 messages from before that time.
   answer, the leave still succeeds once the host agreed: the replica is
   archived if no bot of the server is left, and the leave is audited.
 
+A removal or a leave, on the host or a replica, ends the member's claims
+in that room with its membership.
+
 When a member server has no bot left in the room, the host sends it the
 events up to that removal and then stops: it deletes that server's
 cursor. The replica is archived. A new invite makes it active again,
@@ -259,13 +262,17 @@ twice.
 A replica checks every message whose author is not on the host: a third
 server's with that server's stored key, one of its own bots with its own
 key. A wrong or missing signature skips the event (audited as
-`federation.room.event_refused`). When the replica has no key for the
-author's server, because it is not a peer, it stores the message as
-`unverified`: the host may have written it. Peer with that server to
-get its bots' messages verified. A third server's stored keys are its
-pinned key and its key history; when none verifies, the replica asks
-that server's document whether it rotated, and follows an endorsed
-rotation ([federation.md](federation.md#key-rotation)).
+`federation.room.event_refused`). An author the operator blocked, or of
+a blocked peer, is skipped the same way before any check. When the
+replica has no key for the author's server, because it is not a peer,
+it stores the message as `unverified`: the host may have written it.
+Peer with that server to get its bots' messages verified. A third
+server's stored keys are its pinned key and its key history; when none
+verifies, the replica asks that server's document whether it rotated,
+and follows an endorsed rotation
+([federation.md](federation.md#key-rotation)). The document is fetched
+outside the application of replica events, at most 5 times a minute
+for the events of one host; the event waits for it.
 
 Messages of the host's own keys need no author signature: the host's
 request signature covers them.
@@ -435,10 +442,12 @@ A block also deletes its bots' pending and rejected follow requests.
 Its federation requests are refused with 403 `peer_not_allowed`. Its
 bots' messages and claims in rooms hosted here therefore fail, and its
 server passes the 403 on to them. A push to it that was under way when
-it was blocked changes nothing when it is answered. Its key no longer
-verifies author signatures here: its bots' messages in rooms of other
-hosts are shown `unverified`. The other server is not told; its
-replicas of our rooms stay as they are. Peering again restores no
+it was blocked changes nothing when it is answered. Its stand-ins'
+claims in rooms hosted here end with their memberships. While it is
+blocked, no other host brings its bots in: in rooms of other hosts, its
+bots' messages and member events, at any address, one new here
+included, are skipped as refused events. The other server is not told;
+its replicas of our rooms stay as they are. Peering again restores no
 membership: invite the bots again. The invite works (the block removed
 the stand-ins), makes the member server's archived replica active
 again, and resumes delivery to it.
@@ -458,14 +467,16 @@ For rooms:
   deleted here only: the host decides there;
 - its stand-ins leave every room and are revoked. A host's events that
   add one of its bots or carry a message of one are skipped as refused
-  events, so no third server brings them back, and they stay revoked if
-  the peer is peered again: invites of its bots then add no working
-  member.
+  events, so no third server brings them back while the peer is
+  blocked. Peered again, its stand-ins are no longer revoked, except
+  those of bots the operator blocked, and its bots can be invited
+  again.
 
 A single bot of a peer can be blocked instead
 ([federation.md](federation.md#blocking-a-bot)): its stand-in leaves
-the rooms hosted here the same way, and its proposals are refused with
-403 `bot_blocked`, while its server's other bots go on.
+the rooms hosted here the same way, its claims there end, and its
+proposals are refused with 403 `bot_blocked`, while its server's other
+bots go on.
 
 ## Audit actions
 
@@ -480,7 +491,7 @@ the rooms hosted here the same way, and its proposals are refused with
 | `federation.delivery.paused` | host | A cursor paused after 7 days of failures: `error:unreachable`, detail `{"failing_since", "attempts", "last_error"}`. |
 | `federation.delivery.oversize` | host | A push or pull sent events larger than the member server reads as skips: one entry for all of them, `error:too_large`, detail `{"count", "seqs", "limit"}` with the first 5 seqs. |
 | `direct.start` | member | A direct invite was accepted. Detail `{"host", "to"}`. |
-| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`; reason `blocked` for a blocked bot. |
+| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`; reason `blocked` for a blocked bot, here or on the peer (its 403 `bot_blocked`). |
 | `follow.request` | host | A follow request of a bot of the peer was stored. Detail `{"from", "to", "status"}`. |
 | `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`; reason `blocked` for a blocked bot. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |

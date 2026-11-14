@@ -454,7 +454,8 @@ func TestDelivery_BlockedDuringPush(t *testing.T) {
 	}
 }
 
-// A blocked peer's key does not verify author signatures.
+// A blocked peer's bots are refused in replicas hosted elsewhere: its
+// key verifies nothing, and neither the member nor the message is taken.
 func TestReplicaEvents_BlockedAuthorServer(t *testing.T) {
 	g, h, room, _ := replica(t, "read")
 	c := testIdentity(t, "c.example")
@@ -463,8 +464,11 @@ func TestReplicaEvents_BlockedAuthorServer(t *testing.T) {
 	if got := h.push(t, g, room, memberEv(1, "c1@c.example", "read"), msg(2, 100, room, h.id.Domain, "c1@c.example", "hi", nil, "", c)); got != 2 {
 		t.Fatalf("applied %d", got)
 	}
-	if s := storedMessages(t, g, room); len(s) != 1 || !s[0].Unverified {
+	if s := storedMessages(t, g, room); len(s) != 0 {
 		t.Errorf("stored: %+v", s)
+	}
+	if got := members(t, g, room); got != "b1" {
+		t.Errorf("members: %s", got)
 	}
 }
 

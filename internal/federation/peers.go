@@ -89,7 +89,9 @@ func (ps *Peers) List(ctx context.Context) ([]Peer, error) {
 
 // Allow makes domain an allowed peer pinned to pub, replacing any
 // earlier status, blocked included. A key it replaces goes to the
-// peer's key history.
+// peer's key history. For a domain that was blocked or had no row
+// (removed, or never peered), its stand-ins, which a purge revoked, are
+// no longer revoked, except those of bots the operator blocked.
 func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey, note string) error {
 	tx, err := ps.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -97,11 +99,19 @@ func (ps *Peers) Allow(ctx context.Context, domain string, pub ed25519.PublicKey
 	}
 	defer func() { _ = tx.Rollback() }()
 	var old []byte
-	if err := tx.QueryRowContext(ctx, `SELECT public_key FROM federation_peers WHERE domain = ?`, domain).Scan(&old); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	var status string
+	if err := tx.QueryRowContext(ctx, `SELECT public_key, status FROM federation_peers WHERE domain = ?`, domain).
+		Scan(&old, &status); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
 	if len(old) == ed25519.PublicKeySize && !pub.Equal(ed25519.PublicKey(old)) {
 		if err := retireKey(ctx, tx, domain, old); err != nil {
+			return err
+		}
+	}
+	if status == "" || status == statusBlocked {
+		if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE remote_domain = ? AND revoked_at IS NOT NULL
+			AND label NOT IN (SELECT address FROM blocked_bots)`, domain); err != nil {
 			return err
 		}
 	}

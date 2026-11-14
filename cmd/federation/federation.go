@@ -8,6 +8,7 @@
 //	conclave-mcp federation peers block|remove|ping|retry <domain>
 //	conclave-mcp federation peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]
 //	conclave-mcp federation peers purge <domain> [--yes]
+//	conclave-mcp federation peers forget-keys <domain>
 //	conclave-mcp federation bots block <address> [--note N]
 //	conclave-mcp federation bots unblock <address>
 //	conclave-mcp federation bots blocked
@@ -35,7 +36,8 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "federation", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers := &cobra.Command{Use: "peers", Short: "Manage federation peers", Args: cobra.NoArgs}
-	peers.AddCommand(newListCmd(), newShowCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd(), newRetryCmd(), newLimitsCmd(), newPurgeCmd())
+	peers.AddCommand(newListCmd(), newShowCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd(), newRetryCmd(), newLimitsCmd(), newPurgeCmd(),
+		newForgetKeysCmd())
 	bots := &cobra.Command{Use: "bots", Short: "Block single bots of other servers", Args: cobra.NoArgs}
 	bots.AddCommand(newBotBlockCmd(), newBotUnblockCmd(), newBotsBlockedCmd())
 	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers, bots)
@@ -186,6 +188,23 @@ func newPurgeCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&yes, "yes", false, "skip typing the domain again")
 	return cmd
+}
+
+func newForgetKeysCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "forget-keys <domain>", Args: cobra.ExactArgs(1),
+		Short: "Drop a peer's retired keys: its bots' messages signed with them no longer verify; for a retired key that may have leaked",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var resp struct{ Dropped int }
+				if _, err := c.Do(ctx, client.Request{Method: "DELETE", Path: peerPath(args[0], "/keys/history"), Out: &resp}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "peer %s: %d retired keys forgotten\n", args[0], resp.Dropped)
+				return nil
+			})
+		},
+	}
 }
 
 // openClient is a seam for tests.

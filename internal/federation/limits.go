@@ -21,6 +21,9 @@ const (
 	seenPerMinute = 30    // of a seen peer (open mode) or a first contact
 	peerBurst     = 30    // the most a requests limiter's burst gets
 	maxLimit      = 10000 // the highest override
+	// repinsPerMinute caps the fetches of third servers' documents that
+	// one host's replica events can cause (repinAuthor).
+	repinsPerMinute = 5
 )
 
 // limitCols are the columns of federation_peer_limits, which name the
@@ -80,8 +83,9 @@ func (s *Service) overridesOf(ctx context.Context, domain string) (map[string]ov
 	return out, rows.Err()
 }
 
-// peerLimiters are a peer's limiters, built from its effective limits.
-type peerLimiters struct{ requests, dmInvites, followRequests *rate.Limiter }
+// peerLimiters are a peer's limiters, built from its effective limits,
+// and, as a host, of the re-pin fetches its replica events cause.
+type peerLimiters struct{ requests, dmInvites, followRequests, repins *rate.Limiter }
 
 // newLimiters builds limiters of l. The requests limiter's burst is a
 // third of its value a minute, rounded up, at most peerBurst: 30 for
@@ -91,7 +95,8 @@ func newLimiters(l limits) *peerLimiters {
 	n := l.RequestsPerMinute.Value
 	hourly := func(n int) *rate.Limiter { return rate.NewLimiter(rate.Limit(n)/3600, n) }
 	return &peerLimiters{rate.NewLimiter(rate.Limit(n)/60, min((n+2)/3, peerBurst)),
-		hourly(l.DMInvitesPerHour.Value), hourly(l.FollowRequestsPerHour.Value)}
+		hourly(l.DMInvitesPerHour.Value), hourly(l.FollowRequestsPerHour.Value),
+		rate.NewLimiter(rate.Limit(repinsPerMinute)/60, repinsPerMinute)}
 }
 
 // limitersOf returns origin's limiters, built on first use from its

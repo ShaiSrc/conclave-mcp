@@ -206,3 +206,22 @@ func TestAudit_ListIsAdminOnly(t *testing.T) {
 		t.Errorf("agent key: %d %s, want 403 admin key required", rec.Code, rec.Body.String())
 	}
 }
+
+// An action with an underscore matches too: the filter's escaped _ is a
+// literal one, not a wildcard.
+func TestAudit_ListFilterByActionWithUnderscore(t *testing.T) {
+	r, db, _ := setupAs(t)
+	for _, action := range []string{"federation.key_rotated", "federation.keyXrotated", "federation.key_changed"} {
+		if err := Write(context.Background(), db, 1, action, "federation_peer", "a.example", "", "ok", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/audit?action=federation.key_rotated", nil))
+	var resp struct {
+		Entries []entryView `json:"entries"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || len(resp.Entries) != 1 || resp.Entries[0].Action != "federation.key_rotated" {
+		t.Errorf("filter: %d %s", rec.Code, rec.Body)
+	}
+}

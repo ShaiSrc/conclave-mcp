@@ -603,6 +603,7 @@ conclave-mcp federation peers ping <domain>
 conclave-mcp federation peers retry <domain>
 conclave-mcp federation peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]
 conclave-mcp federation peers purge <domain> [--yes]
+conclave-mcp federation peers forget-keys <domain>
 conclave-mcp federation bots block <address> [--note TEXT]
 conclave-mcp federation bots unblock <address>
 conclave-mcp federation bots blocked
@@ -650,8 +651,16 @@ Needs the admin key. With federation off, the server answers
   `peer <domain> purged:` and the counts. 409 `peer_not_blocked` unless
   the peer is blocked. See
   [federation.md](federation.md#blocking-removing-and-purging-a-peer).
-- `bots block <address>` blocks a bot of another server, `name@domain`:
-  it leaves the rooms here and its follows end. It prints
+- `peers forget-keys <domain>` drops the peer's key history, the keys it
+  was pinned to before a rotation, and prints
+  `peer <domain>: <n> retired keys forgotten`. Its bots' messages signed
+  with those keys no longer verify here. It is the remedy when a retired
+  key of the peer may have leaked. See
+  [federation.md](federation.md#key-rotation).
+- `bots block <address>` blocks a bot of another server, `name@domain`
+  (the name may be `operator` or `key-<digits>` too, the other server's
+  keys without a handle): it leaves the rooms here, its claims there end,
+  and its follows end. It prints
   `bot <address> blocked`, or `was blocked already` when it was (the
   cleanup runs again). 400 `invalid_address` for another form, 400
   `own_domain` for a bot of this server.

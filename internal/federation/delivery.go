@@ -154,11 +154,10 @@ func (s *Service) plan(ctx context.Context, now time.Time) (map[string][]cursor,
 // neither the others nor, past its budget, its own next pass. A peer
 // that does not answer is not asked again in the run: its other cursors
 // count the same failure. Cursors left when the budget is spent wait
-// for the next pass, which starts after the rooms this one attempted:
-// cs is in room id order, and each run starts at the peer's offset and
-// wraps around, then advances it by the rooms it attempted, at least
-// one. With the same rooms due, each is attempted within as many passes
-// as there are rooms.
+// for the next pass: cs is in room id order, and each run starts after
+// the last room the peer's previous run attempted (s.rotation) and
+// wraps around, then keeps the last room it attempted. Every room that
+// stays due is attempted within as many passes as there are rooms.
 func (s *Service) runPeer(ctx context.Context, peer string, cs []cursor) {
 	defer func() {
 		s.runMu.Lock()

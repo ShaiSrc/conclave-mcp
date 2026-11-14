@@ -63,6 +63,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   Purge on blocked peers and a blocked-bots section on the Federation
   page, each change confirmed with a passkey. Migration 0016. See
   `docs/federation.md`.
+- `DELETE /v1/federation/peers/{domain}/keys/history` (`federation
+  peers forget-keys <domain>`) drops a peer's key history and answers
+  how many keys it dropped (`federation.peer.keys_forget`): its bots'
+  messages signed with a retired key no longer verify. It is the remedy
+  when a retired key may have leaked.
+- `bots block` takes `operator@<domain>` and `key-<digits>@<domain>`
+  too: another server's operator key and its keys without a handle.
 
 ### Changed
 
@@ -75,7 +82,14 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   the new key carries a valid endorsement by the pinned one; before,
   every key change was 401 until the operator re-pinned. An operator's
   re-pin (`peers add --fingerprint`) keeps the replaced key in the
-  peer's history too.
+  peer's history too. The peer's document is fetched at most once a
+  minute and kept for that minute, a failed fetch too; every key
+  presented meanwhile is judged against it, so a request with a made-up
+  key in the peer's name cannot keep its real rotated key out, and
+  requests that arrive together after a rotation all pass. A third
+  server's document, for an author signature, is fetched outside the
+  application of replica events, at most 5 times a minute for one
+  host's events.
 - `federation.key_changed` is also written when the peer's document
   cannot be fetched on a key change (`presented` is then the key ID),
   and its detail has a `reason`: `unreachable`, `not_endorsed`,
@@ -85,8 +99,13 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - Blocking a peer also deletes its bots' pending and rejected follow
   requests.
 - A replica skips, as refused events, member events that add a revoked
-  stand-in and messages of one, so a host cannot bring back a blocked
-  bot or a purged peer's bots.
+  stand-in or any address of a blocked peer, and messages of them, so a
+  host cannot bring back a blocked bot or a blocked or purged peer's
+  bots, at a new address either. A message of a blocked peer's bot is no
+  longer stored as `unverified`.
+- Peering a blocked or removed peer again lifts the revocation of its
+  stand-ins, except those of bots the operator blocked, so a purged peer
+  can take part again.
 - The domain of `/v1/federation/peers/{domain}` and the address of
   `DELETE /v1/federation/blocked-bots/{address}` are URL-decoded, so
   `%3A` and `%40` work.
@@ -102,6 +121,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - `docs/federated-rooms.md` said a member server's rooms are delivered
   in an order shuffled per run; they go in room ID order, starting after
   the last room the previous run attempted.
+- Claims outlived the membership: a member removed from a room, a bot
+  that left it, a blocked bot and a blocked peer's bots kept their
+  claims there until they expired. A membership that ends now takes its
+  claims in that room along.
+- `GET /v1/audit?action=` never matched an action with an underscore,
+  such as `federation.key_rotated`: the escaped `_` lacked an `ESCAPE`
+  clause.
+- A peer's 403 to a direct invite was audited as `direct.refused` with
+  reason `policy` whatever its code; now `policy` for `dm_refused`,
+  `blocked` for `bot_blocked` and `refused` otherwise.
+- `docs/architecture.md` listed the audit table as `audit_log` with
+  columns it does not have.
 
 ## [0.12.0] — 2026-11-14
 

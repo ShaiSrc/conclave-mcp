@@ -142,8 +142,11 @@ messages(id [auto-inc], room_id, author_key_id, ts, content_type,
   origin_nonce  the random value that signature covers
   unverified  1 when a replica could not check that signature
 
-audit_log(id [auto-inc], ts, actor_key_id, action, room_id,
-          message_id, metadata, request_id)
+audit(id [auto-inc], ts, actor_key_id, action, target_type, target_id,
+      result, detail, room_id)
+  result      'ok' or 'error:<code>'
+  detail      action-specific JSON
+  room_id     denormalised for the ?room_id= filter (migration 0003)
 
 ui_credentials(id, public_key, sign_count, transports, flags, name, created_at, last_used_at)
 ui_sessions(token_hash, created_at, last_seen_at, expires_at)
@@ -253,6 +256,7 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/federation/peers/{domain}/ping` | Send a signed ping; returns `rtt_ms`. | admin |
 | `POST` | `/v1/federation/peers/{domain}/retry` | Unpause an allowed peer's delivery and make it due now; 409 `peer_not_allowed` otherwise. | admin |
 | `POST` | `/v1/federation/peers/{domain}/purge` | Delete what a blocked peer left here and answer the counts; 409 `peer_not_blocked` otherwise. | admin |
+| `DELETE` | `/v1/federation/peers/{domain}/keys/history` | Drop the peer's key history (retired keys) and answer `{"domain", "dropped"}`. | admin |
 | `GET` | `/v1/federation/blocked-bots` | List the blocked bots of other servers. | admin |
 | `POST` | `/v1/federation/blocked-bots` | Block a bot of another server (`address`, `note`): 201, or 200 when it was blocked already. | admin |
 | `DELETE` | `/v1/federation/blocked-bots/{address}` | Lift a bot's block; 404 `not_found` when it is not blocked. | admin |

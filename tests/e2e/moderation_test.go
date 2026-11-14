@@ -187,11 +187,9 @@ func TestModeration(t *testing.T) {
 		t.Fatalf("DM after the rotation: %d %s", r.Status, r.Body)
 	}
 	waitFor(t, "the DM on B", func() bool { c := b.dmList(b1); return len(c) == 1 && c[0].Address == a1Addr && c[0].Unread == 1 })
-	// ponytail: filtered by the prefix federation.key and counted here, as
-	// ?action= does not match an action with an underscore: its LIKE escapes
-	// _ without an ESCAPE clause.
-	keyAudit := string(b.admin("GET", "/v1/audit?action=federation.key&limit=1000", nil).Body)
-	if n, m := strings.Count(keyAudit, `"federation.key_rotated"`), strings.Count(keyAudit, `"federation.key_changed"`); n != 1 || m != 0 {
+	rotated := string(b.admin("GET", "/v1/audit?action=federation.key_rotated", nil).Body)
+	changed := string(b.admin("GET", "/v1/audit?action=federation.key_changed", nil).Body)
+	if n, m := strings.Count(rotated, `"federation.key_rotated"`), strings.Count(changed, `"federation.key_changed"`); n != 1 || m != 0 {
 		t.Fatalf("B audited %d key_rotated, %d key_changed; want 1, 0", n, m)
 	}
 
@@ -250,11 +248,11 @@ func TestModeration(t *testing.T) {
 
 	// 5. A purges B: refused while B is allowed. Blocked, B has no retry;
 	// the purge counts what the block left: the replica of theirs and
-	// b2's membership there, b1's and b2's messages in proj, b2's claim,
-	// proj's cursor (those of the DM and a1's feed went once b1's removal
-	// was delivered), and the stand-ins of b2 and of operator@B, the owner
-	// of the replica (b1's is revoked already). The block ended every
-	// follow.
+	// b2's membership there, b1's and b2's messages in proj, proj's
+	// cursor (those of the DM and a1's feed went once b1's removal was
+	// delivered), and the stand-ins of b2 and of operator@B, the owner of
+	// the replica (b1's is revoked already). The block ended every follow,
+	// and b2's claim in proj with its membership.
 	if r := a.admin("POST", "/v1/federation/peers/"+b.domain+"/purge", nil); r.Status != 409 || !strings.Contains(string(r.Body), "peer_not_blocked") {
 		t.Fatalf("purge of an allowed peer: %d %s", r.Status, r.Body)
 	}
@@ -277,7 +275,7 @@ func TestModeration(t *testing.T) {
 		}
 		return n
 	}
-	if n, want := purge(), (counts{Rooms: 1, Messages: 2, Members: 1, Claims: 1, Cursors: 1, StandIns: 2}); n != want {
+	if n, want := purge(), (counts{Rooms: 1, Messages: 2, Members: 1, Cursors: 1, StandIns: 2}); n != want {
 		t.Fatalf("purge: %+v, want %+v", n, want)
 	}
 	if n := a.auditCount("federation.peer.purge"); n != 1 {
