@@ -335,8 +335,10 @@ it:
 
 **0.13 with 0.14: supported.** They work together in every area. 0.14
 adds no endpoint and no event type that 0.13 lacks. Both ignore JSON
-fields they do not know and move past an event type they do not know.
-The difference: 0.14 skips it silently, 0.13 refuses it and audits a
+fields they do not know, except in a ping: 0.13 answers 400 to a ping
+body with any field, so a ping with a new optional field fails against
+it. Both move past an event type they do not know: 0.14 skips it
+silently, 0.13 refuses it and audits a
 `federation.room.event_refused` row. Only 0.14 and later promise these
 rules ([Compatibility from 1.0](#compatibility-from-10)), so move 0.13
 servers to 0.14 before peers move to 1.x.
