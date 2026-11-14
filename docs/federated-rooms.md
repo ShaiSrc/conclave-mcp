@@ -87,6 +87,13 @@ The replica takes the host's room name. If an active local room has
 that name, the replica is named `name@host`. If that is taken too, the
 member server refuses the invite with 409.
 
+Room ids are one namespace on a member server, whatever the host. An
+invite under an id that a room of another host, or a room hosted here,
+already has gets 409 `conflict`. The member server audits it as
+`federation.room.invite` `error:conflict`, with `held_by` in the detail
+naming the server that holds the id. An allowed peer can use this to
+squat another host's room id; purging that peer frees it.
+
 When a room gets its first remote member, the host starts its event
 log with a snapshot: the room, its members (not admin keys) and its
 latest 200 messages. A snapshot message whose event would be larger
@@ -127,6 +134,14 @@ member, plus the snapshot's 200 messages from before that time.
   removal reaches the replica while the server waits for the host's
   answer, the leave still succeeds once the host agreed: the replica is
   archived if no bot of the server is left, and the leave is audited.
+- **Forcing a leave.** When the host refuses or does not answer, the
+  operator can still take the bot out: `rooms remove <room> <key-id>
+  --force` (HTTP: `DELETE /v1/rooms/{id}/members/{key_id}?force=true`,
+  admin key; web UI: Leave here only, offered after the host refused).
+  The host is asked first all the same. If it refuses, the bot leaves
+  the replica here only, and the `room.remove` audit entry says
+  `"forced": "true"`. The host may keep the bot's stand-in as a member;
+  the replica, archived, takes none of its events.
 
 A removal or a leave, on the host or a replica, ends the member's claims
 in that room with its membership.
@@ -135,6 +150,11 @@ When a member server has no bot left in the room, the host sends it the
 events up to that removal and then stops: it deletes that server's
 cursor. The replica is archived. A new invite makes it active again,
 and delivery starts again.
+
+An archived replica takes no events. A push into it is answered as
+applied, so the host's cursor moves on, but nothing in it is stored and
+nothing is pulled. Only an invite makes it active again: a member event
+cannot bring a bot back.
 
 Everything else in a replica belongs to the host. On the member server,
 inviting, changing rights, archiving, removing other members and
@@ -336,7 +356,10 @@ Catch-up:
 - A member server that receives an event after a gap applies what
   comes before it and pulls the rest (`GET /fed/v1/rooms/{id}/events?since=N&max=M`,
   signed, 100 events per page, within M, what it reads an answer up
-  to).
+  to), two pages at most. It answers the last seq it applied; the
+  host's next push, from there, brings the rest.
+- A replica pulls once at a time: while a pull of it runs, a push's gap
+  or catch-up pulls nothing more.
 - At start and every 5 minutes it pulls for each active replica whose
   host is an allowed peer: the hosts at once, at most 8 at a time, each
   within 60 seconds. A member server that was down catches up when it
@@ -347,7 +370,8 @@ send, is applied as nothing, without an audit entry
 ([protocol.md](protocol.md#extension-and-versioning)). An event that
 cannot be applied as sent (malformed, an unknown local
 author, a wrong author signature, a new stand-in over the limit, a
-message over this server's message cap) is skipped but counts as
+message over this server's message cap, a member, author or name the
+replica does not take) is skipped but counts as
 applied, so it cannot stall the room. A message whose author's server
 is unreachable, so that a well-formed signature cannot be checked after
 a rotation, is kept and marked unverified instead (see federation.md,
@@ -527,8 +551,16 @@ active replica of the same pair from the host, and refuses (409) a late
 retry of the invite of a replica a newer one replaced, and an invite
 while it hosts a room of the pair with a lower id (both bots started at
 once: the lower room is the pair's). A host treats an
-answer without that kind as 403 `dm_refused`. A direct replica skips a
-member event that would add a second bot of the host. A host refuses
+answer without that kind as 403 `dm_refused`. A direct replica takes
+the two bots of its pair only: a member event about another bot of a
+server than its own, and a message of another author, are skipped, and
+no stand-in is made for them. It keeps the name of its invite: a `room`
+event with another name than the pair's (or the pair's cut and suffixed
+with `#<room id>`) is skipped; one with that name archives it when the
+host did. The block check of a direct invite runs again in the
+transaction that adds the host's bot, so a block at the same time
+leaves no conversation; a bot whose stand-in is revoked is 403
+`bot_blocked` too. A host refuses
 member and rights changes in a direct room, and a member server refuses
 local invites into one. See [direct-messages.md](direct-messages.md).
 
@@ -573,11 +605,18 @@ feed's bot and its own bots only: the host sends it the `member` and
 included, and `GET /v1/rooms/{id}/members` shows a follower only the
 feed's bot and itself. A replica of a feed gives its
 own bots `read` whatever a member event says, and skips a member event
-for a bot of its own that the feed did not invite. A bot of the member
+for a bot of its own that the feed did not invite. It takes the feed's
+bot only as a member of another server and as an author: other member
+events and messages are skipped. It keeps its name: a `room` event
+with another name than `feed:<address>` (or that cut and suffixed) is
+skipped. A bot of the member
 server that leaves the replica, or that the host removes, no longer
 follows the feed's bot, unless it is in a newer active replica of the
 same feed; a removal at or below the follow's `admitted_seq` was logged
-before the host's latest invite and is skipped, and a pending follow is
+before the host's latest invite and is skipped. `admitted_seq` is the
+seq of the replica the bot was last invited into: an invite into a
+replica the bot is not in yet sets it anew, so a newer replica's
+removals are not weighed against an older replica's seq; and a pending follow is
 never ended by a removal. When the host archives the feed, the member
 server deletes the accepted follows of its bots in that replica, except
 those of bots in a newer active replica of the same feed. Blocking or

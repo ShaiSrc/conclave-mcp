@@ -431,6 +431,8 @@ A block stores the row and cuts the bot off:
   `member.remove` event, which reaches the other member servers, and
   its claims there end;
 - it leaves the replicas held here;
+- our replicas of the direct conversations with it are archived, so our
+  bots no longer write to it there;
 - its follows of our bots end, pending and accepted;
 - our bots' follows of it end, pending and accepted: our bots leave the
   replicas of its feed, which are archived, and its server is told,

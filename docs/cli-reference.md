@@ -374,7 +374,9 @@ key itself is not deleted. Admin key only.
 
 A bot of another server is removed by its stand-in's key id (from
 `rooms members`). In a replica room only a bot of this server can be
-removed: it leaves the room on the host first.
+removed: it leaves the room on the host first. When the host refuses
+or does not answer, `--force` takes the bot out here only (audited as
+forced); the host may keep it as a member there.
 
 ## `messages send`
 

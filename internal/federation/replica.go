@@ -37,6 +37,7 @@ const (
 	catchupEvery  = 5 * time.Minute
 	pullTimeout   = roomTimeout // per replica and pull
 	maxPullPages  = 50          // pages of events read per pull
+	pushPages     = 2           // pages a push's gap pulls
 	maxReplicas   = 200         // replica rooms per host, archived ones included
 	maxRefusalLog = 5           // reasons kept in a federation.room.event_refused row
 )
@@ -170,11 +171,16 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	// The audit row is written outside the transaction, which holds the
 	// write lock: it is rolled back first.
 	var tx *sql.Tx
+	var heldBy string // on a 409, the host of the room that has the id here
 	refuse := func(status int, code, msg string) {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
-		detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
+		d := map[string]any{"handle": in.Handle, "rights": in.Rights}
+		if heldBy != "" {
+			d["held_by"] = heldBy
+		}
+		detail, _ := json.Marshal(d)
 		s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:"+code, string(detail))
 		writeErr(w, r, status, code, msg)
 	}
@@ -332,13 +338,20 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	case home.String != origin || kind != in.Kind || direct && pair.String != in.Name || feed && pair.String != feedOf:
+		// ponytail: room ids are one namespace for all hosts, so one host
+		// can hold another's id here; audited with the host that holds it.
+		// Key replicas by (host, id) if that is ever used.
+		heldBy = cmp.Or(home.String, s.id().Domain)
 		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
 		return
 	}
 	if feed { // the follow of our bot toward the feed's bot is accepted now; without one, no replica
-		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?),
-			admitted_seq = MAX(COALESCE(admitted_seq, 0), ?)
-			WHERE follower_key_id = ? AND target = ? AND target_key_id IS NULL`, storage.FormatTS(time.Now()), max(in.Seq, 0), keyID, feedOf)
+		// admitted_seq is the seq of the replica our bot is admitted to:
+		// one it is new in starts it again.
+		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?1),
+			admitted_seq = CASE WHEN EXISTS (SELECT 1 FROM room_members WHERE room_id = ?2 AND key_id = ?3)
+				THEN MAX(COALESCE(admitted_seq, 0), ?4) ELSE ?4 END
+			WHERE follower_key_id = ?3 AND target = ?5 AND target_key_id IS NULL`, storage.FormatTS(time.Now()), roomID, keyID, max(in.Seq, 0), feedOf)
 		var n int64
 		if err == nil {
 			n, err = res.RowsAffected()
@@ -397,11 +410,21 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 // so is an invite while we host a room of the pair with a lower id:
 // when both bots start at once, the lower room is the pair's on both
 // servers, since each refuses the other's higher one. Rooms of the pair
-// are those whose pair is name, the pair's name. On an error it answers
-// and returns false.
+// are those whose pair is name, the pair's name. A bot refusedBot
+// refuses is 403 bot_blocked. On an error it answers and returns false.
 func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, name, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
 	ctx := r.Context()
+	// Blocked in the transaction too: a block between the check before it
+	// and here would otherwise leave the bot in the conversation.
+	switch err := refusedBot(ctx, tx, other); {
+	case errors.Is(err, errRefused):
+		refuse(http.StatusForbidden, "bot_blocked", other+" is blocked on this server")
+		return false
+	case err != nil:
+		s.fail(w, r, err)
+		return false
+	}
 	key, err := fedrooms.StandInVia(ctx, tx, other, origin)
 	if errors.Is(err, fedrooms.ErrStandInLimit) {
 		refuse(http.StatusConflict, "limit", err.Error())
@@ -475,16 +498,24 @@ func nameReplica(ctx context.Context, tx *sql.Tx, roomID, name, host string, act
 
 // handleRoomPush answers POST /fed/v1/rooms/{id}/events from the host of
 // replica {id}: up to 100 events of its log, applied in seq order. A gap
-// is filled by pulling. It answers {"applied": seq}, the last seq
-// applied, which the host keeps as its cursor.
+// is filled by pulling, at most pushPages pages: the host's next push,
+// from the seq answered, brings the rest. It answers {"applied": seq},
+// the last seq applied, which the host keeps as its cursor.
+//
+// An archived replica takes no events: its host cannot write into a room
+// our bots left, nor bring them back without an invite. They count as
+// applied, so the host's cursor moves on (past the removal of our last
+// bot, which ends its delivery), and nothing is pulled.
 func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	if !s.allowedOrigin(w, r) {
 		return
 	}
 	var home sql.NullString
-	if err := s.db.QueryRowContext(ctx, `SELECT home_domain FROM rooms WHERE id = ?`, roomID).Scan(&home); err != nil &&
-		!errors.Is(err, sql.ErrNoRows) {
+	var archived bool
+	var applied int64
+	if err := s.db.QueryRowContext(ctx, `SELECT home_domain, archived_at IS NOT NULL, applied_seq FROM rooms WHERE id = ?`, roomID).
+		Scan(&home, &archived, &applied); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.fail(w, r, err)
 		return
 	}
@@ -499,6 +530,17 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", `body must be {"events": [...]}, at most 100`)
 		return
 	}
+	if archived {
+		for _, ev := range in.Events {
+			applied = max(applied, ev.Seq)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE rooms SET applied_seq = MAX(applied_seq, ?) WHERE id = ?`, applied, roomID); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int64{"applied": applied})
+		return
+	}
 	rf := &refusals{}
 	defer s.auditRefused(ctx, roomID, origin, rf)
 	applied, gap, err := s.applyBatch(ctx, roomID, origin, in.Events, rf)
@@ -509,7 +551,7 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 	if gap {
 		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
 		defer cancel()
-		if applied, err = s.pull(pctx, roomID, origin, rf); err != nil {
+		if applied, err = s.pull(pctx, roomID, origin, pushPages, rf); err != nil {
 			s.logger.Warn("federation room pull failed", "room", roomID, "host", origin, "err", err)
 		}
 	}
@@ -605,7 +647,11 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 }
 
 // applyRoom renames the replica, and archives it when the host did. Its
-// kind is the invite's: a room event of another kind is refused. An
+// kind is the invite's: a room event of another kind is refused. A room
+// takes no name reserved for direct conversations and feeds. A direct
+// conversation or a feed keeps the name of its invite: the event's name
+// must be the pair's, or the feed's (feed:<address>), or that cut with
+// #<room id> as its host may have named it; any other is refused. An
 // archived feed ends the accepted follows of our bots in it, but not of
 // those in a newer active replica of the same feed from that host.
 func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
@@ -613,15 +659,24 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 	if err := json.Unmarshal(payload, &p); err != nil || p.Name == "" || len(p.Name) > 128 {
 		return refused("room event: bad payload")
 	}
-	var kind string
-	if err := tx.QueryRowContext(ctx, `SELECT kind FROM rooms WHERE id = ?`, roomID).Scan(&kind); err != nil {
+	var kind, fixed string // fixed: a direct conversation's or a feed's name
+	if err := tx.QueryRowContext(ctx, `SELECT kind, COALESCE(pair, ?2 || feed, '') FROM rooms WHERE id = ?1`, roomID, fedrooms.FeedPrefix).
+		Scan(&kind, &fixed); err != nil {
 		return err
 	}
-	if cmp.Or(p.Kind, "room") != kind {
+	switch {
+	case cmp.Or(p.Kind, "room") != kind:
 		return refused("room event: kind %q, the replica is %s", p.Kind, kind)
+	case fixed != "" && p.Name != fixed && p.Name != fedrooms.Suffixed(fixed, roomID):
+		return refused("room event: %s is not renamed", fixed)
+	case fixed == "" && (strings.HasPrefix(p.Name, fedrooms.DirectPrefix) || strings.HasPrefix(p.Name, fedrooms.FeedPrefix)):
+		return refused("room event: names starting with %s or %s are reserved", fedrooms.DirectPrefix, fedrooms.FeedPrefix)
+	}
+	if fixed != "" {
+		p.Name = "" // kept
 	}
 	if p.Archived {
-		_, err := tx.ExecContext(ctx, `UPDATE rooms SET name = ?, archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
+		_, err := tx.ExecContext(ctx, `UPDATE rooms SET name = COALESCE(NULLIF(?, ''), name), archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
 			p.Name, storage.FormatTS(time.Now()), roomID)
 		if err == nil { // as on its host, an archived feed ends its accepted follows
 			_, err = tx.ExecContext(ctx, `DELETE FROM follows WHERE status = 'accepted' AND target_key_id IS NULL
@@ -630,6 +685,9 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 					WHERE o.feed = follows.target AND o.home_domain = ?2 AND o.id != ?1 AND o.archived_at IS NULL)`, roomID, host)
 		}
 		return err
+	}
+	if fixed != "" {
+		return nil
 	}
 	err := nameReplica(ctx, tx, roomID, p.Name, host, false)
 	if errors.Is(err, errNameTaken) {
@@ -641,11 +699,12 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 // applyMember adds a member to the replica or sets its rights. A member
 // of this server must be one of its bots; a direct conversation takes
 // ours by invite only, which checks their DM policy, so here it only
-// sets the rights of one it has, and it has one bot of the host, which
-// joined with the invite: another is refused. A feed takes ours by
-// invite only too, which checks their follow, and gives them read. When
-// it is the first bot of ours in an archived replica (invited again),
-// the replica is active again.
+// sets the rights of one it has. A feed takes ours by invite only too,
+// which checks their follow, and gives them read. A member of another
+// server must fit the replica (fits): a direct conversation's is the
+// other bot of its pair, a feed's its bot. When it is the first bot of
+// ours in an archived replica (invited again), the replica is active
+// again.
 func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MemberPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -655,20 +714,14 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 	if err != nil {
 		return refused("member event: %v", err)
 	}
+	if _, domain, _ := strings.Cut(p.Address, "@"); domain != s.id().Domain {
+		if err := fits(ctx, tx, roomID, p.Address); err != nil {
+			return err
+		}
+	}
 	key, local, err := s.memberKey(ctx, tx, p.Address, host)
 	if err != nil {
 		return err
-	}
-	if !local {
-		var second bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
-			AND EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
-			WHERE m.room_id = ? AND k.remote_domain IS NOT NULL AND m.key_id != ?)`, roomID, roomID, key).Scan(&second); err != nil {
-			return err
-		}
-		if second {
-			return refused("member event: a direct conversation has one bot of the host, not %s too", p.Address)
-		}
 	}
 	var bot, ours, invited bool
 	var kind string
@@ -709,6 +762,26 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 	return err
 }
 
+// fits refuses address, a member or author of replica roomID, unless
+// the replica takes it: a direct conversation takes the two bots of its
+// pair, a feed its bot, a room anyone. Our bots join a feed by invite,
+// so its members of this server are not asked here.
+func fits(ctx context.Context, q fedrooms.DB, roomID, address string) error {
+	var pair, feed string
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(pair, ''), COALESCE(feed, '') FROM rooms WHERE id = ?`, roomID).
+		Scan(&pair, &feed); err != nil {
+		return err
+	}
+	a, b, _ := strings.Cut(strings.TrimPrefix(pair, fedrooms.DirectPrefix), "~")
+	switch {
+	case pair != "" && address != a && address != b:
+		return refused("%s is not of the pair %s", address, pair)
+	case feed != "" && address != feed:
+		return refused("%s is not the bot of the feed of %s", address, feed)
+	}
+	return nil
+}
+
 // localMember is whether replica ? has a member of this server.
 const localMember = `EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
 	WHERE m.room_id = ? AND k.remote_domain IS NULL)`
@@ -720,9 +793,12 @@ const localMember = `EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.i
 // stays. A removal of our bot from a feed at seq, logged at or
 // before the host's latest invite of it (its follow's admitted_seq), is
 // older than that invite: it came late, after our bot unfollowed and
-// followed again, and changes nothing. ponytail: admitted_seq is one per
-// follow, compared in any replica of the feed; at worst our bot stays a
-// member of an older replica, as an archived one keeps its members.
+// followed again, and changes nothing. admitted_seq is that of the
+// replica our bot was last admitted to (handleRoomInvite).
+// ponytail: it is compared in any replica of the feed, so a removal from
+// an older replica at or below the newer one's seq changes nothing: at
+// worst our bot stays a member of the older one, as an archived one keeps
+// its members. Store the replica id with admitted_seq if that matters.
 func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID, host string, seq int64, payload json.RawMessage) error {
 	var p fedrooms.RemovePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -831,11 +907,12 @@ func refusedBot(ctx context.Context, db fedrooms.DB, address string) error {
 	return err
 }
 
-// applyMessage stores a message of the replica. Its author signature is
-// checked first; then its author key is found or created, and reply_to
-// translated to our id. A reply_to we do not have is dropped. A
-// signature stored here with another host id is a replay: refused. A
-// blanked event (applyEvent applies it as a delete) stores nothing.
+// applyMessage stores a message of the replica. Its author must fit the
+// replica (fits) and its author signature is checked; then its author
+// key is found or created, and reply_to translated to our id. A reply_to
+// we do not have is dropped. A signature stored here with another host
+// id is a replay: refused. A blanked event (applyEvent applies it as a
+// delete) stores nothing.
 func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MessagePayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
@@ -843,6 +920,9 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 	}
 	if p.Deleted {
 		return nil
+	}
+	if err := fits(ctx, s.db, roomID, p.Author); err != nil {
+		return err
 	}
 	unverified, err := s.checkAuthor(ctx, roomID, host, p)
 	if err != nil {
@@ -980,15 +1060,21 @@ func localMetadata(wire json.RawMessage, reply *int64) ([]byte, error) {
 }
 
 // pull fetches and applies the events of replica roomID after the last
-// it applied from its host, page by page, until a page brings nothing
-// new. Each asks for pages within what this server reads (max). Refused
-// events go to rf. It returns the last seq applied.
-func (s *Service) pull(ctx context.Context, roomID, host string, rf *refusals) (int64, error) {
+// it applied from its host, page by page, at most pages of them, until a
+// page brings nothing new. Each asks for pages within what this server
+// reads (max). One pull of a replica runs at a time: while one runs,
+// another returns at once. Refused events go to rf. It returns the last
+// seq applied.
+func (s *Service) pull(ctx context.Context, roomID, host string, pages int, rf *refusals) (int64, error) {
 	var applied int64
 	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&applied); err != nil {
 		return 0, err
 	}
-	for range maxPullPages {
+	if _, busy := s.pulling.LoadOrStore(roomID, struct{}{}); busy {
+		return applied, nil
+	}
+	defer s.pulling.Delete(roomID)
+	for range pages {
 		status, body, err := s.sendSigned(ctx, http.MethodGet, host,
 			fmt.Sprintf("/fed/v1/rooms/%s/events?since=%d&max=%d", roomID, applied, s.eventsLimit()), nil, s.eventsLimit())
 		if err != nil {
@@ -1065,7 +1151,7 @@ func (s *Service) catchUp(ctx context.Context) {
 				}
 				pctx, cancel := context.WithTimeout(hctx, pullTimeout)
 				rf := &refusals{}
-				if _, err := s.pull(pctx, room, host, rf); err != nil && ctx.Err() == nil {
+				if _, err := s.pull(pctx, room, host, maxPullPages, rf); err != nil && ctx.Err() == nil {
 					s.logger.Warn("federation catch-up failed", "room", room, "host", host, "err", err)
 				}
 				cancel()
@@ -1252,8 +1338,9 @@ type blockCounts struct {
 
 // blockBot blocks address, a bot of another server, for the admin key
 // actor, and cuts it off. In one transaction its row is stored, its
-// stand-in revoked and taken out of the replicas here, and the follows
-// from and to it end, our bots leaving the replicas of its feed. Then
+// stand-in revoked and taken out of the replicas here, our replicas of
+// direct conversations with it archived, and the follows from and to it
+// end, our bots leaving the replicas of its feed. Then
 // its stand-in leaves each room hosted here with a member.remove event
 // (leaveHosted), and its server is told, best effort, that our bots
 // withdraw their pending follows of it and leave its feed. It reports
@@ -1332,6 +1419,11 @@ func (s *Service) blockBot(ctx context.Context, address, note string, actor int6
 	if err == nil {
 		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE feed = ? AND home_domain IS NOT NULL`,
 			now, address)
+	}
+	if err == nil { // so are our replicas of the conversations with it: our bots no longer write to it there
+		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?1) WHERE kind = 'direct'
+			AND home_domain = ?3 AND instr('~' || substr(pair, length(?4) + 1) || '~', '~' || ?2 || '~') > 0`,
+			now, address, domain, fedrooms.DirectPrefix)
 	}
 	if err == nil {
 		err = tx.Commit()
@@ -1536,7 +1628,7 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 	}
 	if gap {
 		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
-		if _, err := s.pull(pctx, roomID, host, rf); err != nil {
+		if _, err := s.pull(pctx, roomID, host, maxPullPages, rf); err != nil {
 			s.logger.Warn("federation room pull failed", "room", roomID, "host", host, "err", err)
 		}
 		cancel()

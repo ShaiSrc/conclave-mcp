@@ -551,7 +551,7 @@ func TestDelivery_ReceiverLimit(t *testing.T) {
 			if via == "push" {
 				for i := 0; i < 10 && a.svc.deliverDue(ctx) == 0; i++ {
 				}
-			} else if _, err := b.svc.pull(ctx, room, a.svc.Domain(), &refusals{}); err != nil {
+			} else if _, err := b.svc.pull(ctx, room, a.svc.Domain(), maxPullPages, &refusals{}); err != nil {
 				t.Fatalf("pull: %v", err)
 			}
 			if applied := appliedSeq(t, b, room); applied != int64(len(evs)) {

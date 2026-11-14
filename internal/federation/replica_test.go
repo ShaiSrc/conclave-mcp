@@ -432,11 +432,11 @@ func TestReplicaEvents_GapThenPull(t *testing.T) {
 		t.Fatalf("first push: applied %d", got)
 	}
 	// 3 to 148 never came: the replica applies nothing past the gap and
-	// pulls since 2, page by page.
+	// pulls since 2, page by page, two pages at most.
 	if got := h.push(t, g, room, log[148], log[149]); got != 150 {
 		t.Errorf("push after a gap: applied %d, want 150", got)
 	}
-	want := []string{room + " 2", room + " 102", room + " 150"}
+	want := []string{room + " 2", room + " 102"}
 	if got := h.pulled(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("pulls %v, want %v", got, want)
 	}
@@ -659,13 +659,19 @@ func TestReplicaEvents_MembersAndRoom(t *testing.T) {
 		{roomEv(9, "taken", false), func() string { n, a := roomState(); return fmt.Sprintf("%s %v", n, a) }},
 		// The last bot of ours leaves: the replica is archived.
 		{removeEv(10, "b1@"+local), func() string { n, a := roomState(); return fmt.Sprintf("%s %s %v", rightsOf("b1@"+local), n, a) }},
-		// Invited again (the invite came first): active again.
+		// Invited again: active again, and the member event that follows
+		// the invite is applied.
 		{memberEv(11, "b1@"+local, "read"), func() string { n, a := roomState(); return fmt.Sprintf("%s %s %v", rightsOf("b1@"+local), n, a) }},
 		{roomEv(12, "taken", true), func() string { n, a := roomState(); return fmt.Sprintf("%s %v", n, a) }},
 	}
 	want := []string{"read", "read,answer", "read", "read", "-", "-", "-", "renamed false", "taken@" + host + " false",
 		"- taken@" + host + " true", "read taken@" + host + " false", "taken true"}
 	for i, st := range steps {
+		if st.ev.Seq == 11 { // an archived replica takes no events: the host invites b1 first
+			if rec := h.invite(t, g, room, "taken", "b1", "read"); rec.Code != http.StatusCreated {
+				t.Fatalf("step %d: invite: %d %s", i+1, rec.Code, rec.Body)
+			}
+		}
 		if got := h.push(t, g, room, st.ev); got != st.ev.Seq {
 			t.Fatalf("step %d: applied %d", i+1, got)
 		}

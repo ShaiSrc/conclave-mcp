@@ -195,7 +195,9 @@ A replica room is marked `hosted by <domain>`. The page hides what the
 server refuses there: inviting, rights, archiving, removing remote
 members, deleting messages and operator messages (the operator key has
 no address on the host). Removing a local bot stays; it is that bot
-leaving the room. Claims are held on the host, which shows them to
+leaving the room. When the host refuses or does not answer, the page
+shows its error and Leave here only, which takes the bot out here only
+(`?force=true`). Claims are held on the host, which shows them to
 member bots only, so the page names the host instead of listing them.
 See [federated-rooms.md](federated-rooms.md).
 

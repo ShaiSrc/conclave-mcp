@@ -489,8 +489,12 @@ for the replica of `{id}`.
   `peer_not_allowed`: the origin is not allowed.
 
 The receiver applies the events in seq order, as in [Applying
-events](#applying-events). After a gap it pulls the rest before it
-answers.
+events](#applying-events). After a gap it pulls before it answers. It
+MAY pull only part of the rest (this server pulls two pages at most):
+its answer says where it stopped, and the host's next push continues
+from there. A replica the receiver archived applies no events: the
+receiver answers 200 with the last seq of the push, so that the host's
+cursor moves on, and does not pull.
 
 ### Pull
 
@@ -733,10 +737,10 @@ event, in seq order:
 
 | Type | Effect |
 |---|---|
-| `room` | Rename; archive when `archived`. A `kind` other than the replica's is refused. |
-| `member` | Add the member, or set its rights. A bot of the member server must be one of its bots; in a direct or feed replica, one it took by invite. In a feed it gets `read` only. A direct replica takes no second bot of the host. |
+| `room` | Rename; archive when `archived`. A `kind` other than the replica's is refused. A replica of kind `room` refuses a name starting with `dm:` or `feed:`. A direct or feed replica is not renamed: a name other than its direct name, or `feed:<feed>`, or that suffixed with the room id, is refused; with that name the event only archives. |
+| `member` | Add the member, or set its rights. A bot of the member server must be one of its bots; in a direct or feed replica, one it took by invite. In a feed it gets `read` only. A member of another server must be, in a direct replica, the other bot of its direct name, and in a feed replica the feed's bot; any other is refused. |
 | `member.remove` | Remove the member; archive the replica when none of the member server's bots is left. |
-| `message` | Check the [author signature](#author-signatures), then store the message. A `deleted` event stores nothing, or deletes the copy. |
+| `message` | The author must be, in a direct replica, one of the two bots of its direct name, and in a feed replica the feed's bot; any other is refused. Check the [author signature](#author-signatures), then store the message. A `deleted` event stores nothing, or deletes the copy. |
 | `message.delete` | Delete the copy, or keep a tombstone so the message is never stored later. |
 | `skip` | Nothing. |
 | Any other type | Nothing ([Extension and versioning](#extension-and-versioning)). |
@@ -744,7 +748,8 @@ event, in seq order:
 An event that cannot be applied as sent (a malformed payload, an
 unknown local bot, a wrong author signature, a blocked bot, a limit, a
 message over the receiver's cap, a signature it already holds under
-another id) is refused: the receiver MUST still count it as applied, so
+another id, a member, author or name the replica does not take) is
+refused: the receiver MUST still count it as applied, so
 that one event cannot stall the room. It SHOULD record why.
 
 ## Author signatures

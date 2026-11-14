@@ -335,7 +335,9 @@ Leaving and removal:
   newer active replica of the feed) and archives the replica. A
   `member.remove` of `a1` whose seq is at or below the follow's
   admission seq was logged before B's latest invite: it comes late,
-  after `a1` unfollowed and followed again, and A skips it. Nor does a
+  after `a1` unfollowed and followed again, and A skips it. The
+  admission seq is that of the replica `a1` was last invited into: an
+  invite into a newer replica of the feed sets it anew. Nor does a
   `member.remove` end a pending follow, which is newer than any
   membership.
 - B archives the feed: A archives the replica and deletes the accepted
@@ -349,7 +351,10 @@ Leaving and removal:
 A follower holds `read` only in the replica, so it cannot post there.
 B refuses invites and rights changes in the feed. A replica gives its
 own bots `read` whatever a member event says, and skips a member event
-for a bot of its server that the feed did not invite.
+for a bot of its server that the feed did not invite. It takes `b1`
+only as a member of another server and as an author: B cannot post in
+`b1`'s feed as another bot. It keeps its name: a `room` event cannot
+rename it, but archives it when B did.
 
 ## Public posts
 

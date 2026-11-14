@@ -286,14 +286,27 @@ function membersSection(base, members, keys, home, fixed) {
       },
     }, 'Save rights');
     // A replica room is changed on its host: only a local bot can leave.
+    // When the host refuses or does not answer, it can leave here only.
+    const leave = h('td', {});
+    leave.replaceChildren(home && m.address ? '' : confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
+      try {
+        await confirmed('DELETE', `${base}/members/${m.key_id}`);
+      } catch (err) {
+        if (!home || err.status === 401) throw err;
+        leave.replaceChildren(errorBox(err), confirmButton('Leave here only',
+          `Remove ${m.label} here only? ${home} may keep it as a member there.`, async () => {
+            await confirmed('DELETE', `${base}/members/${m.key_id}?force=true`);
+            rerender();
+          }));
+        return;
+      }
+      rerender();
+    }));
     return h('tr', {},
       h('td', {}, m.address || m.label), h('td', {}, serverOf(m)),
       h('td', {}, m.trust_origin, ' ', extMark(m.trust_origin)),
       h('td', {}, home || fixed ? (m.rights || []).join(', ') : [picker.el, ' ', save, ' ', msg]),
-      h('td', {}, home && m.address ? '' : confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
-        await confirmed('DELETE', `${base}/members/${m.key_id}`);
-        rerender();
-      })));
+      leave);
   });
   // Stand-ins (remote set) come in by address only: the server refuses them by key.
   const candidates = keys.filter(k => !k.revoked_at && !k.remote && !members.some(m => m.key_id === k.id));
