@@ -530,7 +530,7 @@ func (s *Service) applyBatch(ctx context.Context, roomID, host string, evs []fed
 		if !errors.As(err, &need) {
 			return applied, gap, err
 		}
-		_, _, _ = s.docs.get(ctx, need.domain, s.fetch.Document) // repinAuthor judges it, or its failure
+		ctx = s.authorDocument(ctx, need) // repinAuthor judges it, or its failure
 	}
 }
 

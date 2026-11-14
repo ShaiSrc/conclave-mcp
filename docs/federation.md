@@ -95,6 +95,7 @@ Federation is consent between operators. Each operator adds the other.
 6. Check the peering with `conclave-mcp federation peers ping <domain>`.
 
 Other commands: `federation status`, `federation rotate-key`,
+`federation forget-old-keys`,
 `peers list [--format json]`, `peers show <domain>`, `peers retry <domain>`,
 `peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]`,
 `peers block <domain>`, `peers remove <domain>`, `peers purge <domain> [--yes]`,
@@ -114,10 +115,12 @@ bot](#blocking-a-bot), [Key rotation](#key-rotation)). See
 | `open` | fetched, then verified; recorded as `seen` on its first valid request | verified | 403 |
 
 `blocked` always wins. In open mode the key first seen for a domain is
-the key the server keeps for it (trust on first use). A `seen` peer's
-key is stored and pinned like an `allowed` one's. Blocking, removing
-and purging are in the CLI and the admin API ([Blocking, removing and
-purging a peer](#blocking-removing-and-purging-a-peer)).
+the key the server keeps for it (trust on first use). Only the
+document's current key is taken on first contact: a request signed with
+a key the document lists as `previous` is 401 `bad_signature`. A `seen`
+peer's key is stored and pinned like an `allowed` one's. Blocking,
+removing and purging are in the CLI and the admin API ([Blocking,
+removing and purging a peer](#blocking-removing-and-purging-a-peer)).
 
 ## Server document
 
@@ -167,14 +170,14 @@ the new key only. The old key:
   ```
 
 - stays in the document as `previous` for 30 days, and in
-  `federation_keys` for good.
+  `federation_keys` until the operator forgets it (below).
 
 A second rotation within those 30 days answers 409 `rotation_too_soon`,
 so a peer never needs more than one step. `federation status` lists the
 keys with their status and, for a previous key, its end.
 
 A peer follows the rotation on our next request to it (verification
-step 4): it fetches our document, checks the endorsement with the key it
+step 6): it fetches our document, checks the endorsement with the key it
 has pinned, pins the new key, keeps the old one in its key history and
 audits `federation.key_rotated`. Nothing is asked of its operator. The
 endorsement stays on the current key after the 30 days, so a peer that
@@ -188,10 +191,31 @@ bots' signatures with any of its keys, and a peer's with the pinned key
 or a key in the peer's history, so messages signed before a rotation
 (snapshots, pulls, late proposals) still verify.
 
+`conclave-mcp federation forget-old-keys` (admin API
+`DELETE /v1/federation/keys/previous`; web UI: Forget old keys on the
+Federation page) deletes every key of this server but the current one,
+private keys included, and audits `federation.key.forget`. The document
+lists only the current key from then on, and our bots' messages signed
+with a forgotten key no longer verify here (a later snapshot or pull
+skips them as wrongly signed). It answers `{"key_id", "fingerprint",
+"keys", "dropped"}`. The rows are deleted with SQLite's secure delete
+and the write-ahead log is checkpointed, so the private keys leave the
+database files; backups made before keep them. Without it, old keys
+keep verifying, for history.
+
+After a key leak, rotate, then forget the old keys. A peer that had not
+re-pinned yet still accepts the leaked key until it does. It re-pins on
+our next request to it, since the current key keeps its endorsement;
+until then, or if it cannot, its operator re-pins by hand with
+`peers add <our domain> --fingerprint ...`. A peer that did re-pin keeps
+the leaked key in its key history, where it still verifies our bots'
+author signatures: its operator drops it with
+`peers forget-keys <our domain>`.
+
 A third server may see a peer's bots only through rooms another server
 hosts, and get no request from the peer itself. When a peer's bot's
 author signature verifies with none of its keys, the server needs the
-peer's document, the one kept for verification step 4 (fetched at most
+peer's document, the one kept for verification step 6 (fetched at most
 once per peer per minute), and adopts its current key by the same
 rules: endorsed by the pinned key with a valid signature, and not in
 the peer's history. It then re-pins (`federation.key_rotated`) and
@@ -216,7 +240,9 @@ When the author's document cannot be fetched this minute (the server is
 unreachable), a well-formed signature cannot be checked: the message is
 kept, marked unverified, as for a server whose key is not known, instead
 of being lost after a rotation. A malformed or missing signature is
-still skipped.
+still skipped. A fetch refused because the re-pin budget is used up, or
+the document cache is full, is no evidence of a rotation: the signature
+counts as wrong and the event is skipped.
 
 The key history keeps retired keys trusted for author signatures, so
 old messages still verify. When a retired key may have leaked, the
@@ -469,18 +495,31 @@ The server checks in this order and stops at the first failure.
 1. Parse the header. Malformed: 401 `bad_signature`.
 2. The origin must be a valid domain in canonical form. Otherwise 401 `bad_signature`.
 3. Peer policy. Blocked, or unknown in allowlist mode: 403 `peer_not_allowed`.
-   Unknown in open mode: fetch the origin's document (see the limits) and use its key.
-4. A known peer's key is the public key pinned when it was added or
+4. The destination, taken from the request's `Host` header, must be this
+   server's domain. Otherwise 421 `wrong_destination`.
+5. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
+   Both come before the key, so a request that fails them fetches no
+   document and spends no fetch budget.
+6. The key. Unknown in open mode: fetch the origin's document (see the
+   limits) and use its current key, the first; a key the document lists
+   only as `previous` is 401 `bad_signature`, an unreachable document
+   502 `peer_unreachable`, and a fetch over the first-contact budget 429
+   `rate_limited`.
+   A known peer's key is the public key pinned when it was added or
    first seen; nothing is fetched while the header's key ID is that
    key's. For another key ID the server needs the peer's document.
    Anyone can send such a request, so the document is fetched at most
    once per peer per minute and kept in memory for that minute (a failed
-   fetch too, for at most 1000 peers); every key presented meanwhile is
-   judged against the kept document, and requests that arrive while it
-   is fetched wait for that one fetch. A request with a made-up key thus
-   costs the peer nothing: its own request with its new key, a moment
-   later, is judged against the same document. The server re-pins when
-   all of these hold:
+   fetch too); every key presented meanwhile is judged against the kept
+   document, and requests that arrive while it is fetched wait for that
+   one fetch. A request with a made-up key thus costs the peer nothing:
+   its own request with its new key, a moment later, is judged against
+   the same document. The documents of peers that are not allowed have a
+   fetch budget of their own, apart from first contacts, so strangers
+   cannot use it up, and the cache keeps at most 1000 of them; allowed
+   peers always fit. A fetch refused for that budget or a full cache is
+   not kept: 429 `rate_limited` with `Retry-After`, nothing audited, and
+   a later request fetches. The server re-pins when all of these hold:
    - the presented key is the document's current key (its first);
    - that key's `endorsed_by.key_id` is the pinned key's ID, and
      `endorsed_by.sig` verifies with the pinned key
@@ -495,15 +534,13 @@ The server checks in this order and stops at the first failure.
    request reads the pin again: if it is now the presented key, it goes
    on with it. Anything else is 401 `bad_signature` and a warn log line,
    and the server audits `federation.key_changed` when the document
-   could not be fetched (once, by the request that fetched it) or names
-   the presented key as current without a valid endorsement (once per
-   key a minute). A document whose current key is another, the peer's
+   could not be fetched (once, by the request that fetched it, so at most
+   once per peer a minute and, for peers that are not allowed, within
+   their fetch budget) or names the presented key as current without a
+   valid endorsement (once per key a minute). A document whose current key is another, the peer's
    previous one included, is no evidence of a change: not audited. The
    operator re-pins by hand with `peers add <domain> --fingerprint ...`,
    which also keeps the replaced key in the history.
-5. The destination, taken from the request's `Host` header, must be this
-   server's domain. Otherwise 421 `wrong_destination`.
-6. `ts` within 300 seconds of now. Otherwise 401 `clock_skew`.
 7. Read the body, at most 64 KiB (413 `too_large`), and verify the
    signature. Otherwise 401 `bad_signature`. A room message may be
    64 KiB plus the message cap, a push of room events 64 KiB plus twice
@@ -637,12 +674,13 @@ requests from the peer an hour, or the peer's limit
 | `federation.room.*`, `federation.delivery.paused` | Federated rooms; see [federated-rooms.md](federated-rooms.md#audit-actions). |
 | `follow.request`, `follow.refused` | Follow requests of peers' bots; see [follow.md](follow.md#audit-actions). |
 | `federation.key.rotate` | An operator rotates the server's key. Target `federation_key`, the new key ID. Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
-| `federation.key_rotated` | A known peer was re-pinned to a new key its pinned key endorsed (verification step 4, or an author signature of its bot: [Key rotation](#key-rotation)). Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
+| `federation.key.forget` | An operator deleted the server's keys other than the current one. Target `federation_key`, the current key ID. Detail `{"dropped": n, "key_ids": [...]}`: [Key rotation](#key-rotation). |
+| `federation.key_rotated` | A known peer was re-pinned to a new key its pinned key endorsed (verification step 6, or an author signature of its bot: [Key rotation](#key-rotation)). Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
 | `federation.peer.limits` | An operator changed a peer's limits. Detail: the overrides now, `{"requests_per_minute","dm_invites_per_hour","follow_requests_per_hour"}`, `null` for a default. |
 | `federation.delivery.retry` | An operator retried delivery to a peer. Detail `{"cursors": n}`, the cursors made due. |
 | `federation.bot.block` | An operator blocked a bot of another server (again). Target `bot`, its address. Detail `{"note", "rooms", "replicas", "follows"}`: [Blocking a bot](#blocking-a-bot). |
 | `federation.bot.unblock` | An operator unblocked a bot of another server. Target `bot`, its address. |
-| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document names as current, or whose peer's document could not be fetched, or an author signature of its bot while its document's current key is another one (result `error:bad_signature`; a failed fetch once per peer a minute, a refused key once per peer and key a minute), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
+| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document names as current, or whose peer's document could not be fetched, or an author signature of its bot while its document's current key is another one (result `error:bad_signature`; a failed fetch once per peer a minute, a refused key once per peer and key a minute), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched, cut to a key ID's length (24 bytes). `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
 
 Other refused requests go to the server log at warn, at most one line per
 origin and error code per minute.
@@ -654,9 +692,9 @@ origin and error code per minute.
 | Request and response bodies | 64 KiB (bot and directory answers: 2 MiB) |
 | Clock skew | 300 seconds |
 | Rate per verified peer | 120 per minute, burst 30; a `seen` peer 30, burst 10; per peer: [Peer health and limits](#peer-health-and-limits) |
-| Document fetches for domains that are not allowed | 10 per minute on average, bursts of up to 10, server-wide |
+| Document fetches for domains that are not allowed | first contacts: 10 per minute on average, bursts of up to 10, server-wide; known peers' documents, on a key change: the same, apart from first contacts |
 | Operator lookups and adds | 30 per minute, burst 10, apart from the fetches above |
-| A known peer's document, on a key change | at most one fetch per peer per minute, kept for that minute, at most 1000 peers kept ([Verification order](#verification-order), step 4) |
+| A known peer's document, on a key change | at most one fetch per peer per minute, kept for that minute, at most 1000 peers that are not allowed kept ([Verification order](#verification-order), step 6) |
 | Third servers' documents that one host's replica events cause | 5 per minute, burst 5 ([Key rotation](#key-rotation)) |
 | Federation listener | read timeout 10 seconds, write timeout 15 seconds, headers at most 16 KiB |
 | Fetch timeout | 5 seconds, no redirects; room requests 30 seconds ([federated-rooms.md](federated-rooms.md#limits)); connecting and the TLS handshake 5 seconds for every request |

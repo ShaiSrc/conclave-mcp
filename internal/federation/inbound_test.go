@@ -206,7 +206,7 @@ func TestVerify_AllowedPeer(t *testing.T) {
 	}
 }
 
-// Step 4: a key other than the stored one, without an endorsement by
+// Step 6: a key other than the stored one, without an endorsement by
 // it, is refused. The peer's document lists the presented key, which is
 // evidence of a key change: audited, once per peer a minute.
 func TestVerify_KeyChanged(t *testing.T) {
@@ -243,7 +243,7 @@ func TestVerify_KeyChanged(t *testing.T) {
 	}
 }
 
-// Step 4: a known peer's stored key verifies its requests, whatever its
+// Step 6: a known peer's stored key verifies its requests, whatever its
 // document serves now; nothing is fetched.
 func TestVerify_UsesStoredKey(t *testing.T) {
 	svc := newLocal(t, "allowlist")
@@ -259,7 +259,7 @@ func TestVerify_UsesStoredKey(t *testing.T) {
 	}
 }
 
-// Step 5.
+// Step 4.
 func TestVerify_WrongDestination(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
@@ -271,7 +271,7 @@ func TestVerify_WrongDestination(t *testing.T) {
 	wantErr(t, serve(svc, req), http.StatusUnauthorized, "bad_signature")
 }
 
-// Step 6.
+// Step 5.
 func TestVerify_ClockSkew(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
@@ -364,7 +364,7 @@ func TestVerify_RateLimit(t *testing.T) {
 	}
 }
 
-// Steps 3 and 10, open mode: an unknown origin's document is fetched,
+// Steps 6 and 10, open mode: an unknown origin's document is fetched,
 // the request verified, and the origin recorded as seen and audited.
 func TestVerify_OpenModeFirstContact(t *testing.T) {
 	svc := newLocal(t, "open")
@@ -473,7 +473,7 @@ func TestVerify_LogsRefusalsOncePerOriginAndCode(t *testing.T) {
 	}
 }
 
-// Step 4: a request naming a key other than the stored one is refused.
+// Step 6: a request naming a key other than the stored one is refused.
 // Anyone can send one, so it is audited only when the peer's own
 // document lists that key, and the document is fetched at most once
 // per peer a minute.
@@ -609,5 +609,46 @@ func TestRun_StopsWithContext(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop")
+	}
+}
+
+// Steps 4 and 5 run before the key is looked for, which may fetch a
+// document: requests to another server or outside the time window, from
+// an unknown origin or with a key other than a seen peer's pinned one,
+// fetch nothing and spend no fetch budget.
+func TestVerify_DestinationAndTimeBeforeFetch(t *testing.T) {
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	stranger := newRemote(t)
+	old, cur, hits := rotatedPeer(t, nil)
+	if _, err := svc.peers.RecordSeen(context.Background(), old.Domain, old.Public); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []*Identity{stranger.id, cur} {
+		for range fetchesPerMinute + 1 {
+			wantErr(t, serve(svc, signed(t, id, "c.example", "{}")), http.StatusMisdirectedRequest, "wrong_destination")
+			wantErr(t, serve(svc, signedAt(id, time.Now().Unix()-301)), http.StatusUnauthorized, "clock_skew")
+		}
+	}
+	if n, m := stranger.hits.Load(), hits.Load(); n != 0 || m != 0 {
+		t.Errorf("documents fetched: %d, %d", n, m)
+	}
+	wantOK(t, serve(svc, signed(t, stranger.id, local, "{}")))
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+}
+
+// Open mode: a first contact pins only the document's current key; a
+// previous key the document still lists is refused.
+func TestVerify_FirstContactCurrentKeyOnly(t *testing.T) {
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	old, cur, _ := rotatedPeer(t, nil)
+	wantErr(t, serve(svc, signed(t, old, local, "{}")), http.StatusUnauthorized, "bad_signature")
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM federation_peers`); n != 0 {
+		t.Errorf("peers: %d", n)
+	}
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+	if p, err := svc.peers.Get(context.Background(), cur.Domain); err != nil || p.Fingerprint != cur.Fingerprint() {
+		t.Errorf("pinned %s %v, want the current key", p.Fingerprint, err)
 	}
 }

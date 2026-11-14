@@ -38,6 +38,7 @@ type Options struct {
 type Service struct {
 	db           *sql.DB
 	ident        atomic.Pointer[Identity] // swapped by a rotation; read it through id()
+	keysMu       sync.Mutex               // rotations and forgetting old keys, one at a time
 	mode         string
 	insecureHTTP bool
 	logger       *slog.Logger

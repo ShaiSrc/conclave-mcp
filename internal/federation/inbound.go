@@ -68,43 +68,44 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			return
 		}
 
-		// 4. A known peer's key is its stored key, used without a fetch,
-		// unless it signs with a new key its pinned one endorsed (repin).
-		// 3, open mode: an unknown origin's key comes from its document
-		// (TOFU).
-		pub := peer.PublicKey
-		if known {
-			if len(pub) != ed25519.PublicKeySize || p.KeyID != KeyIDFor(pub) {
-				if pub, err = s.repin(ctx, peer, p.KeyID); err != nil {
-					s.fail(w, r, err)
-					return
-				}
-				if pub == nil {
-					s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "not the peer's pinned key")
-					return
-				}
-			}
-		} else if pub, err = s.firstContactKey(ctx, origin, p.KeyID); err != nil {
-			switch {
-			case errors.Is(err, errUnknownKey):
-				s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", err.Error())
-			case errors.Is(err, ErrFetchLimited):
-				w.Header().Set("Retry-After", strconv.Itoa(int((time.Minute / fetchesPerMinute).Seconds())))
-				s.refuse(w, r, origin, http.StatusTooManyRequests, "rate_limited", "too many unknown origins, try again later")
-			default:
-				s.refuse(w, r, origin, http.StatusBadGateway, "peer_unreachable", "cannot fetch the origin's document")
-			}
-			return
-		}
-
-		// 5. Destination.
+		// 4. Destination and 5. timestamp, before the key: finding it may
+		// fetch a document, which anyone could otherwise make us do.
 		if d, err := NormalizeDomain(r.Host); err != nil || d != s.id().Domain {
 			s.refuse(w, r, origin, http.StatusMisdirectedRequest, "wrong_destination", "request is for another server")
 			return
 		}
-		// 6. Timestamp.
 		if !inWindow(p.TS) {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "clock_skew", "timestamp outside ±300 s")
+			return
+		}
+
+		// 6. A known peer's key is its stored key, used without a fetch,
+		// unless it signs with a new key its pinned one endorsed (repin).
+		// Open mode: an unknown origin's key is its document's current
+		// key (TOFU).
+		pub := peer.PublicKey
+		switch {
+		case !known:
+			pub, err = s.firstContactKey(ctx, origin, p.KeyID)
+		case len(pub) != ed25519.PublicKeySize || p.KeyID != KeyIDFor(pub):
+			pub, err = s.repin(ctx, peer, p.KeyID)
+		}
+		switch {
+		case errors.Is(err, ErrFetchLimited), errors.Is(err, errDocCacheFull):
+			w.Header().Set("Retry-After", strconv.Itoa(int((time.Minute / fetchesPerMinute).Seconds())))
+			s.refuse(w, r, origin, http.StatusTooManyRequests, "rate_limited", "too many document fetches, try again later")
+			return
+		case errors.Is(err, errUnknownKey):
+			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", err.Error())
+			return
+		case err != nil && known:
+			s.fail(w, r, err)
+			return
+		case err != nil:
+			s.refuse(w, r, origin, http.StatusBadGateway, "peer_unreachable", "cannot fetch the origin's document")
+			return
+		case pub == nil:
+			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "not the peer's pinned key")
 			return
 		}
 		// 7. Body and signature.
@@ -234,7 +235,8 @@ func (s *Service) admits(p Peer) bool {
 }
 
 // keyIn returns the key in doc whose key ID or fingerprint is want, or
-// nil. The Fetcher has checked that each key matches both.
+// nil. The Fetcher has checked that each key matches both. It serves the
+// operator's lookups, which may pin any key the document lists.
 func keyIn(doc Document, want string) ed25519.PublicKey {
 	for _, k := range doc.Keys {
 		if k.KeyID == want || k.Fingerprint == want {
@@ -246,13 +248,15 @@ func keyIn(doc Document, want string) ed25519.PublicKey {
 }
 
 // firstContactKey fetches the document of an unknown origin and returns
-// its key with ID keyID.
+// its current key (the first) when its ID is keyID. A previous key is
+// not taken: it may be the one that was rotated out after a leak.
 func (s *Service) firstContactKey(ctx context.Context, origin, keyID string) (ed25519.PublicKey, error) {
 	doc, err := s.fetch.Document(ctx, origin)
 	if err != nil {
 		return nil, err
 	}
-	if pub := keyIn(doc, keyID); pub != nil && KeyIDFor(pub) == keyID {
+	if k := doc.Keys[0]; k.KeyID == keyID {
+		pub, _ := b64.DecodeString(k.PublicKey) // checked by the Fetcher
 		return pub, nil
 	}
 	return nil, errUnknownKey
@@ -278,16 +282,23 @@ func retryAfterAt(lim *rate.Limiter, now time.Time) string {
 // meanwhile is judged against that fetch. The presented key is pinned
 // when it is the document's current key and adopt takes it. The change
 // is audited (federation.key_changed) too when the document cannot be
-// fetched, by the request that fetched it; a document whose current key
-// is another, the peer's previous key included, is no evidence.
+// fetched, by the request that fetched it, so at most once per peer a
+// minute and, for peers that are not allowed, within the re-pin budget;
+// a document whose current key is another, the peer's previous key
+// included, is no evidence. A fetch refused for the budget or the full
+// cache returns ErrFetchLimited or errDocCacheFull: nothing was learnt.
 func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed25519.PublicKey, error) {
 	if len(peer.PublicKey) != ed25519.PublicKeySize {
 		return nil, nil
 	}
-	doc, fetched, err := s.docs.get(ctx, peer.Domain, s.fetch.Document)
-	if err != nil {
+	doc, fetched, err := s.docs.get(ctx, peer.Domain, peer.Status == statusAllowed, s.fetch.peerDocument)
+	switch {
+	case errors.Is(err, ErrFetchLimited), errors.Is(err, errDocCacheFull):
+		return nil, err
+	case err != nil:
 		if fetched {
-			s.keyChanged(ctx, peer.Domain, presented, peer.Fingerprint, "error:bad_signature", "unreachable")
+			// presented is the sender's choice: cut to a key ID's length.
+			s.keyChanged(ctx, peer.Domain, presented[:min(len(presented), keyIDLen)], peer.Fingerprint, "error:bad_signature", "unreachable")
 		}
 		return nil, nil
 	}
@@ -298,8 +309,12 @@ func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed255
 }
 
 // needDocError is repinAuthor's error when the document of domain must
-// be fetched first, outside applyMu (applyBatch).
-type needDocError struct{ domain string }
+// be fetched first, outside applyMu (applyBatch); allowed is whether the
+// domain is an allowed peer.
+type needDocError struct {
+	domain  string
+	allowed bool
+}
 
 func (e *needDocError) Error() string { return "the document of " + e.domain + " is needed" }
 
@@ -316,10 +331,15 @@ func (e *needDocError) Error() string { return "the document of " + e.domain + "
 // When the document could not be fetched this minute, the signature cannot
 // be checked (unchecked): the caller keeps a well-formed one, marked
 // unverified, as for a server whose key we do not know, rather than lose a
-// message of a server that rotated while unreachable.
+// message of a server that rotated while unreachable. A fetch refused for
+// the budget or the full cache (noDocument) is no evidence: the signature
+// counts as wrong.
 func (s *Service) repinAuthor(ctx context.Context, host string, peer Peer) (pub ed25519.PublicKey, unchecked bool, err error) {
 	doc, ok, ferr := s.docs.peek(peer.Domain)
 	if !ok {
+		if ctx.Value(noDocument(peer.Domain)) != nil {
+			return nil, false, nil
+		}
 		lims, err := s.limitersOf(ctx, host)
 		if err != nil {
 			return nil, false, err
@@ -327,7 +347,7 @@ func (s *Service) repinAuthor(ctx context.Context, host string, peer Peer) (pub 
 		if !lims.repins.Allow() {
 			return nil, false, nil
 		}
-		return nil, false, &needDocError{peer.Domain}
+		return nil, false, &needDocError{peer.Domain, peer.Status == statusAllowed}
 	}
 	switch {
 	case ferr != nil: // unreachable this minute
@@ -394,6 +414,23 @@ func (s *Service) adopt(ctx context.Context, peer Peer, k DocKey) (ed25519.Publi
 	return pub, nil
 }
 
+// noDocument is a context key: its value is set when authorDocument
+// could not fetch the document of the domain for the budget or the full
+// cache.
+type noDocument string
+
+// authorDocument fetches the document need names into docs, for
+// applyBatch outside applyMu. When the fetch is refused for the budget
+// or the full cache, the context it returns marks the domain, so
+// repinAuthor counts the signature wrong instead of asking again.
+func (s *Service) authorDocument(ctx context.Context, need *needDocError) context.Context {
+	_, _, err := s.docs.get(ctx, need.domain, need.allowed, s.fetch.peerDocument)
+	if errors.Is(err, ErrFetchLimited) || errors.Is(err, errDocCacheFull) {
+		return context.WithValue(ctx, noDocument(need.domain), true)
+	}
+	return ctx
+}
+
 // keyChanged audits evidence that domain serves a key other than its
 // pinned one, and why it was not re-pinned (none for an operator's
 // lookup).
@@ -429,8 +466,10 @@ const maxGateKeys = 1000
 // repinAuthor, a failed fetch too, each for a minute: anyone can
 // present a key in a peer's name, so the document is fetched at most
 // once a minute and every key presented meanwhile is judged against it.
-// Concurrent callers share one fetch. It holds at most maxGateKeys
-// documents, dropping stale ones when full.
+// Concurrent callers share one fetch. A fetch refused for its budget
+// (ErrFetchLimited) fetched nothing and is not kept. It holds at most
+// maxGateKeys documents of peers that are not allowed, dropping stale
+// ones when full; allowed peers, chosen by the operator, always fit.
 type docCache struct {
 	mu   sync.Mutex
 	docs map[string]*cachedDoc
@@ -447,9 +486,10 @@ var errDocCacheFull = errors.New("too many peer documents cached")
 
 // get returns domain's document, fetching it with fetch unless one
 // from the last minute is cached; fetched reports whether this call
-// fetched it. The fetch does not end with ctx: a caller that goes away
-// must not leave a failure for the minute.
-func (c *docCache) get(ctx context.Context, domain string, fetch func(context.Context, string) (Document, error)) (doc Document, fetched bool, err error) {
+// fetched it. allowed exempts an allowed peer from the cap. The fetch
+// does not end with ctx: a caller that goes away must not leave a
+// failure for the minute.
+func (c *docCache) get(ctx context.Context, domain string, allowed bool, fetch func(context.Context, string) (Document, error)) (doc Document, fetched bool, err error) {
 	now := time.Now()
 	c.mu.Lock()
 	e, ok := c.docs[domain]
@@ -457,7 +497,7 @@ func (c *docCache) get(ctx context.Context, domain string, fetch func(context.Co
 		if c.docs == nil {
 			c.docs = make(map[string]*cachedDoc)
 		}
-		if len(c.docs) >= maxGateKeys {
+		if len(c.docs) >= maxGateKeys && !allowed {
 			for k, e := range c.docs {
 				if now.Sub(e.at) >= time.Minute {
 					delete(c.docs, k)
@@ -472,6 +512,13 @@ func (c *docCache) get(ctx context.Context, domain string, fetch func(context.Co
 		c.docs[domain] = e
 		c.mu.Unlock()
 		e.doc, e.err = fetch(context.WithoutCancel(ctx), domain)
+		if errors.Is(e.err, ErrFetchLimited) {
+			c.mu.Lock()
+			if c.docs[domain] == e {
+				delete(c.docs, domain)
+			}
+			c.mu.Unlock()
+		}
 		close(e.done)
 		return e.doc, true, e.err
 	}

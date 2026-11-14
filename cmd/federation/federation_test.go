@@ -241,3 +241,14 @@ func TestPeersForgetKeys(t *testing.T) {
 		t.Errorf("no domain: err=%v req=%q", err, req)
 	}
 }
+
+func TestForgetOldKeys(t *testing.T) {
+	out, req, err := runCmd(t, 200, `{"key_id":"ed25519:n","fingerprint":"SHA256:n","dropped":2}`, "forget-old-keys")
+	if err != nil || !strings.HasPrefix(req, "DELETE /v1/federation/keys/previous ") ||
+		out != "2 old keys forgotten; the current key is ed25519:n\n" {
+		t.Errorf("err=%v req=%q out=%q", err, req, out)
+	}
+	if _, req, err := runCmd(t, 200, `{}`, "forget-old-keys", "x"); err == nil || req != "" {
+		t.Errorf("with an argument: err=%v req=%q", err, req)
+	}
+}

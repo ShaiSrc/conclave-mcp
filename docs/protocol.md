@@ -142,7 +142,8 @@ A server key is an Ed25519 key (RFC 8032).
 
 A peer pins a key: the operator adds the peer by its fingerprint, or in
 open mode the key the peer first signs with is pinned (trust on first
-use). Requests are verified with the pinned key.
+use), which MUST be its document's current key. Requests are verified
+with the pinned key.
 
 ### Rotation
 
@@ -233,18 +234,21 @@ stored before the signature verifies.
 1. Parse the header. Malformed: 401 `bad_signature`.
 2. `origin` is a canonical domain. Otherwise 401 `bad_signature`.
 3. Peer policy. A blocked origin, or an unknown one in allowlist mode:
-   403 `peer_not_allowed`. An unknown origin in open mode: fetch its
-   document and take the key whose key ID is `key`, current or previous
-   (401 `bad_signature` when it lists none; 502 `peer_unreachable` when
-   the document cannot be fetched; 429 `rate_limited` when such fetches
-   are over their limit).
-4. A known peer's key is its pinned key, used without a fetch while
-   `key` is its key ID. For another key ID, [re-pin](#re-pinning) or
-   answer 401 `bad_signature`.
-5. Destination: the `Host` header, in canonical form, is the server's
+   403 `peer_not_allowed`.
+4. Destination: the `Host` header, in canonical form, is the server's
    domain. Otherwise 421 `wrong_destination`.
-6. `ts` within 300 seconds of the destination's clock. Otherwise 401
+5. `ts` within 300 seconds of the destination's clock. Otherwise 401
    `clock_skew`.
+6. The key. Steps 4 and 5 MUST come before it, so that a request
+   failing them causes no document fetch. An unknown origin in open
+   mode: fetch its document and take its current key, the first, when
+   its key ID is `key` (401 `bad_signature` otherwise, a previous key
+   included; 502 `peer_unreachable` when the document cannot be fetched;
+   429 `rate_limited` when such fetches are over their limit). A known
+   peer's key is its pinned key, used without a fetch while `key` is its
+   key ID. For another key ID, [re-pin](#re-pinning) or answer 401
+   `bad_signature`; 429 `rate_limited` when the peer's document cannot
+   be fetched now for the limit on such fetches.
 7. Read the body, at most 64 KiB, and verify the signature. A body over
    the cap: 413 `too_large`; one that cannot be read: 400 `bad_request`;
    a signature that does not verify: 401 `bad_signature`. The cap is
@@ -839,7 +843,7 @@ stay within them; a receiver MAY refuse beyond them.
 | Direct invites per peer | 100 an hour. |
 | Follow requests and withdrawals per peer | 100 an hour. |
 | Pending follow requests to a bot | 1000. |
-| Document fetches for domains not allowed | 10 a minute, server-wide. |
+| Document fetches for domains not allowed | 10 a minute, server-wide, for first contacts; 10 a minute, server-wide, apart from those, for known peers' key changes. |
 | A known peer's document on a key change | One fetch per peer a minute. |
 | Third servers' documents caused by one host's events | 5 a minute. |
 | Replicas per host on a member server | 200, archived ones included. |
