@@ -844,10 +844,11 @@ func TestForgetOldKeys(t *testing.T) {
 	var out struct {
 		KeyID   string   `json:"key_id"`
 		Dropped int      `json:"dropped"`
+		Erased  bool     `json:"erased"`
 		Keys    []DocKey `json:"keys"`
 	}
 	if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.KeyID != cur.KeyID || out.Dropped != 1 ||
-		len(out.Keys) != 1 || out.Keys[0].KeyID != cur.KeyID {
+		!out.Erased || len(out.Keys) != 1 || out.Keys[0].KeyID != cur.KeyID {
 		t.Fatalf("forget: %d %s", rec.Code, rec.Body)
 	}
 	if doc := docOf(t, g.svc); len(doc.Keys) != 1 || doc.Keys[0].KeyID != cur.KeyID || doc.Keys[0].EndorsedBy == nil {
@@ -858,7 +859,7 @@ func TestForgetOldKeys(t *testing.T) {
 		Scan(&targetType, &targetID, &detail); err != nil {
 		t.Fatal(err)
 	}
-	if want := fmt.Sprintf(`{"dropped":1,"key_ids":[%q]}`, old.KeyID); targetType != "federation_key" || targetID != cur.KeyID || detail != want {
+	if want := fmt.Sprintf(`{"dropped":1,"key_ids":[%q],"erased":true}`, old.KeyID); targetType != "federation_key" || targetID != cur.KeyID || detail != want {
 		t.Errorf("audit %s %s %s, want %s", targetType, targetID, detail, want)
 	}
 
@@ -903,4 +904,31 @@ func TestForgetOldKeys(t *testing.T) {
 		t.Errorf("forget again: %d %s", rec.Code, rec.Body)
 	}
 	wantStatus(t, adminDo(g.svc, nil, http.MethodDelete, "/v1/federation/keys/previous", ""), http.StatusForbidden)
+}
+
+// A checkpoint that a reader blocks leaves the old pages in the
+// write-ahead log: ForgetOldKeys says so instead of reporting them
+// erased, and a later run, without the reader, erases them.
+func TestForgetOldKeys_BlockedCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	db := testDB(t)
+	id, err := LoadOrCreateIdentity(ctx, db, local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, err = Rotate(ctx, db, id, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := db.QueryContext(ctx, `SELECT name FROM sqlite_master`)
+	if err != nil || !reader.Next() {
+		t.Fatalf("reader: %v", err)
+	}
+	_, dropped, erased, err := ForgetOldKeys(ctx, db, id)
+	if err != nil || len(dropped) != 1 || erased {
+		t.Fatalf("with a reader: dropped %v, erased %v, %v; want 1 dropped, not erased", dropped, erased, err)
+	}
+	_ = reader.Close()
+	if _, dropped, erased, err = ForgetOldKeys(ctx, db, id); err != nil || len(dropped) != 0 || !erased {
+		t.Errorf("without: dropped %v, erased %v, %v; want erased", dropped, erased, err)
+	}
 }

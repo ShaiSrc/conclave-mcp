@@ -198,10 +198,12 @@ private keys included, and audits `federation.key.forget`. The document
 lists only the current key from then on, and our bots' messages signed
 with a forgotten key no longer verify here (a later snapshot or pull
 skips them as wrongly signed). It answers `{"key_id", "fingerprint",
-"keys", "dropped"}`. The rows are deleted with SQLite's secure delete
-and the write-ahead log is checkpointed, so the private keys leave the
-database files; backups made before keep them. Without it, old keys
-keep verifying, for history.
+"keys", "dropped", "erased"}`. The rows are deleted with SQLite's secure
+delete and the write-ahead log is checkpointed, so the private keys
+leave the database files; backups made before keep them. `erased` is
+false when a reader blocked the checkpoint: old pages may stay in the
+log until the next checkpoint, so run it again (the CLI says so).
+Without it, old keys keep verifying, for history.
 
 After a key leak, rotate, then forget the old keys. A peer that had not
 re-pinned yet still accepts the leaked key until it does. It re-pins on

@@ -247,7 +247,7 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/ui/setup-tokens` | One-time token that registers the web UI's first passkey (409 once one exists). Loopback listen address only. | admin |
 | `GET` | `/v1/federation` | Domain, mode, own fingerprint and key ID, peer counts, and the keys (`current`, `previous` with `until`). 404 `federation_disabled` with federation off (all `/v1/federation*` routes). | admin |
 | `POST` | `/v1/federation/keys/rotate` | Make a new key current, endorsed by the old one; 409 `rotation_too_soon` within 30 days of the last rotation. | admin |
-| `DELETE` | `/v1/federation/keys/previous` | Delete this server's keys other than the current one, private keys included, and answer `{"key_id", "fingerprint", "keys", "dropped"}`. | admin |
+| `DELETE` | `/v1/federation/keys/previous` | Delete this server's keys other than the current one, private keys included, and answer `{"key_id", "fingerprint", "keys", "dropped", "erased"}` (`erased` false: a reader blocked the checkpoint, run it again). | admin |
 | `GET` | `/v1/federation/peers` | List peers with `last_seen_at`, `last_out_at`, `delivery`, `health` and effective `limits`. | admin |
 | `GET` | `/v1/federation/peers/{domain}` | One peer's view; 404 `peer_not_found`. | admin |
 | `PATCH` | `/v1/federation/peers/{domain}` | Set the peer's limits (`{"limits": {...}}`; `null` resets, 0 refuses). | admin |

@@ -306,12 +306,14 @@ func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 
 // handleForgetOwnKeys deletes this server's keys other than the current
 // one, private keys included (ForgetOldKeys): after a key leak, the
-// operator rotates and then forgets. It answers the keys now and how
-// many were dropped; audit federation.key.forget.
+// operator rotates and then forgets. It answers the keys now, how many
+// were dropped and whether their pages are erased from the database
+// files (false while a reader blocks the checkpoint: run it again);
+// audit federation.key.forget.
 func (s *Service) handleForgetOwnKeys(w http.ResponseWriter, r *http.Request) {
 	s.keysMu.Lock()
 	defer s.keysMu.Unlock()
-	id, dropped, err := ForgetOldKeys(r.Context(), s.db, s.id())
+	id, dropped, erased, err := ForgetOldKeys(r.Context(), s.db, s.id())
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
@@ -320,10 +322,11 @@ func (s *Service) handleForgetOwnKeys(w http.ResponseWriter, r *http.Request) {
 	detail, _ := json.Marshal(struct {
 		Dropped int      `json:"dropped"`
 		KeyIDs  []string `json:"key_ids"`
-	}{len(dropped), append([]string{}, dropped...)})
+		Erased  bool     `json:"erased"`
+	}{len(dropped), append([]string{}, dropped...), erased})
 	s.auditTarget(r.Context(), "federation.key.forget", "federation_key", id.KeyID, "", "ok", string(detail))
 	writeJSON(w, http.StatusOK, map[string]any{"key_id": id.KeyID, "fingerprint": id.Fingerprint(),
-		"keys": id.Document(s.now()).Keys, "dropped": len(dropped)})
+		"keys": id.Document(s.now()).Keys, "dropped": len(dropped), "erased": erased})
 }
 
 func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {

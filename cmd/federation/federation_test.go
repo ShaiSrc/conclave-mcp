@@ -243,10 +243,15 @@ func TestPeersForgetKeys(t *testing.T) {
 }
 
 func TestForgetOldKeys(t *testing.T) {
-	out, req, err := runCmd(t, 200, `{"key_id":"ed25519:n","fingerprint":"SHA256:n","dropped":2}`, "forget-old-keys")
+	out, req, err := runCmd(t, 200, `{"key_id":"ed25519:n","fingerprint":"SHA256:n","dropped":2,"erased":true}`, "forget-old-keys")
 	if err != nil || !strings.HasPrefix(req, "DELETE /v1/federation/keys/previous ") ||
 		out != "2 old keys forgotten; the current key is ed25519:n\n" {
 		t.Errorf("err=%v req=%q out=%q", err, req, out)
+	}
+	out, _, err = runCmd(t, 200, `{"key_id":"ed25519:n","fingerprint":"SHA256:n","dropped":2,"erased":false}`, "forget-old-keys")
+	if want := "2 old keys forgotten; the current key is ed25519:n\n" +
+		"their pages are not erased yet: a reader blocked the checkpoint; run forget-old-keys again\n"; err != nil || out != want {
+		t.Errorf("not erased: err=%v out=%q", err, out)
 	}
 	if _, req, err := runCmd(t, 200, `{}`, "forget-old-keys", "x"); err == nil || req != "" {
 		t.Errorf("with an argument: err=%v req=%q", err, req)

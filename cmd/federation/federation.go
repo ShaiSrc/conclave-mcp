@@ -327,11 +327,15 @@ func newForgetOldKeysCmd() *cobra.Command {
 				var resp struct {
 					KeyID   string `json:"key_id"`
 					Dropped int
+					Erased  bool
 				}
 				if _, err := c.Do(ctx, client.Request{Method: "DELETE", Path: "/v1/federation/keys/previous", Out: &resp}); err != nil {
 					return err
 				}
 				_, _ = fmt.Fprintf(out, "%d old keys forgotten; the current key is %s\n", resp.Dropped, resp.KeyID)
+				if !resp.Erased {
+					_, _ = fmt.Fprintln(out, "their pages are not erased yet: a reader blocked the checkpoint; run forget-old-keys again")
+				}
 				return nil
 			})
 		},
