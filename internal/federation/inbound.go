@@ -205,6 +205,10 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.fail(w, r, err)
 			return
 		}
+		// Contact retries a failed directory refresh of an allowed peer.
+		if known && peer.Status == statusAllowed {
+			s.retryDirectory(origin)
+		}
 
 		r.Body = io.NopCloser(bytes.NewReader(body))
 		next.ServeHTTP(w, r.WithContext(context.WithValue(ctx, originKey{}, origin)))

@@ -32,12 +32,10 @@ func TestInterop_ThreeServers(t *testing.T) {
 		t.Fatalf("c1's DM policy: %d %s", r.Status, r.Body)
 	}
 	// The first server of a pair to add the other has its directory
-	// refresh refused, as the other does not allow it yet; adding the
-	// peer again, as an operator may, refreshes it.
-	for range 2 {
-		for _, p := range [][2]*fedEnv{{a, b}, {b, a}, {a, c}, {c, a}, {b, c}, {c, b}} {
-			p[0].peer(p[1])
-		}
+	// refresh refused, as the other does not allow it yet; the other's
+	// first request retries it.
+	for _, p := range [][2]*fedEnv{{a, b}, {b, a}, {a, c}, {c, a}, {b, c}, {c, b}} {
+		p[0].peer(p[1])
 	}
 
 	// step runs fn as a subtest whose failures the servers' helpers

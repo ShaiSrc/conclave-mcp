@@ -715,3 +715,50 @@ func signedGet2(t *testing.T, id *Identity, domain, path string) *http.Request {
 	}
 	return req
 }
+
+// A refresh refused because the peer does not allow us yet is retried
+// when the peer contacts us, at most once a minute.
+func TestDirectory_RetriedOnContact(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	peer := newPeer(t, svc)
+	if err := peer.peers.Remove(ctx, svc.id().Domain); err != nil {
+		t.Fatal(err)
+	}
+	allow(t, svc, peer.id())
+	d := peer.id().Domain
+	svc.refreshLogged(ctx, d)
+	if _, ok := svc.dirFailed.Load(d); !ok {
+		t.Fatal("a refused refresh is not recorded")
+	}
+
+	allow(t, peer, svc.id())
+	ping := func() {
+		t.Helper()
+		if rec := serve(svc, signed(t, peer.id(), local, "{}")); rec.Code != 200 {
+			t.Fatalf("ping: %d %s", rec.Code, rec.Body)
+		}
+	}
+	ping()
+	select {
+	case got := <-svc.refresh:
+		if got != d {
+			t.Fatalf("refresh of %q, want %q", got, d)
+		}
+	default:
+		t.Fatal("contact did not retry the refresh")
+	}
+	svc.refreshLogged(ctx, d)
+	if _, ok := svc.dirFailed.Load(d); ok {
+		t.Fatal("a successful refresh stays recorded")
+	}
+
+	// A refresh that keeps failing is retried at most once a minute.
+	svc.dirFailed.Store(d, svc.now())
+	ping()
+	select {
+	case <-svc.refresh:
+		t.Fatal("retried within a minute")
+	default:
+	}
+}

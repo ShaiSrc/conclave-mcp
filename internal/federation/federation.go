@@ -46,6 +46,7 @@ type Service struct {
 	lookups      *rate.Limiter // operator lookups and adds
 	botStore     *bots.Store
 	refresh      chan string   // peers whose directory the refresh loop fetches next
+	dirFailed    sync.Map      // domain → time.Time: peers whose last refresh failed, and when contact last retried it
 	deliver      chan struct{} // wakes the delivery worker
 	applyMu      sync.Mutex    // one batch of replica events at a time
 	runMu        sync.Mutex

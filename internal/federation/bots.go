@@ -28,6 +28,7 @@ const (
 	maxDirectory   = 5000    // entries of /v1/directory
 	directoryEvery = 15 * time.Minute
 	refreshTimeout = 30 * time.Second // per peer and refresh
+	retryEvery     = time.Minute      // at most one refresh retried by a peer's contact
 	lookupsPerKey  = 60               // remote lookups per key and minute
 	lookupKeyBurst = 10
 )
@@ -355,9 +356,27 @@ func (s *Service) refreshDirectories(ctx context.Context) {
 func (s *Service) refreshLogged(ctx context.Context, domain string) {
 	peerCtx, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
-	if err := s.refreshDirectory(peerCtx, domain); err != nil && ctx.Err() == nil {
+	err := s.refreshDirectory(peerCtx, domain)
+	switch {
+	case err == nil:
+		s.dirFailed.Delete(domain)
+	case ctx.Err() == nil:
+		s.dirFailed.LoadOrStore(domain, time.Time{})
 		s.logger.Warn("federation directory refresh failed", "domain", domain, "err", err)
 	}
+}
+
+// retryDirectory refreshes domain's directory again on contact from it
+// when the last refresh failed, at most once a minute. Two servers that
+// add each other in turn would otherwise wait 15 minutes: the first
+// refresh is refused while the other does not allow us yet.
+func (s *Service) retryDirectory(domain string) {
+	v, ok := s.dirFailed.Load(domain)
+	if !ok || s.now().Sub(v.(time.Time)) < retryEvery {
+		return
+	}
+	s.dirFailed.Store(domain, s.now())
+	s.refreshSoon(domain)
 }
 
 // refreshDirectory reads up to 20 pages of domain's directory and

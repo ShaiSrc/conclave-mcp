@@ -140,8 +140,11 @@ bots of peers, each with its `address`; at most 5000 entries.
 ## The directory cache
 
 Each allowed peer's directory is cached in `remote_bots`. The server
-refreshes it every 15 minutes, and right after a peer is added. A refresh
-reads up to 20 pages of 50 bots, each answer up to 2 MiB, and takes at
+refreshes it every 15 minutes, and right after a peer is added. A failed
+refresh is retried when the peer next sends a signed request, at most
+once a minute; so when two servers add each other, the first one's
+refresh (refused while the other does not allow it yet) is retried by
+the other's first request. A refresh reads up to 20 pages of 50 bots, each answer up to 2 MiB, and takes at
 most 30 seconds per peer. Entries beyond 50 on a page are dropped (and
 logged), and at most 1000 bots of a peer are kept. On an error the old
 rows stay. Removing or blocking a peer deletes its rows. A bot that
