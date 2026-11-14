@@ -42,13 +42,14 @@ import (
 // Server is the Conclave MCP HTTP server. Construct with New and
 // call Start.
 type Server struct {
-	cfg    Config
-	logger *slog.Logger
-	router chi.Router
-	http   *http.Server
-	fed    *http.Server // the federation listener; nil with federation off
-	fedSvc *federation.Service
-	fedRun func(context.Context) // the federation loops, fedSvc.Run; nil with federation off
+	cfg       Config
+	logger    *slog.Logger
+	router    chi.Router
+	http      *http.Server
+	fed       *http.Server // the federation listener; nil with federation off
+	fedSvc    *federation.Service
+	fedRun    func(context.Context) // the federation loops, fedSvc.Run; nil with federation off
+	startedAt time.Time             // when New built the server, for GET /v1/server
 
 	mu      sync.Mutex
 	started bool
@@ -62,6 +63,9 @@ type Config struct {
 	ReadHeader  time.Duration // default 5s
 	IdleTimeout time.Duration // default 120s
 	Logger      *slog.Logger
+	// Version is the build's version, answered by GET /v1/server to
+	// admin keys only: never in /healthz or the server document.
+	Version string
 
 	// Federation. An empty FederationDomain turns it off: no second
 	// listener, no key.
@@ -84,7 +88,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		cfg.IdleTimeout = 120 * time.Second
 	}
 
-	s := &Server{cfg: cfg, logger: cfg.Logger}
+	s := &Server{cfg: cfg, logger: cfg.Logger, startedAt: time.Now().UTC()}
 
 	// The web UI and its sessions exist only on a loopback
 	// listen address (docs/web-ui.md).
@@ -306,6 +310,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		if uiSvc != nil {
 			uiSvc.V1Routes(r)
 		}
+		r.Get("/server", s.handleServerInfo(deps.DB))
 
 		// 404/405 envelopes apply AFTER the routes are mounted,
 		// otherwise the NotFound handler shadows the routes.
@@ -451,6 +456,31 @@ func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 // methodNotAllowed returns 405.
 func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, s.logger, http.StatusMethodNotAllowed, "bad_request", "method not allowed")
+}
+
+// handleServerInfo answers GET /v1/server to admin keys: the version,
+// the schema version from meta, the start time and the federation
+// settings. With federation off, domain and mode are empty; protocol is
+// the one this build speaks.
+func (s *Server) handleServerInfo(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !auth.IsAdmin(r.Context()) {
+			writeError(w, r, s.logger, http.StatusForbidden, "forbidden", "admin key required")
+			return
+		}
+		var schema int
+		if err := db.QueryRowContext(r.Context(), `SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'`).Scan(&schema); err != nil {
+			writeError(w, r, s.logger, http.StatusInternalServerError, "internal_error", "internal error")
+			return
+		}
+		fed := map[string]any{"enabled": s.fedSvc != nil, "domain": "", "mode": "", "protocol": federation.Protocol}
+		if s.fedSvc != nil {
+			fed["domain"], fed["mode"] = s.fedSvc.Domain(), s.cfg.FederationMode
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"version": s.cfg.Version, "schema_version": schema,
+			"started_at": s.startedAt.Format(time.RFC3339), "federation": fed})
+	}
 }
 
 func (s *Server) handleHealthz(deps Deps) http.HandlerFunc {

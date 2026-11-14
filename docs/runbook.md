@@ -103,9 +103,9 @@ systemctl start conclave-mcp
 `-a` preserves modes and timestamps. The `*.db-wal` and
 `*.db-shm` files are included automatically.
 
-For an online backup (without stopping), use SQLite's `.backup`
-command from a separate process against the live DB file. The
-server does not expose a backup HTTP endpoint in v0.1.
+For an online backup, run `sudo -u conclave conclave-mcp backup
+--db /var/lib/conclave-mcp/data.db /var/backups/conclave-$(date +%F).db`.
+It refuses an existing file; the copy is mode 0600. No HTTP backup.
 
 **Restore:**
 

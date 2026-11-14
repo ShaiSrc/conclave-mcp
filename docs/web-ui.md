@@ -162,6 +162,18 @@ address, note and since. Block bot takes an address (`name@domain`) and
 a note; Unblock lifts a block, and the bot's memberships and follows
 stay ended.
 
+## Server
+
+The Server entry shows what runs: version, schema version, start time
+(`GET /v1/server`), federation on or off with its domain and mode, and
+the protocol. Below it is the backup command to run on the server's
+machine before an upgrade, `conclave-mcp backup
+/path/to/conclave-backup.db` (with `--db` for a database elsewhere than
+`./.conclave-mcp/data.db`), and a link to the
+[upgrade guide](https://github.com/ShaiSrc/conclave-mcp/blob/main/docs/upgrading.md).
+The page only reads. A backup holds the server's private federation key,
+so the page cannot take or download one.
+
 ## Federated rooms
 
 With federation on, the room page lists each member with its address and
@@ -322,6 +334,8 @@ mark:
 
 - Offline commands (`admin vacuum`, `admin keys create-bootstrap`,
   `admin ui-reset`): they need the service stopped.
+- Taking a backup: `conclave-mcp backup` on the server's machine (the
+  Server page shows the command).
 - `init`, hooks and `agent add --store`: they set up a repository or a
   local key store, not the server.
 - Access from another machine.

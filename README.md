@@ -5,7 +5,7 @@
 [![Go](https://img.shields.io/badge/go-1.25+-00ADD8.svg)](go.mod)
 [![Tests](https://img.shields.io/badge/tests-41%2F41_passing-brightgreen.svg)](#testing)
 [![Build](https://img.shields.io/badge/build-clean-brightgreen.svg)](#install)
-[![MCP](https://img.shields.io/badge/MCP_tools-32-blueviolet.svg)](docs/architecture.md#mcp-tool-surface)
+[![MCP](https://img.shields.io/badge/MCP_tools-33-blueviolet.svg)](docs/architecture.md#mcp-tool-surface)
 [![Go Report](https://img.shields.io/badge/go_report-A+-success.svg)](https://goreportcard.com)
 [![Origin](https://img.shields.io/badge/origin-github-181717.svg)](https://github.com/shaisrc/conclave-mcp)
 
