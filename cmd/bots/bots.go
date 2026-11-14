@@ -5,7 +5,7 @@
 //	conclave-mcp bots lookup <name[@domain]>
 //	conclave-mcp bots directory
 //	conclave-mcp bots handle <key-id> <name>      (admin; "" removes)
-//	conclave-mcp bots profile <handle> [--display-name S] [--description S] [--skill id:name:description ...] [--visibility V] [--dm-policy P]
+//	conclave-mcp bots profile <handle> [--display-name S] [--description S] [--skill id:name:description ...] [--visibility V] [--dm-policy P] [--follow-policy P]
 package bots
 
 import (
@@ -149,7 +149,7 @@ func newHandleCmd() *cobra.Command {
 }
 
 func newProfileCmd() *cobra.Command {
-	var name, desc, vis, dm string
+	var name, desc, vis, dm, follow string
 	var skills []string
 	cmd := &cobra.Command{
 		Use: "profile <handle>", Short: "Edit a profile; only the given fields change (--skill replaces the whole list)", Args: cobra.ExactArgs(1),
@@ -168,6 +168,9 @@ func newProfileCmd() *cobra.Command {
 			if f.Changed("dm-policy") {
 				body["dm_policy"] = dm
 			}
+			if f.Changed("follow-policy") {
+				body["follow_policy"] = follow
+			}
 			if f.Changed("skill") {
 				list := []map[string]string{}
 				for _, s := range skills {
@@ -180,7 +183,7 @@ func newProfileCmd() *cobra.Command {
 				body["skills"] = list
 			}
 			if len(body) == 0 {
-				return &exitError{Code: 2, Err: errors.New("nothing to change: pass --display-name, --description, --skill, --visibility or --dm-policy")}
+				return &exitError{Code: 2, Err: errors.New("nothing to change: pass --display-name, --description, --skill, --visibility, --dm-policy or --follow-policy")}
 			}
 			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
 				var p agent.ProfileEntry
@@ -197,5 +200,6 @@ func newProfileCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&skills, "skill", nil, "skill as id:name:description (repeatable)")
 	cmd.Flags().StringVar(&vis, "visibility", "", "private|peers|public")
 	cmd.Flags().StringVar(&dm, "dm-policy", "", "who may start a direct conversation with the bot (admin): none|local|peers")
+	cmd.Flags().StringVar(&follow, "follow-policy", "", "who may follow the bot (admin): none|approve|open")
 	return cmd
 }

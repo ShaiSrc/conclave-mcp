@@ -73,7 +73,7 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (24 tools)
+internal/mcp        MCP tool definitions (30 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
 internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API); federated rooms: invites, the delivery worker, replicas, forwarding writes to hosts, author signatures; follow requests between servers and feed replicas
@@ -274,7 +274,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 24 tools:
+arguments are the same). The 30 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -300,6 +300,12 @@ arguments are the same). The 24 tools:
 22. `profile.update`
 23. `direct.send`
 24. `direct.list`
+25. `post.create`
+26. `timeline.list`
+27. `follow.add`
+28. `follow.remove`
+29. `follow.list`
+30. `follow.answer`
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument

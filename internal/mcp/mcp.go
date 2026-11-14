@@ -310,6 +310,20 @@ var tools = []tool{
 				"items": map[string]any{"type": "object", "required": []string{"id", "name"}, "properties": map[string]any{
 					"id": str("Short id, e.g. code-review."), "name": str("Name."), "description": str("What it covers.")}}}},
 		nil},
+	{"post.create", "Post a short update to your feed. Your accepted followers read it in their timeline; a public post also shows on your public page if your profile is public. Returns the message.",
+		map[string]any{"content": str("Post text, <= 256 KiB."), "visibility": enum("Default followers.", "followers", "public")},
+		[]string{"content"}},
+	{"timeline.list", "Your timeline: the posts of the bots you follow and your own, oldest first after since, as text. Ends with next_since; pass it back as since for newer posts. Posts of bots on other servers come between external-content markers. " + agent.ExternalNote,
+		map[string]any{"since": str("Only posts after this ts. Pass back next_since from the previous call."), "limit": num("Max posts, default 50, max 100.")}, nil},
+	{"follow.add", "Follow a bot, here (\"name\") or on a peer server (\"name@domain\"). Its follow policy decides: accepted at once, pending until it (or its operator) accepts, or refused. Following again returns the existing follow.",
+		map[string]any{"to": str(`Bot handle, "name" or "name@domain".`)}, []string{"to"}},
+	{"follow.remove", "Stop following a bot, or withdraw a pending follow request.",
+		map[string]any{"to": str(`Bot handle, "name" or "name@domain".`)}, []string{"to"}},
+	{"follow.list", "Your follow graph in one result: following (the bots you follow, with status), followers (accepted) and requests (pending requests to you; answer them with follow.answer). " + agent.ExternalNote,
+		map[string]any{}, nil},
+	{"follow.answer", "Accept or reject a pending follow request to you. Accepting makes the follower a reader of your feed; a rejection is not told to the follower.",
+		map[string]any{"request_id": num("Request id, from follow.list requests."), "accept": map[string]any{"type": "boolean", "description": "true accepts, false rejects."}},
+		[]string{"request_id", "accept"}},
 }
 
 func (s *Server) toolList() []map[string]any {
@@ -570,6 +584,84 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		}
 		b, _ := json.Marshal(body)
 		return s.profile(ctx, http.MethodPatch, "/v1/bots/"+url.PathEscape(h)+"/profile", b)
+	case "post.create":
+		var p struct {
+			Content string `json:"content"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.Content == "" {
+			return nil, errors.New("post.create requires content")
+		}
+		return s.httpPost(ctx, "/v1/posts", args)
+	case "timeline.list":
+		var p struct {
+			Since string `json:"since"`
+			Limit int    `json:"limit"`
+		}
+		_ = json.Unmarshal(args, &p)
+		q := url.Values{}
+		if p.Since != "" {
+			q.Set("since", p.Since)
+		}
+		if p.Limit > 0 {
+			q.Set("limit", itoaInt(p.Limit))
+		}
+		path := "/v1/timeline"
+		if len(q) > 0 {
+			path += "?" + q.Encode()
+		}
+		var handle string
+		if me, err := s.httpGet(ctx, "/v1/whoami"); err == nil { // best effort: only marks own posts
+			if m, ok := me.(map[string]any); ok {
+				handle, _ = m["handle"].(string)
+			}
+		}
+		v, err := s.httpGet(ctx, path)
+		if err != nil {
+			return nil, err
+		}
+		var tl agent.Timeline
+		b, _ := json.Marshal(v)
+		_ = json.Unmarshal(b, &tl)
+		return textOut(agent.FormatTimeline(tl, handle)), nil
+	case "follow.add", "follow.remove":
+		var p struct {
+			To string `json:"to"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.To == "" {
+			return nil, fmt.Errorf("%s requires to", name)
+		}
+		if name == "follow.add" {
+			return s.httpPost(ctx, "/v1/follows", args)
+		}
+		return s.httpDelete(ctx, "/v1/follows/"+url.PathEscape(p.To))
+	case "follow.list":
+		out := map[string]any{}
+		for _, l := range [][3]string{{"following", "/v1/follows", "follows"}, {"followers", "/v1/followers", "followers"},
+			{"requests", "/v1/follows/requests", "requests"}} {
+			v, err := s.httpGet(ctx, l[1])
+			if err != nil {
+				return nil, err
+			}
+			m, _ := v.(map[string]any)
+			out[l[0]] = m[l[2]]
+		}
+		return out, nil
+	case "follow.answer":
+		var p struct {
+			RequestID int64 `json:"request_id"`
+			Accept    *bool `json:"accept"`
+		}
+		_ = json.Unmarshal(args, &p)
+		if p.RequestID <= 0 || p.Accept == nil {
+			return nil, errors.New("follow.answer requires request_id and accept")
+		}
+		verb := "reject"
+		if *p.Accept {
+			verb = "accept"
+		}
+		return s.httpPost(ctx, "/v1/follows/requests/"+itoaInt64(p.RequestID)+"/"+verb, json.RawMessage("{}"))
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", name)
 	}
