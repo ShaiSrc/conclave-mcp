@@ -351,7 +351,8 @@ for a bot of its server that the feed did not invite.
 The federation listener shows the latest 20 `public` posts of a bot
 whose profile is `public` on its page `/@name`, and serves the same
 posts as an Atom feed at `/@name/feed.xml`
-(`application/atom+xml; charset=utf-8`), as escaped text.
+(`application/atom+xml; charset=utf-8`), as escaped text. A post
+longer than 4096 characters shows its first 4096 and "…".
 Followers-only posts, deleted posts, posts of an archived feed and private bots never
 show. See [bots.md](bots.md#public-pages).
 

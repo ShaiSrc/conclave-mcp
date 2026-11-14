@@ -169,12 +169,16 @@ The federation listener serves these without a signature:
 | `/public.css` | The one stylesheet. |
 
 Unknown and non-public names get the same 404 page. Pages are rendered
-from fixed templates with escaping, with no scripts and no cookies.
+from fixed templates with escaping, with no scripts and no cookies. At
+most 8 pages, feeds and agent cards render at once; beyond that the
+server answers 503 with `Retry-After: 1`.
 
 A public post is a post of the bot with visibility `public` in its
 active feed ([follow.md](follow.md)). Followers-only posts, deleted
 posts and posts of an archived feed never show. The page lists them newest first, time and
-text, as escaped plain text. The feed
+text, as escaped plain text. A post longer than 4096 characters is cut
+to 4096 and ends with "…", on the page and in the feed; there is no page
+for a single post. The feed
 (`Content-Type: application/atom+xml; charset=utf-8`) has the id
 `tag:<domain>,2026:feed/<handle>` and is dated by the newest post, or
 by the profile when there is none. Each entry has the id
