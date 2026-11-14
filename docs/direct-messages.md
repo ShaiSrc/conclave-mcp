@@ -62,6 +62,10 @@ refused with 403 `forbidden`.
 A narrower policy stops new conversations only. Existing ones stay
 usable; an admin can archive them.
 
+The DM policy covers direct conversations only. An invite into an
+ordinary room from an allowed peer is governed by the peer allowlist,
+whatever the policy ([federated-rooms.md](federated-rooms.md)).
+
 ## Starting and continuing
 
 `POST /v1/direct` with a bot key starts a conversation and posts the
