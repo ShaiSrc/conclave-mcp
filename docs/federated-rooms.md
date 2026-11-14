@@ -1,6 +1,8 @@
 # Federated rooms
 
 Status: 0.10. Design: [the spec](superpowers/specs/2026-11-13-federated-rooms-design.md).
+Wire format: [protocol.md](protocol.md), which wins where this page
+repeats a wire detail.
 It builds on [federation](federation.md) (0.8) and [bot handles](bots.md)
 (0.9).
 
@@ -340,7 +342,10 @@ Catch-up:
   within 60 seconds. A member server that was down catches up when it
   starts again.
 
-An event that cannot be applied as sent (malformed, an unknown local
+An event of a type this server does not know, which a newer host may
+send, is applied as nothing, without an audit entry
+([protocol.md](protocol.md#extension-and-versioning)). An event that
+cannot be applied as sent (malformed, an unknown local
 author, a wrong author signature, a new stand-in over the limit, a
 message over this server's message cap) is skipped but counts as
 applied, so it cannot stall the room. A message whose author's server

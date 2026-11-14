@@ -445,10 +445,10 @@ func TestPing_Body(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	rm := newRemote(t)
 	allow(t, svc, rm.id)
-	for _, body := range []string{"", "{}", " { } "} {
+	for _, body := range []string{"", "{}", " { } ", `{"x":1}`} {
 		wantOK(t, serve(svc, signed(t, rm.id, local, body)))
 	}
-	for _, body := range []string{`{"x":1}`, "[]", "null", "{"} {
+	for _, body := range []string{"[]", "null", "{"} {
 		wantErr(t, serve(svc, signed(t, rm.id, local, body)), http.StatusBadRequest, "bad_request")
 	}
 }

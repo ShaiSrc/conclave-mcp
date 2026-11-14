@@ -211,7 +211,7 @@ func TestReplica_RefusedEventsAuditedOnce(t *testing.T) {
 	g, h, room, _ := replica(t, "read")
 	var evs []fedrooms.Event
 	for i := range 100 {
-		evs = append(evs, fedrooms.Event{Seq: int64(i + 1), Type: "bogus", Payload: json.RawMessage(`{}`)})
+		evs = append(evs, fedrooms.Event{Seq: int64(i + 1), Type: fedrooms.EventMessage, Payload: json.RawMessage(`{}`)})
 	}
 	if got := h.push(t, g, room, evs...); got != 100 {
 		t.Fatalf("applied %d", got)
@@ -228,7 +228,7 @@ func TestReplica_RefusedEventsAuditedOnce(t *testing.T) {
 		Reasons []string
 	}
 	if json.Unmarshal([]byte(detail), &d) != nil || d.Count != 100 || len(d.Reasons) == 0 || len(d.Reasons) > 5 ||
-		!strings.Contains(d.Reasons[0], `unknown event type "bogus"`) {
+		!strings.Contains(d.Reasons[0], `message event: bad payload`) {
 		t.Errorf("detail: %s", detail)
 	}
 }

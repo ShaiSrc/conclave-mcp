@@ -527,13 +527,15 @@ func (g *minuteGate) allow(key string) bool {
 	return true
 }
 
-// handlePing answers a verified ping. The body is empty or {}.
+// handlePing answers a verified ping. The body is empty or a JSON
+// object, {} from this server; its fields are ignored, as unknown
+// fields are everywhere (docs/protocol.md, extension rules).
 func (s *Service) handlePing(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body) // read and capped by Verify
 	if len(bytes.TrimSpace(body)) > 0 {
 		var m map[string]json.RawMessage
-		if err := json.Unmarshal(body, &m); err != nil || m == nil || len(m) > 0 {
-			writeErr(w, r, http.StatusBadRequest, "bad_request", "ping takes an empty JSON object")
+		if err := json.Unmarshal(body, &m); err != nil || m == nil {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "ping takes a JSON object")
 			return
 		}
 	}

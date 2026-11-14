@@ -567,12 +567,12 @@ func (s *Service) applyLocked(ctx context.Context, roomID, host string, evs []fe
 
 // applyEvent applies one event of host to replica roomID. Each kind is
 // idempotent, so an event applied again after a crash changes nothing.
-// A skip changes nothing. An event that cannot be applied as sent is
-// errRefused.
+// A skip changes nothing, and so does a type this server does not know,
+// which a newer host may log (docs/protocol.md, extension rules). An
+// event that cannot be applied as sent is errRefused.
 func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedrooms.Event) error {
 	switch ev.Type {
-	case fedrooms.EventSkip:
-		return nil
+	case fedrooms.EventRoom, fedrooms.EventMember, fedrooms.EventMemberRemove, fedrooms.EventMessageDelete:
 	case fedrooms.EventMessage:
 		// The blanked event of a message the host deleted is applied
 		// as its message.delete.
@@ -580,6 +580,8 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 		if json.Unmarshal(ev.Payload, &p) != nil || !p.Deleted {
 			return s.applyMessage(ctx, roomID, host, ev.Payload)
 		}
+	default: // skip, or unknown
+		return nil
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -595,8 +597,6 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 		err = s.applyRemove(ctx, tx, roomID, host, ev.Seq, ev.Payload)
 	case fedrooms.EventMessageDelete, fedrooms.EventMessage:
 		err = applyDelete(ctx, tx, roomID, ev.Payload)
-	default:
-		err = refused("unknown event type %q", ev.Type)
 	}
 	if err != nil {
 		return err

@@ -6,6 +6,22 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `docs/protocol.md`, the Conclave federation protocol, version 1: the
+  normative wire format, with test vectors
+  (`docs/protocol-v1-vectors.json`) that `TestProtocolVectors`
+  recomputes, and an endpoint list that `TestProtocolRoutes` pins to
+  the federation router. The operator docs link to it; it wins where
+  they repeat a wire detail.
+
+### Changed
+
+- Extension rules of protocol version 1: a replica applies a room event
+  of a type it does not know as nothing, and moves past it, instead of
+  refusing it (no `federation.room.event_refused` entry); a ping's body
+  may carry fields, which are ignored, instead of 400.
+
 ## [0.13.0] — 2026-11-14
 
 ### Added

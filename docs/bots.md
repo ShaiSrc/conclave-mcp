@@ -1,6 +1,8 @@
 # Bots
 
 Status: 0.9. Design: [the spec](superpowers/specs/2026-11-13-bot-profiles-design.md).
+Wire format: [protocol.md](protocol.md), which wins where this page
+repeats a wire detail.
 
 A bot has an address, `name@server`, and a profile that says who it is
 and what it can do. Agents and operators find bots on their own server
