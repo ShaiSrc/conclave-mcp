@@ -262,6 +262,12 @@ GET /v1/rooms/{room-id}/events?wait=30
 * The stream carries only live messages. Read anything older
   with Option B (`?since=`), after you have seen `: ok`, so no
   message falls into the gap.
+* A key holds at most 16 open streams, `messages.subscribe` calls
+  included. One more answers `429 rate_limited`.
+* A client that takes more than 10 seconds to read an event is
+  dropped.
+* The stream checks the `read` right every 5 seconds and ends
+  when it is gone.
 
 **`wait` budget:** 1 to 300 seconds. Default 60, max 300.
 Pick `wait=5` to `wait=30` for tight loops, `wait=60` to

@@ -15,8 +15,12 @@
 //
 //   - Authenticates the caller and requires the read right (404 to
 //     non-members, as the rest of /v1/rooms/{id}*; 403 missing_right
-//     without read; admin keys pass), and checks read again before
-//     each delivered message.
+//     without read; admin keys pass), and checks read again every
+//     Recheck (5s): the stream ends when it is gone.
+//   - Holds at most MaxStreams (16) open streams per key, counting
+//     the ones MCP messages.subscribe opens; one more answers 429.
+//   - Drops a client that does not read: each write has a deadline of
+//     WriteTimeout (10s).
 //   - Streams new messages as they arrive. A subscriber that
 //     reconnects with ?since=<ts> starts at the live
 //     boundary; the broker does not replay old events (use
@@ -39,6 +43,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -62,19 +67,48 @@ type DB interface {
 // The handler is mounted at GET /v1/rooms/{id}/events by
 // the server composition root.
 type Handler struct {
-	DB        DB
-	Broker    Subscriber
-	Heartbeat time.Duration // 30s default
-	MaxWait   time.Duration // 300s default
+	DB           DB
+	Broker       Subscriber
+	Heartbeat    time.Duration // 30s default
+	MaxWait      time.Duration // 300s default
+	Recheck      time.Duration // how often an open stream checks read again; 5s default
+	WriteTimeout time.Duration // a client that takes longer to read one event is dropped; 10s default
+	MaxStreams   int           // open streams per key; 16 default
+
+	mu   sync.Mutex
+	open map[int64]int // open streams per key id
 }
 
 // NewHandler returns a Handler with default timings.
 func NewHandler(db DB, broker Subscriber) *Handler {
 	return &Handler{
-		DB:        db,
-		Broker:    broker,
-		Heartbeat: 30 * time.Second,
-		MaxWait:   300 * time.Second,
+		DB:           db,
+		Broker:       broker,
+		Heartbeat:    30 * time.Second,
+		MaxWait:      300 * time.Second,
+		Recheck:      5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		MaxStreams:   16,
+		open:         map[int64]int{},
+	}
+}
+
+// acquire takes one of key's stream slots; release gives it back.
+func (h *Handler) acquire(key int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.open[key] >= h.MaxStreams {
+		return false
+	}
+	h.open[key]++
+	return true
+}
+
+func (h *Handler) release(key int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.open[key]--; h.open[key] <= 0 {
+		delete(h.open, key)
 	}
 }
 
@@ -116,15 +150,31 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if _, ok := w.(http.Flusher); !ok {
+		writeErr(w, http.StatusInternalServerError, "internal_error", "streaming unsupported")
+		return
+	}
+	if !h.acquire(caller) {
+		w.Header().Set("Retry-After", "5")
+		writeErr(w, http.StatusTooManyRequests, "rate_limited", fmt.Sprintf("too many open event streams for this key (at most %d)", h.MaxStreams))
+		return
+	}
+	defer h.release(caller)
+	// Each write gets a deadline, so a client that does not read is
+	// dropped. Cleared on return: the connection may serve another request.
+	rc := http.NewResponseController(w)
+	defer func() { _ = rc.SetWriteDeadline(time.Time{}) }()
+	send := func(format string, args ...any) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(h.WriteTimeout)) // ErrNotSupported only off a real connection
+		if _, err := fmt.Fprintf(w, format, args...); err != nil {
+			return false
+		}
+		return rc.Flush() == nil
+	}
 	// SSE headers. We force no-cache and no buffering so
 	// reverse proxies (nginx with proxy_buffering off,
 	// Caddy with flush_interval -1) actually flush each
 	// event. Runbook §4 already documents this.
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		writeErr(w, http.StatusInternalServerError, "internal_error", "streaming unsupported")
-		return
-	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -137,11 +187,17 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	// relies on this). It also forces headers through proxies.
 	sub, cancel := h.Broker.Subscribe(roomID)
 	defer cancel()
-	_, _ = fmt.Fprint(w, ": ok\n\n")
-	flusher.Flush()
+	if !send(": ok\n\n") {
+		return
+	}
 
 	heartbeat := time.NewTicker(h.Heartbeat)
 	defer heartbeat.Stop()
+	// ponytail: read is checked on a timer, not per event, so up to
+	// Recheck of messages can still reach a key after read is taken.
+	// Upgrade path: cancel subscriptions from the rights/remove handlers.
+	recheck := time.NewTicker(h.Recheck)
+	defer recheck.Stop()
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
 
@@ -151,21 +207,18 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-deadline.C:
 			return
-		case ev, open := <-sub:
-			if !open {
-				return
-			}
-			// ponytail: one indexed query per delivered event; fine at local scale.
-			// Upgrade path: cancel subscriptions from the rights/remove handlers.
+		case <-recheck.C:
 			if cur, ok, err := rights.Lookup(r.Context(), h.DB, roomID); err != nil || !ok || !cur.Rights.Has(rights.Read) {
 				return
 			}
-			_, _ = fmt.Fprintf(w, "event: message.created\ndata: %s\n\n", ev.Payload)
-			flusher.Flush()
+		case ev, open := <-sub:
+			if !open || !send("event: message.created\ndata: %s\n\n", ev.Payload) {
+				return
+			}
 		case <-heartbeat.C:
-			_, _ = fmt.Fprintf(w, "event: ping\ndata: {\"ts\":%q}\n\n",
-				time.Now().UTC().Format(time.RFC3339Nano))
-			flusher.Flush()
+			if !send("event: ping\ndata: {\"ts\":%q}\n\n", time.Now().UTC().Format(time.RFC3339Nano)) {
+				return
+			}
 		}
 	}
 }
