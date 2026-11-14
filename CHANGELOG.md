@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-14
+
 ### Added
 
 - Moderation and operations. `POST /v1/federation/keys/rotate` (CLI
