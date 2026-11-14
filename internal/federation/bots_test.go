@@ -72,7 +72,7 @@ func newPeer(t *testing.T, svc *Service) *Service {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allow(t, peer, svc.id)
+	allow(t, peer, svc.id())
 	r := chi.NewRouter()
 	peer.PublicRoutes(r)
 	srv := httptest.NewUnstartedServer(r)
@@ -286,10 +286,10 @@ func TestLookup_OwnDomain(t *testing.T) {
 func TestLookup_Peer(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	peer := newPeer(t, svc)
-	allow(t, svc, peer.id)
+	allow(t, svc, peer.id())
 	addBot(t, peer.db, "bob", bots.Public)
 	addBot(t, peer.db, "hidden", bots.Private)
-	d := peer.id.Domain
+	d := peer.id().Domain
 	if e := entryOf(t, lookup(svc, svc.db, plainKey, "bob@"+d)); e.Handle != "bob" || e.Address != "bob@"+d || !e.Remote ||
 		e.DisplayName != "Bot bob" || e.Visibility != bots.Public || e.TrustOrigin != "external" {
 		t.Errorf("bob: %+v", e)
@@ -303,10 +303,10 @@ func TestLookup_PeerNotAllowed(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	peer := newPeer(t, svc)
 	addBot(t, peer.db, "bob", bots.Peers)
-	d := peer.id.Domain
+	d := peer.id().Domain
 	wantErr(t, lookup(svc, svc.db, plainKey, "bob@"+d), http.StatusForbidden, "peer_not_allowed")
 	wantErr(t, lookup(svc, svc.db, plainKey, "bob@unknown.example"), http.StatusForbidden, "peer_not_allowed")
-	allow(t, svc, peer.id)
+	allow(t, svc, peer.id())
 	if err := svc.peers.Block(context.Background(), d); err != nil {
 		t.Fatal(err)
 	}
@@ -459,8 +459,8 @@ func TestLookup_RemoteAnswerChecked(t *testing.T) {
 	}
 	d := fakePeer(t, svc, func(w http.ResponseWriter, r *http.Request) {
 		p, err := ParseSigHeader(r.Header.Get("Authorization"))
-		if err != nil || p.Origin != local || p.KeyID != svc.id.KeyID ||
-			!ed25519.Verify(svc.id.Public, SigningString(r.Method, r.RequestURI, r.Host, local, p.TS, p.Nonce, nil), p.Sig) {
+		if err != nil || p.Origin != local || p.KeyID != svc.id().KeyID ||
+			!ed25519.Verify(svc.id().Public, SigningString(r.Method, r.RequestURI, r.Host, local, p.TS, p.Nonce, nil), p.Sig) {
 			http.Error(w, "unsigned", http.StatusUnauthorized)
 			return
 		}
@@ -492,11 +492,11 @@ func TestDirectory_Refresh(t *testing.T) {
 	addBot(t, svc.db, "alice", bots.Peers)
 	addBot(t, svc.db, "secret", bots.Private)
 	peer := newPeer(t, svc)
-	allow(t, svc, peer.id)
+	allow(t, svc, peer.id())
 	addBot(t, peer.db, "bob", bots.Peers)
 	addBot(t, peer.db, "pub", bots.Public)
 	addBot(t, peer.db, "hidden", bots.Private)
-	d := peer.id.Domain
+	d := peer.id().Domain
 	if err := svc.refreshDirectory(ctx, d); err != nil {
 		t.Fatal(err)
 	}
@@ -647,12 +647,12 @@ func TestDirectory_RefreshAfterAdd(t *testing.T) {
 	done := make(chan struct{})
 	go func() { svc.Run(ctx); close(done) }()
 
-	add := `{"domain":"` + peer.id.Domain + `","fingerprint":"` + peer.id.Fingerprint() + `"}`
+	add := `{"domain":"` + peer.id().Domain + `","fingerprint":"` + peer.id().Fingerprint() + `"}`
 	if rec := adminDo(svc, admin, "POST", "/v1/federation/peers", add); rec.Code != 201 {
 		t.Fatalf("add: %d %s", rec.Code, rec.Body)
 	}
 	for deadline := time.Now().Add(5 * time.Second); count(t, svc.db,
-		`SELECT COUNT(*) FROM remote_bots WHERE domain = ? AND handle = 'bob'`, peer.id.Domain) == 0; {
+		`SELECT COUNT(*) FROM remote_bots WHERE domain = ? AND handle = 'bob'`, peer.id().Domain) == 0; {
 		if time.Now().After(deadline) {
 			t.Fatal("no refresh after the peer was added")
 		}
@@ -674,7 +674,7 @@ func TestDirectory_FullPageFitsCap(t *testing.T) {
 	ctx := context.Background()
 	svc := newLocal(t, "allowlist")
 	peer := newPeer(t, svc)
-	allow(t, svc, peer.id)
+	allow(t, svc, peer.id())
 	for i := range directoryPage {
 		addBot(t, peer.db, fmt.Sprintf("bot%03d", i), bots.Public)
 	}
@@ -691,15 +691,15 @@ func TestDirectory_FullPageFitsCap(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		rec := serve(peer, signedGet2(t, svc.id, peer.id.Domain, "/fed/v1/directory"))
+		rec := serve(peer, signedGet2(t, svc.id(), peer.id().Domain, "/fed/v1/directory"))
 		t.Logf("%+q: a full page is %d bytes", c, rec.Body.Len())
 		if rec.Code != 200 || rec.Body.Len() >= maxBotsBody || strings.Contains(rec.Body.String(), "\\u") {
 			t.Fatalf("%+q: status %d, %d bytes (cap %d)", c, rec.Code, rec.Body.Len(), maxBotsBody)
 		}
-		if err := svc.refreshDirectory(ctx, peer.id.Domain); err != nil {
+		if err := svc.refreshDirectory(ctx, peer.id().Domain); err != nil {
 			t.Fatal(err)
 		}
-		if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, peer.id.Domain); n != directoryPage {
+		if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, peer.id().Domain); n != directoryPage {
 			t.Errorf("%+q: cached bots: %d, want %d", c, n, directoryPage)
 		}
 	}

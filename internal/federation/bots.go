@@ -16,6 +16,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/bots"
+	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -149,7 +150,7 @@ type botAPI struct {
 func (a botAPI) local(p bots.Profile) entry {
 	e := entry{Profile: p, Address: p.Handle}
 	if a.svc != nil {
-		e.Address += "@" + a.svc.id.Domain
+		e.Address += "@" + a.svc.id().Domain
 	}
 	return e
 }
@@ -172,7 +173,7 @@ func (a botAPI) lookup(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, r, http.StatusBadRequest, "invalid_domain", err.Error())
 			return
 		}
-		if d != a.svc.id.Domain {
+		if d != a.svc.id().Domain {
 			a.svc.lookupRemote(w, r, c.KeyID, h, d)
 			return
 		}
@@ -217,6 +218,7 @@ func (a botAPI) directory(w http.ResponseWriter, r *http.Request) {
 // lookupRemote asks domain for its bot name, for key keyID. Only an
 // allowed peer, or a seen one in open mode, is asked: a lookup cannot
 // make the server contact any other host. Each key has its own limit.
+// A bot the operator blocked is not asked about: 404.
 func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int64, name, domain string) {
 	if lim := s.lookupLimiter(keyID); !lim.Allow() {
 		w.Header().Set("Retry-After", retryAfter(lim))
@@ -230,6 +232,14 @@ func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int
 	}
 	if peer.Status != statusAllowed && (s.mode != modeOpen || peer.Status != statusSeen) {
 		writeErr(w, r, http.StatusForbidden, "peer_not_allowed", "peer not allowed")
+		return
+	}
+	switch blocked, err := fedrooms.Blocked(r.Context(), s.db, name+"@"+domain); {
+	case err != nil:
+		s.fail(w, r, err)
+		return
+	case blocked: // as if its server had no such bot
+		writeErr(w, r, http.StatusNotFound, "not_found", "no such bot on "+domain)
 		return
 	}
 	status, body, err := s.getSigned(r.Context(), domain, "/fed/v1/bots/"+name)

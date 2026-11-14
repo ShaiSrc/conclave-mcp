@@ -24,8 +24,8 @@ import (
 func dmPair(t *testing.T) (a, b *roomRig) {
 	t.Helper()
 	a, b = newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
-	allow(t, b.svc, a.svc.id)
+	allow(t, a.svc, b.svc.id())
+	allow(t, b.svc, a.svc.id())
 	return a, b
 }
 
@@ -158,9 +158,9 @@ func TestDirectRemote_Policy(t *testing.T) {
 // sender's server asks only allowed peers.
 func TestDirectRemote_SeenSender(t *testing.T) {
 	a, b := newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
+	allow(t, a.svc, b.svc.id())
 	b.svc.mode = modeOpen
-	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id.Public); err != nil {
+	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id().Public); err != nil {
 		t.Fatal(err)
 	}
 	a1 := a.dmBot(t, "a1", "")
@@ -200,7 +200,11 @@ func TestDirectRemote_IncomingLimit(t *testing.T) {
 	g.dmBot(t, "b1", "peers")
 	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	g.svc.now = func() time.Time { return now }
-	g.svc.limiters[h.id.Domain] = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
+	lims, err := g.svc.limitersOf(context.Background(), h.id.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lims.requests = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
 	for i := range 100 {
 		if rec := h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr(fmt.Sprintf("x%d", i))), "b1"); rec.Code != http.StatusCreated {
 			t.Fatalf("invite %d: %d %s", i, rec.Code, rec.Body)
@@ -217,6 +221,12 @@ func TestDirectRemote_IncomingLimit(t *testing.T) {
 	now = now.Add(time.Minute)
 	if rec := h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr("x101")), "b1"); rec.Code != http.StatusCreated {
 		t.Errorf("a minute later: %d %s", rec.Code, rec.Body)
+	}
+	// The operator's override replaces the limiter at once.
+	wantErr(t, h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr("x102")), "b1"), http.StatusTooManyRequests, "rate_limited")
+	wantStatus(t, adminDo(g.svc, admin, http.MethodPatch, "/v1/federation/peers/"+h.id.Domain, `{"limits":{"dm_invites_per_hour":200}}`), http.StatusOK)
+	if rec := h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr("x102")), "b1"); rec.Code != http.StatusCreated {
+		t.Errorf("after the override: %d %s", rec.Code, rec.Body)
 	}
 }
 
@@ -784,5 +794,20 @@ func TestDirectRemote_PeerAnswers(t *testing.T) {
 	wantErr(t, a.dm(a1, h.addr("x"), "hi"), http.StatusConflict, "conflict")
 	if n := count(t, a.db, `SELECT COUNT(*) FROM rooms WHERE archived_at IS NULL`); n != 0 {
 		t.Errorf("a keeps %d active rooms", n)
+	}
+}
+
+// A peer's 403 to a direct invite is audited by its code: policy for
+// dm_refused, blocked for bot_blocked, refused for any other.
+func TestDirectRemote_RefusalReasons(t *testing.T) {
+	a := newLiveRig(t)
+	h := newFakeHost(t, a)
+	a1 := a.dmBot(t, "a1", "")
+	for _, c := range []struct{ code, reason string }{{"dm_refused", "policy"}, {"bot_blocked", "blocked"}, {"peer_not_allowed", "refused"}} {
+		h.setAnswer(answerWith(http.StatusForbidden, `{"error":{"code":"`+c.code+`","message":"m"}}`))
+		wantErr(t, a.dm(a1, h.addr("x"), "hi"), http.StatusForbidden, c.code)
+		if n := audited(t, a, "direct.refused", c.reason); n != 1 {
+			t.Errorf("%s: %d refusals audited as %s, want 1", c.code, n, c.reason)
+		}
 	}
 }

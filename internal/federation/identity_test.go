@@ -154,8 +154,8 @@ func TestServerDocument(t *testing.T) {
 	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q", ct)
 	}
-	id := svc.id
-	want := fmt.Sprintf(`{"protocol":"conclave-federation/1","domain":"conclave.example.org","keys":[{"key_id":%q,"alg":"ed25519","public_key":%q,"fingerprint":%q}]}`,
+	id := svc.id()
+	want := fmt.Sprintf(`{"protocol":"conclave-federation/1","domain":"conclave.example.org","keys":[{"key_id":%q,"alg":"ed25519","public_key":%q,"fingerprint":%q,"status":"current"}]}`,
 		id.KeyID, base64.RawURLEncoding.EncodeToString(id.Public), id.Fingerprint())
 	if got := strings.TrimSpace(rec.Body.String()); got != want {
 		t.Errorf("document:\n got %s\nwant %s", got, want)

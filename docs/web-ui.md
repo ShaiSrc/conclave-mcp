@@ -115,14 +115,52 @@ the prompt is open. A logged-in session alone only reads.
 
 With federation on (`CONCLAVE_FEDERATION_DOMAIN`), a Federation entry
 appears in the navigation. It shows this server's domain, mode, key ID
-and fingerprint, and the peers with status, fingerprint, note and last
-contact. Block, Remove, Ping and Add peer each ask for the passkey (a
-ping is a POST, so a session alone cannot make it). To add a peer, enter
-its domain and press Look up: the page shows the fingerprint the peer
-serves. Compare it with the one the peer's operator gives you over
-another channel, and add only if they match. The lookup needs no
-passkey; the add sends the fingerprint you saw, and the server refuses
-it if the peer's keys no longer include it.
+and fingerprint. Every change on the page asks for the passkey; a ping
+is a POST, so a session alone cannot make it either. See
+[federation.md](federation.md) for what each change does.
+
+**Keys** lists the current key and, for 30 days after a rotation, the
+previous one: status, key ID, fingerprint and, for the previous key,
+Until. Rotate key asks in the page, then for the passkey, and makes a
+new key current at once. Peers follow the rotation through the old
+key's endorsement, with no new fingerprint check. While a previous key
+is listed, another rotation shows "Not rotated: the previous key is
+still in its 30-day overlap".
+
+**Peers** lists each peer with:
+
+- status, and health as text: `ok`, `failing` or `unreachable` (the
+  last two also bold and in color);
+- Last in (its last verified request to us) and Last out (our last
+  request it answered);
+- delivery of the rooms hosted here: events pending, rooms, paused
+  cursors, failing since and the last error, as text;
+- fingerprint and note.
+
+Block, Remove and Ping work as before. Retry, on an allowed peer that is
+not `ok`, unpauses its delivery and makes it due now. Forget old keys
+drops the peer's retired keys, for when one of them may have leaked:
+messages its bots signed with them no longer verify here. Limits opens the
+three per-peer limits (requests a minute, direct invites an hour, follow
+requests an hour), each with its effective value, `default` or
+`override`, a number field and a `default` box: untick it and enter 0
+(refuses every request of that kind) to 10000, or tick it to go back to
+the default. Save limits sends all three in one PATCH. On a blocked
+peer, Purge deletes what the peer left here and cannot be undone: type
+its domain, press Purge and confirm; the page then shows the counts
+(replicas, messages, memberships, follows, claims, delivery cursors,
+stand-ins). Any other text is refused before the passkey prompt.
+
+**Add a peer:** enter its domain and press Look up: the page shows the
+fingerprint the peer serves. Compare it with the one the peer's operator
+gives you over another channel, and add only if they match. The lookup
+needs no passkey; the add sends the fingerprint you saw, and the server
+refuses it if the peer's keys no longer include it.
+
+**Blocked bots** lists the bots of other servers blocked here, with
+address, note and since. Block bot takes an address (`name@domain`) and
+a note; Unblock lifts a block, and the bot's memberships and follows
+stay ended.
 
 ## Federated rooms
 

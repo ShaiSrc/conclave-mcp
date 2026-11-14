@@ -315,7 +315,7 @@ func newMemberServer(t *testing.T, g *roomRig) *memberServer {
 		body, _ := io.ReadAll(r.Body)
 		p, err := ParseSigHeader(r.Header.Get("Authorization"))
 		if err != nil || p.Origin != local ||
-			!ed25519.Verify(g.svc.id.Public, SigningString(r.Method, r.RequestURI, m.id.Domain, local, p.TS, p.Nonce, body), p.Sig) {
+			!ed25519.Verify(g.svc.id().Public, SigningString(r.Method, r.RequestURI, m.id.Domain, local, p.TS, p.Nonce, body), p.Sig) {
 			http.Error(w, "bad signature", http.StatusUnauthorized)
 			return
 		}

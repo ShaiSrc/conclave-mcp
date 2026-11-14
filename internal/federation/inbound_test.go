@@ -47,7 +47,7 @@ func newRemoteHook(t *testing.T, onFetch func(*Identity)) *remote {
 		if onFetch != nil {
 			onFetch(rm.id)
 		}
-		_ = json.NewEncoder(w).Encode(rm.id.Document())
+		_ = json.NewEncoder(w).Encode(rm.id.Document(time.Now()))
 	}))
 	_ = srv.Listener.Close()
 	srv.Listener = ln
@@ -206,9 +206,9 @@ func TestVerify_AllowedPeer(t *testing.T) {
 	}
 }
 
-// Step 4: a key other than the stored one is refused. The peer's
-// document lists the presented key, which is evidence of a key change:
-// audited, once per peer a minute.
+// Step 4: a key other than the stored one, without an endorsement by
+// it, is refused. The peer's document lists the presented key, which is
+// evidence of a key change: audited, once per peer a minute.
 func TestVerify_KeyChanged(t *testing.T) {
 	ctx := context.Background()
 	other := testIdentity(t, "x.example")
@@ -233,7 +233,7 @@ func TestVerify_KeyChanged(t *testing.T) {
 			WHERE action = 'federation.key_changed'`).Scan(&targetType, &targetID, &detail); err != nil {
 			t.Fatalf("%s: no single key_changed audit row: %v", tc.mode, err)
 		}
-		want := fmt.Sprintf(`{"presented":%q,"expected":%q}`, rm.id.Fingerprint(), other.Fingerprint())
+		want := fmt.Sprintf(`{"presented":%q,"expected":%q,"reason":"not_endorsed"}`, rm.id.Fingerprint(), other.Fingerprint())
 		if targetType != "federation_peer" || targetID != rm.domain() || detail != want {
 			t.Errorf("%s: audit %s %s %s, want peer %s %s", tc.mode, targetType, targetID, detail, rm.domain(), want)
 		}
@@ -558,22 +558,22 @@ func startService(t *testing.T, mode string) *Service {
 func TestPing_Outbound(t *testing.T) {
 	ctx := context.Background()
 	a, b, c := startService(t, "allowlist"), startService(t, "allowlist"), startService(t, "allowlist")
-	allow(t, a, b.id)
-	allow(t, b, a.id)
-	if rtt, err := a.Ping(ctx, b.id.Domain); err != nil || rtt <= 0 {
+	allow(t, a, b.id())
+	allow(t, b, a.id())
+	if rtt, err := a.Ping(ctx, b.id().Domain); err != nil || rtt <= 0 {
 		t.Errorf("a→b: %v, %v", rtt, err)
 	}
-	if _, err := b.Ping(ctx, a.id.Domain); err != nil {
+	if _, err := b.Ping(ctx, a.id().Domain); err != nil {
 		t.Errorf("b→a: %v", err)
 	}
 	// c is not allowed on a. c allows a, so its dialer may reach a's
 	// loopback address.
-	allow(t, c, a.id)
-	if _, err := c.Ping(ctx, a.id.Domain); err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "peer_not_allowed") {
+	allow(t, c, a.id())
+	if _, err := c.Ping(ctx, a.id().Domain); err == nil || !strings.Contains(err.Error(), "403") || !strings.Contains(err.Error(), "peer_not_allowed") {
 		t.Errorf("c→a: %v, want 403 peer_not_allowed", err)
 	}
 	// a has not allowed c, so its dialer refuses c's loopback address.
-	if _, err := a.Ping(ctx, c.id.Domain); !errors.Is(err, errNonPublicAddr) {
+	if _, err := a.Ping(ctx, c.id().Domain); !errors.Is(err, errNonPublicAddr) {
 		t.Errorf("a→c: %v, want the private address refused", err)
 	}
 }

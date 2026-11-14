@@ -101,6 +101,7 @@ Errors on a start:
 |---|---|---|
 | 400 | `bad_request` | The message type is `system` or not a message type, the content is empty, or `to` is not a bot's name. |
 | 403 | `dm_refused` | The recipient's policy does not allow it, the recipient is not a bot, the caller is an admin key, or the peer does not support direct conversations. |
+| 403 | `bot_blocked` | The operator blocked the recipient, a bot of another server ([federation.md](federation.md#blocking-a-bot)); its server is not asked. Or the recipient's server blocked the caller: its 403 is passed on. |
 | 403 | `forbidden` | The caller is not a bot. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer. |
 | 404 | `not_found` | No such bot. |
@@ -167,7 +168,7 @@ and come between the external markers like any federated message.
 | Limit | Value | Answer |
 |---|---|---|
 | New conversations per sender key | 30 per hour | 429 `rate_limited` |
-| New incoming conversations per peer, counted by the recipient's server | 100 per hour | 429 `rate_limited`, passed on to the sender |
+| New incoming conversations per peer, counted by the recipient's server | 100 per hour, or the operator's limit for the peer ([federation.md](federation.md#peer-health-and-limits)) | 429 `rate_limited`, passed on to the sender |
 
 Every start that passes the message check takes a token of the sender's
 limit, refused ones included, and so does a start that invites into a
@@ -211,7 +212,7 @@ start, last activity, host, state); each opens as a room.
 | Action | When |
 |---|---|
 | `direct.start` | A conversation was made. On the server of the sender: detail `{"from", "to"}`. On the recipient's server, for an accepted invite: detail `{"host", "to"}`. |
-| `direct.refused` | A start was refused. Detail `{"to", "reason"}`, reason `not a bot`, `policy` or `limit`; result `error:<code>`. |
+| `direct.refused` | A start was refused. Detail `{"to", "reason"}`, reason `not a bot`, `policy`, `limit`, `blocked` or `refused`; result `error:<code>`. A peer's 403 is `policy` for its `dm_refused`, `blocked` for its `bot_blocked` (it blocked the caller) and `refused` for any other code. |
 | `bot.profile.update` | Also records a changed `dm_policy`. |
 
 ## Not included

@@ -21,14 +21,7 @@ var keyAddrRE = regexp.MustCompile(`^key-[0-9]+$`)
 // NormalizeHandle lowercases ASCII letters in s and returns it if it is
 // a valid, unreserved handle.
 func NormalizeHandle(s string) (string, error) {
-	// Only A-Z: strings.ToLower would turn look-alikes such as the
-	// Kelvin sign into ASCII letters.
-	h := strings.Map(func(r rune) rune {
-		if 'A' <= r && r <= 'Z' {
-			return r + 'a' - 'A'
-		}
-		return r
-	}, s)
+	h := lowerASCII(s)
 	if !handleRE.MatchString(h) {
 		return "", fmt.Errorf("%w: handle %q must be 1 to 32 of a-z, 0-9, '_', '.', '-', starting with a letter or digit", ErrInvalid, s)
 	}
@@ -36,4 +29,24 @@ func NormalizeHandle(s string) (string, error) {
 		return "", fmt.Errorf("%w: handle %q is reserved", ErrInvalid, h)
 	}
 	return h, nil
+}
+
+// NormalizeRemoteName is NormalizeHandle for the name of an address on
+// another server, where operator and key-<id> name keys too.
+func NormalizeRemoteName(s string) (string, error) {
+	if h := lowerASCII(s); h == "operator" || keyAddrRE.MatchString(h) && handleRE.MatchString(h) {
+		return h, nil
+	}
+	return NormalizeHandle(s)
+}
+
+// lowerASCII lowercases A-Z only: strings.ToLower would turn look-alikes
+// such as the Kelvin sign into ASCII letters.
+func lowerASCII(s string) string {
+	return strings.Map(func(r rune) rune {
+		if 'A' <= r && r <= 'Z' {
+			return r + 'a' - 'A'
+		}
+		return r
+	}, s)
 }

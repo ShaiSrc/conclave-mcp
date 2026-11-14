@@ -206,6 +206,8 @@ func (f *Fetcher) send(client *http.Client, req *http.Request, allowPrivate bool
 }
 
 // Ping sends a signed ping to domain and returns the round-trip time.
+// An answer sets the peer's last_out_at; signed is not used, so the
+// time is the request's alone.
 func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error) {
 	body := []byte("{}")
 	req, err := s.fetch.newRequest(ctx, http.MethodPost, domain, "/fed/v1/ping", body)
@@ -213,7 +215,7 @@ func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error
 		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	if err := s.id.SignRequest(req, domain, body); err != nil {
+	if err := s.id().SignRequest(req, domain, body); err != nil {
 		return 0, err
 	}
 	start := time.Now()
@@ -237,5 +239,6 @@ func (s *Service) Ping(ctx context.Context, domain string) (time.Duration, error
 	if err := json.Unmarshal(resp, &out); err != nil || out.Domain != domain {
 		return 0, fmt.Errorf("ping %s: answer from another domain or not JSON", domain)
 	}
+	s.touchOut(ctx, domain)
 	return rtt, nil
 }

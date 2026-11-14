@@ -19,7 +19,7 @@ import (
 // (handleRoomInvite), which makes the follow accepted here.
 
 // FollowRequestsPerHour is how many follow requests a server takes from
-// one peer an hour.
+// one peer an hour, unless the operator set another limit.
 const FollowRequestsPerHour = 100
 
 // kindFeed is the kind the federation invite and the API give a feed,
@@ -68,8 +68,9 @@ func (s *Service) WithdrawFollow(ctx context.Context, follower, address string) 
 
 // followRequest reads the {follower, handle} body of a follow request
 // or withdrawal from an allowed peer, checks that follower is a bot
-// address on the origin's domain, and takes one of the origin's
-// FollowRequestsPerHour (429). It answers the request itself otherwise.
+// address on the origin's domain, takes one of the origin's
+// FollowRequestsPerHour (429), and refuses a follower the operator
+// blocked (403 bot_blocked). It answers the request itself otherwise.
 func (s *Service) followRequest(w http.ResponseWriter, r *http.Request) (follower, handle string, ok bool) {
 	ctx, origin := r.Context(), OriginFrom(r.Context())
 	if !s.allowedOrigin(w, r) {
@@ -88,13 +89,27 @@ func (s *Service) followRequest(w http.ResponseWriter, r *http.Request) (followe
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "follower must be the address of a bot of the signing server")
 		return "", "", false
 	}
-	now := s.now()
-	if lim := s.hourly(&s.followLimits, origin, FollowRequestsPerHour); !lim.AllowN(now, 1) {
-		w.Header().Set("Retry-After", retryAfterAt(lim, now))
-		detail, _ := json.Marshal(map[string]string{"from": in.Follower, "to": in.Handle[:min(len(in.Handle), 300)], "reason": "limit"})
-		s.auditRoom(ctx, "follow.refused", origin, "", "error:rate_limited", string(detail))
-		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "too many follow requests, try again later")
+	refuse := func(status int, code, reason, msg string) (string, string, bool) {
+		detail, _ := json.Marshal(map[string]string{"from": in.Follower, "to": in.Handle[:min(len(in.Handle), 300)], "reason": reason})
+		s.auditRoom(ctx, "follow.refused", origin, "", "error:"+code, string(detail))
+		writeErr(w, r, status, code, msg)
 		return "", "", false
+	}
+	lims, err := s.limitersOf(ctx, origin)
+	if err != nil {
+		s.fail(w, r, err)
+		return "", "", false
+	}
+	if now := s.now(); !lims.followRequests.AllowN(now, 1) {
+		w.Header().Set("Retry-After", retryAfterAt(lims.followRequests, now))
+		return refuse(http.StatusTooManyRequests, "rate_limited", "limit", "too many follow requests, try again later")
+	}
+	switch blocked, err := fedrooms.Blocked(ctx, s.db, in.Follower); {
+	case err != nil:
+		s.fail(w, r, err)
+		return "", "", false
+	case blocked:
+		return refuse(http.StatusForbidden, "bot_blocked", "blocked", in.Follower+" is blocked on this server")
 	}
 	return in.Follower, in.Handle, true
 }

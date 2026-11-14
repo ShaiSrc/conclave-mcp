@@ -64,8 +64,8 @@ func TestAdmin_StatusAndList(t *testing.T) {
 	}
 	rec := adminDo(svc, admin, "GET", "/v1/federation", "")
 	_ = json.Unmarshal(rec.Body.Bytes(), &st)
-	if rec.Code != 200 || st.Domain != local || st.Mode != "allowlist" || st.Fingerprint != svc.id.Fingerprint() ||
-		st.KeyID != svc.id.KeyID || st.Peers["allowed"] != 1 || st.Peers["blocked"] != 1 || st.Peers["seen"] != 1 {
+	if rec.Code != 200 || st.Domain != local || st.Mode != "allowlist" || st.Fingerprint != svc.id().Fingerprint() ||
+		st.KeyID != svc.id().KeyID || st.Peers["allowed"] != 1 || st.Peers["blocked"] != 1 || st.Peers["seen"] != 1 {
 		t.Errorf("status: %d %s", rec.Code, rec.Body)
 	}
 	var l struct{ Peers []peerView }
@@ -238,4 +238,47 @@ func TestAdmin_RoomDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantErr(t, adminDo(rg.svc, admin, "GET", "/v1/rooms/"+rroom+"/delivery", ""), 404, "not_found")
+}
+
+// The operator drops a peer's key history, the remedy when a retired key
+// may have leaked: author signatures made with those keys no longer
+// verify. It answers how many keys went and is audited; other peers'
+// histories stay.
+func TestAdmin_ForgetPeerKeys(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	one, two, three := testIdentity(t, "a.example"), testIdentity(t, "a.example"), testIdentity(t, "a.example")
+	for _, id := range []*Identity{one, two, three, testIdentity(t, "c.example"), testIdentity(t, "c.example")} {
+		allow(t, svc, id)
+	}
+	p, err := svc.peers.Get(ctx, "a.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := MessageSig{Room: "r@h.example", Author: "c1@a.example", ContentType: "text/plain", MessageType: "answer", Content: "x", Nonce: newNonce()}
+	sig := one.SignMessage(m)
+	if ok, err := svc.peerSigned(ctx, p, m, sig); !ok || err != nil {
+		t.Fatalf("a retired key's signature does not verify before: %v", err)
+	}
+	const path = "/v1/federation/peers/a.example/keys/history"
+	rec := adminDo(svc, admin, http.MethodDelete, path, "")
+	if rec.Code != http.StatusOK || strings.TrimSpace(rec.Body.String()) != `{"domain":"a.example","dropped":2}` {
+		t.Fatalf("forget: %d %s", rec.Code, rec.Body)
+	}
+	if ok, err := svc.peerSigned(ctx, p, m, sig); ok || err != nil {
+		t.Errorf("a forgotten key's signature verifies: %v", err)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM federation_peer_keys WHERE domain = 'c.example'`); n != 1 {
+		t.Errorf("c.example's history: %d keys, want 1", n)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.peer.keys_forget' AND actor_key_id = 1
+		AND target_type = 'federation_peer' AND target_id = 'a.example' AND result = 'ok' AND detail = '{"dropped":2}'`); n != 1 {
+		t.Errorf("keys_forget rows %d, want 1", n)
+	}
+	if rec := adminDo(svc, admin, http.MethodDelete, path, ""); strings.TrimSpace(rec.Body.String()) != `{"domain":"a.example","dropped":0}` {
+		t.Errorf("again: %d %s", rec.Code, rec.Body)
+	}
+	wantErr(t, adminDo(svc, []string{"read"}, http.MethodDelete, path, ""), http.StatusForbidden, "forbidden")
+	wantErr(t, adminDo(svc, admin, http.MethodDelete, "/v1/federation/peers/a_b/keys/history", ""), http.StatusBadRequest, "invalid_domain")
+	wantErr(t, adminDo(svc, admin, http.MethodDelete, "/v1/federation/peers/"+local+"/keys/history", ""), http.StatusBadRequest, "own_domain")
 }

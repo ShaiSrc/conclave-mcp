@@ -168,16 +168,16 @@ func TestFollowRemote_Policy(t *testing.T) {
 // asks only allowed peers.
 func TestFollowRemote_SeenPeer(t *testing.T) {
 	a, b := newLiveRig(t), newLiveRig(t)
-	allow(t, a.svc, b.svc.id)
+	allow(t, a.svc, b.svc.id())
 	b.svc.mode = modeOpen
-	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id.Public); err != nil {
+	if _, err := b.svc.peers.RecordSeen(context.Background(), a.svc.Domain(), a.svc.id().Public); err != nil {
 		t.Fatal(err)
 	}
 	a1 := a.followBot(t, "a1", "")
 	b.followBot(t, "b1", "open")
 	wantErr(t, a.followTo(a1, "b1@"+b.svc.Domain()), http.StatusForbidden, "peer_not_allowed")
 	wantErr(t, a.followTo(a1, "b1@c.example"), http.StatusForbidden, "peer_not_allowed")
-	wantErr(t, b.fedDo(signedReq(t, a.svc.id, b.svc.Domain(), http.MethodPost, "/fed/v1/follows/withdraw",
+	wantErr(t, b.fedDo(signedReq(t, a.svc.id(), b.svc.Domain(), http.MethodPost, "/fed/v1/follows/withdraw",
 		map[string]string{"follower": "a1@" + a.svc.Domain(), "handle": "b1"})), http.StatusForbidden, "peer_not_allowed")
 	for _, g := range []*roomRig{a, b} {
 		if n := count(t, g.db, `SELECT COUNT(*) FROM follows`) + count(t, g.db, `SELECT COUNT(*) FROM rooms`); n != 0 {
@@ -193,7 +193,11 @@ func TestFollowRemote_IncomingLimit(t *testing.T) {
 	g.followBot(t, "b1", "approve")
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	g.svc.now = func() time.Time { return now }
-	g.svc.limiters[h.id.Domain] = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
+	lims, err := g.svc.limitersOf(context.Background(), h.id.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lims.requests = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
 	for i := range 100 {
 		if rec := h.follow(t, g, h.addr(fmt.Sprintf("x%d", i)), "b1"); rec.Code != http.StatusCreated {
 			t.Fatalf("follow %d: %d %s", i, rec.Code, rec.Body)
@@ -395,7 +399,7 @@ func TestFollowRemote_PeerAnswers(t *testing.T) {
 	for _, c := range []struct {
 		status       int
 		code, reason string
-	}{{http.StatusForbidden, "follow_refused", "policy"}, {http.StatusForbidden, "peer_not_allowed", "peer"},
+	}{{http.StatusForbidden, "follow_refused", "policy"}, {http.StatusForbidden, "peer_not_allowed", "peer"}, {http.StatusForbidden, "bot_blocked", "blocked"},
 		{http.StatusForbidden, "forbidden", "refused"}, {http.StatusNotFound, "not_found", "not a bot"},
 		{http.StatusTooManyRequests, "rate_limited", "limit"}} {
 		h.setAnswer(answerWith(c.status, `{"error":{"code":"`+c.code+`","message":"no"}}`))
@@ -749,9 +753,9 @@ func TestFollowRemote_FollowerProposalRefused(t *testing.T) {
 	author := "b1@" + b.svc.Domain()
 	for _, typ := range []string{"status_update", "question"} {
 		nonce := newNonce()
-		sig := b.svc.id.SignMessage(MessageSig{Room: feed + "@" + a.svc.Domain(), Author: author, ContentType: "text/plain",
+		sig := b.svc.id().SignMessage(MessageSig{Room: feed + "@" + a.svc.Domain(), Author: author, ContentType: "text/plain",
 			MessageType: typ, Content: "hi", Nonce: nonce})
-		wantErr(t, a.fedDo(signedReq(t, b.svc.id, a.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+feed+"/messages",
+		wantErr(t, a.fedDo(signedReq(t, b.svc.id(), a.svc.Domain(), http.MethodPost, "/fed/v1/rooms/"+feed+"/messages",
 			map[string]any{"author": author, "content": "hi", "content_type": "text/plain", "message_type": typ, "sig": sig, "nonce": nonce})),
 			http.StatusForbidden, "missing_right")
 	}
@@ -767,8 +771,8 @@ func TestFollowRemote_FollowersPrivate(t *testing.T) {
 	ctx := context.Background()
 	a, b := dmPair(t)
 	c := newLiveRig(t)
-	allow(t, a.svc, c.svc.id)
-	allow(t, c.svc, a.svc.id)
+	allow(t, a.svc, c.svc.id())
+	allow(t, c.svc, a.svc.id())
 	a1, a2 := a.followBot(t, "a1", "open"), a.followBot(t, "a2", "")
 	b1, c1 := b.followBot(t, "b1", ""), c.followBot(t, "c1", "")
 	to := "a1@" + a.svc.Domain()
@@ -1051,8 +1055,6 @@ func TestFollowRemote_WithdrawReceiver(t *testing.T) {
 	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE status = 'accepted'`); n != 1 || count(t, g.db, `SELECT COUNT(*) FROM follows`) != 1 {
 		t.Errorf("follows left: %d accepted", n)
 	}
-	g.svc.mu.Lock()
-	g.svc.followLimits[h.id.Domain] = rate.NewLimiter(0, 0)
-	g.svc.mu.Unlock()
+	wantStatus(t, adminDo(g.svc, admin, http.MethodPatch, "/v1/federation/peers/"+h.id.Domain, `{"limits":{"follow_requests_per_hour":0}}`), http.StatusOK)
 	wantErr(t, withdraw(h.addr("z")), http.StatusTooManyRequests, "rate_limited")
 }

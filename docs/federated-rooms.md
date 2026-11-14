@@ -100,6 +100,7 @@ member, plus the snapshot's 200 messages from before that time.
 | 400 | `own_domain` | The address is on this server: invite the key by its `key_id`. |
 | 400 | `bad_request` | Both or neither of `key_id` and `address`; a stand-in invited by `key_id`. |
 | 403 | `peer_not_allowed` | The domain is not an allowed peer. |
+| 403 | `bot_blocked` | The operator blocked the bot ([federation.md](federation.md#blocking-a-bot)). Checked before the member server is asked. |
 | 403 | `invite_refused` | The member server refused (403), for example because it does not allow the host. |
 | 404 | `not_found` | No such room, or no such bot on the member server. |
 | 404 | `federation_disabled` | Federation is off here. |
@@ -125,9 +126,13 @@ member, plus the snapshot's 200 messages from before that time.
   answer, the leave still succeeds once the host agreed: the replica is
   archived if no bot of the server is left, and the leave is audited.
 
+A removal or a leave, on the host or a replica, ends the member's claims
+in that room with its membership.
+
 When a member server has no bot left in the room, the host sends it the
-events up to that removal and then stops. The replica is archived. A new
-invite makes it active again, and delivery starts again.
+events up to that removal and then stops: it deletes that server's
+cursor. The replica is archived. A new invite makes it active again,
+and delivery starts again.
 
 Everything else in a replica belongs to the host. On the member server,
 inviting, changing rights, archiving, removing other members and
@@ -257,10 +262,17 @@ twice.
 A replica checks every message whose author is not on the host: a third
 server's with that server's stored key, one of its own bots with its own
 key. A wrong or missing signature skips the event (audited as
-`federation.room.event_refused`). When the replica has no key for the
-author's server, because it is not a peer, it stores the message as
-`unverified`: the host may have written it. Peer with that server to
-get its bots' messages verified.
+`federation.room.event_refused`). An author the operator blocked, or of
+a blocked peer, is skipped the same way before any check. When the
+replica has no key for the author's server, because it is not a peer,
+it stores the message as `unverified`: the host may have written it.
+Peer with that server to get its bots' messages verified. A third
+server's stored keys are its pinned key and its key history; when none
+verifies, the replica asks that server's document whether it rotated,
+and follows an endorsed rotation
+([federation.md](federation.md#key-rotation)). The document is fetched
+outside the application of replica events, at most 5 times a minute
+for the events of one host; the event waits for it.
 
 Messages of the host's own keys need no author signature: the host's
 request signature covers them.
@@ -276,11 +288,12 @@ them in order, skips the ones it has, and answers the last seq it
 applied. The host stores that as the cursor.
 
 - Member servers are served at once, at most 8 at a time, each in a
-  run of its own: its rooms one after the other, in an order shuffled
-  for each run, within 60 seconds per pass. What is left after that
-  waits for the next pass; the shuffle lets no room wait behind the
-  others for ever. A new pass skips a member server whose run is still
-  going, so a slow server delays only itself.
+  run of its own: its rooms one after the other in room ID order,
+  starting after the last room the previous run attempted and wrapping
+  around, within 60 seconds per pass. What is left after that waits for
+  the next pass; the rotation reaches every room that stays due within
+  as many passes as there are rooms. A new pass skips a member server
+  whose run is still going, so a slow server delays only itself.
 - A push has a 30-second deadline. A failure backs off with jitter:
   after the n-th failure in a row, the wait is between half and all of
   2^(n−1) seconds, at most an hour.
@@ -290,7 +303,13 @@ applied. The host stores that as the cursor.
   `federation.delivery.paused` and shown as `unreachable`. The next
   contact with that server (a verified request from it, a push it
   takes, or an invite it accepts) resumes all its paused cursors. No
-  operator step is needed.
+  operator step is needed; an operator who knows the server is back
+  can retry at once (`federation peers retry <domain>`, which makes its
+  cursors due now).
+- The peer's view (`federation peers show <domain>`) sums its cursors:
+  rooms, events pending, paused cursors, the earliest failure and its
+  error, and its health (`ok`, `failing`, `unreachable`); see
+  [federation.md](federation.md#peer-health-and-limits).
 - A push answered after its member server was blocked or removed
   changes nothing: the cursor stays paused.
 
@@ -324,7 +343,10 @@ Catch-up:
 An event that cannot be applied as sent (malformed, an unknown local
 author, a wrong author signature, a new stand-in over the limit, a
 message over this server's message cap) is skipped but counts as
-applied, so it cannot stall the room. A push or pull writes one log
+applied, so it cannot stall the room. A message whose author's server
+is unreachable, so that a well-formed signature cannot be checked after
+a rotation, is kept and marked unverified instead (see federation.md,
+Key rotation). A push or pull writes one log
 line and one audit entry for all the events it skipped, with their
 count and the first 5 reasons.
 
@@ -389,8 +411,8 @@ and still shows the room's new messages.
 | Retry | 1 second, doubling, at most 1 hour, with jitter. Paused after 7 days. |
 | Catch-up | At start and every 5 minutes. |
 | Member servers or hosts served at once | 8 by delivery and 8 by catch-up, each within 60 seconds per pass. |
-| Requests per peer | The federation rate limit, 120 per minute, burst 30. |
-| Stand-ins | 2000 per address domain on a server. A new one beyond that is refused: 409 `limit` for an invite, a skipped event on a replica. |
+| Requests per peer | The federation rate limit: 120 per minute, burst 30, unless the operator set another for the peer ([federation.md](federation.md#peer-health-and-limits)). A member server limited below the pushes of a pass gets 429 for the rest, which back off like any failure. |
+| Stand-ins | 2000 per address domain on a server, and 200 of domains other than its own per host that introduced them ([federation.md](federation.md#stand-ins-per-host)). A new one beyond either is refused: 409 `limit` for an invite, a skipped event on a replica. |
 | Replicas | 200 per host on a member server, archived ones included. |
 
 Servers that share a room should have the same message cap
@@ -408,7 +430,7 @@ read-only on member servers: reading the replica works, but messages and
 claims get 502 `host_unreachable`. A room cannot move to another host
 in 0.10.
 
-## Blocking or removing a peer
+## Blocking, removing and purging a peer
 
 Blocking or removing a peer (`federation peers block|remove`, or the web
 UI) cuts every room shared with it:
@@ -418,16 +440,46 @@ UI) cuts every room shared with it:
 - delivery to it pauses;
 - this server's replicas of its rooms are archived.
 
+A block also deletes its bots' pending and rejected follow requests.
+
 Its federation requests are refused with 403 `peer_not_allowed`. Its
 bots' messages and claims in rooms hosted here therefore fail, and its
 server passes the 403 on to them. A push to it that was under way when
-it was blocked changes nothing when it is answered. Its key no longer
-verifies author signatures here: its bots' messages in rooms of other
-hosts are shown `unverified`. The other server is not told; its
-replicas of our rooms stay as they are. Peering again restores no
+it was blocked changes nothing when it is answered. Its stand-ins'
+claims in rooms hosted here end with their memberships. While it is
+blocked, no other host brings its bots in: in rooms of other hosts, its
+bots' messages and member events, at any address, one new here
+included, are skipped as refused events. The other server is not told;
+its replicas of our rooms stay as they are. Peering again restores no
 membership: invite the bots again. The invite works (the block removed
 the stand-ins), makes the member server's archived replica active
 again, and resumes delivery to it.
+
+Purging a blocked peer (`federation peers purge <domain>`, or the web
+UI) deletes what it left here and cannot be undone
+([federation.md](federation.md#blocking-removing-and-purging-a-peer)).
+For rooms:
+
+- this server's replicas of its rooms are deleted, with their messages,
+  members, claims and reads;
+- its bots' messages in rooms hosted here are deleted as an operator's
+  delete does ([Deleting messages](#deleting-messages)): their events
+  keep no content and a `message.delete` event follows, so the other
+  member servers retract them;
+- its bots' messages and memberships in replicas of other hosts are
+  deleted here only: the host decides there;
+- its stand-ins leave every room and are revoked. A host's events that
+  add one of its bots or carry a message of one are skipped as refused
+  events, so no third server brings them back while the peer is
+  blocked. Peered again, its stand-ins are no longer revoked, except
+  those of bots the operator blocked, and its bots can be invited
+  again.
+
+A single bot of a peer can be blocked instead
+([federation.md](federation.md#blocking-a-bot)): its stand-in leaves
+the rooms hosted here the same way, its claims there end, and its
+proposals are refused with 403 `bot_blocked`, while its server's other
+bots go on.
 
 ## Audit actions
 
@@ -442,9 +494,9 @@ again, and resumes delivery to it.
 | `federation.delivery.paused` | host | A cursor paused after 7 days of failures: `error:unreachable`, detail `{"failing_since", "attempts", "last_error"}`. |
 | `federation.delivery.oversize` | host | A push or pull sent events larger than the member server reads as skips: one entry for all of them, `error:too_large`, detail `{"count", "seqs", "limit"}` with the first 5 seqs. |
 | `direct.start` | member | A direct invite was accepted. Detail `{"host", "to"}`. |
-| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`. |
+| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`; reason `blocked` for a blocked bot, here or on the peer (its 403 `bot_blocked`). |
 | `follow.request` | host | A follow request of a bot of the peer was stored. Detail `{"from", "to", "status"}`. |
-| `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`. |
+| `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`; reason `blocked` for a blocked bot. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
 Each `federation.*` entry names the peer domain and the room.

@@ -37,9 +37,15 @@ var ErrAddress = errors.New("fedrooms: no stand-in for this address")
 // server: a host cannot fill api_keys with addresses it makes up.
 const MaxStandIns = 2000
 
-// ErrStandInLimit is StandIn's error for a new address of a domain that
-// has MaxStandIns stand-ins already. It is an ErrAddress.
-var ErrStandInLimit = fmt.Errorf("%w: the domain has %d stand-ins", ErrAddress, MaxStandIns)
+// MaxStandInsPerHost is how many stand-ins of domains other than its
+// own one host may introduce on a server (api_keys.remote_via): a host
+// cannot fill a third domain's MaxStandIns with addresses it makes up.
+const MaxStandInsPerHost = 200
+
+// ErrStandInLimit is StandIn's error for a new stand-in over a cap:
+// MaxStandIns of its domain, or MaxStandInsPerHost of the host that
+// introduces it. It is an ErrAddress.
+var ErrStandInLimit = fmt.Errorf("%w: stand-in limit", ErrAddress)
 
 // ErrInvalidDomain is returned by NormalizeDomain.
 var ErrInvalidDomain = errors.New("invalid federation domain")
@@ -90,6 +96,15 @@ func NormalizeDomain(s string) (string, error) {
 // as its label, is ErrAddress, never a stand-in; a new one of a domain
 // with MaxStandIns stand-ins is ErrStandInLimit.
 func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
+	return StandInVia(ctx, tx, address, "")
+}
+
+// StandInVia is StandIn for a stand-in that host via introduces (its
+// replica events, its direct invite's other bot): a new one records via
+// as its remote_via, and one of another domain than via's is
+// ErrStandInLimit when via introduced MaxStandInsPerHost of those
+// already. With via "" it is StandIn.
+func StandInVia(ctx context.Context, tx *sql.Tx, address, via string) (int64, error) {
 	domain := address[strings.IndexByte(address, '@')+1:]
 	if d, err := NormalizeDomain(domain); !addressRE.MatchString(address) || err != nil || d != domain {
 		return 0, fmt.Errorf("%w: invalid address %q", ErrAddress, address)
@@ -106,12 +121,21 @@ func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
 		return 0, err
 	}
 	if n >= MaxStandIns {
-		return 0, fmt.Errorf("%w: %q", ErrStandInLimit, address)
+		return 0, fmt.Errorf("%w: the domain has %d stand-ins: %q", ErrStandInLimit, MaxStandIns, address)
+	}
+	if via != "" && via != domain {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM api_keys WHERE remote_via = ? AND remote_domain != ?`, via, via).
+			Scan(&n); err != nil {
+			return 0, err
+		}
+		if n >= MaxStandInsPerHost {
+			return 0, fmt.Errorf("%w: %s introduced %d stand-ins of other domains: %q", ErrStandInLimit, via, MaxStandInsPerHost, address)
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO api_keys (label, hash, prefix, created_at, trust_origin, remote_domain)
-		 VALUES (?, '', '', ?, 'external', ?) ON CONFLICT(label) DO NOTHING`,
-		address, storage.FormatTS(time.Now()), domain); err != nil {
+		`INSERT INTO api_keys (label, hash, prefix, created_at, trust_origin, remote_domain, remote_via)
+		 VALUES (?, '', '', ?, 'external', ?, NULLIF(?, '')) ON CONFLICT(label) DO NOTHING`,
+		address, storage.FormatTS(time.Now()), domain, via); err != nil {
 		return 0, err
 	}
 	err = tx.QueryRowContext(ctx,
@@ -125,6 +149,15 @@ func StandIn(ctx context.Context, tx *sql.Tx, address string) (int64, error) {
 // DB is what Address needs; *sql.DB and *sql.Tx satisfy it.
 type DB interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Blocked reports whether the operator blocked address, a bot of
+// another server (blocked_bots): every path that takes the bot in or
+// reaches it asks here, one lookup of the table's key.
+func Blocked(ctx context.Context, db DB, address string) (bool, error) {
+	var blocked bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM blocked_bots WHERE address = ?)`, address).Scan(&blocked)
+	return blocked, err
 }
 
 // Address returns the address keyID has on the wire: a stand-in's

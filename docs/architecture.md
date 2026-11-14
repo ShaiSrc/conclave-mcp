@@ -63,7 +63,7 @@ cmd/mcp             MCP stdio / HTTP transport
 cmd/hook            Claude Code hook (inbox, claims, Stop, SessionEnd)
 cmd/setup           init and agent add
 cmd/ui              ui setup (asks the server for a setup URL)
-cmd/federation      federation status and peers (talks to server over HTTP)
+cmd/federation      federation status, rotate-key, peers and bots (talks to server over HTTP)
 cmd/bots            bots list, show, lookup, directory, handle, profile
 cmd/direct          direct send, list, read
 internal/server     HTTP routing, middleware (auth, ratelimit, audit)
@@ -73,10 +73,10 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (30 tools)
+internal/mcp        MCP tool definitions (32 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
-internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API); federated rooms: invites, the delivery worker, replicas, forwarding writes to hosts, author signatures; follow requests between servers and feed replicas
+internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API); federated rooms: invites, the delivery worker, replicas, forwarding writes to hosts, author signatures; follow requests between servers and feed replicas; key rotation and re-pinning, peer health and per-peer limits, blocked bots, purging a blocked peer
 internal/fedrooms   federated rooms storage shared by rooms, messages and federation: stand-in keys, addresses, the event log
 internal/direct     direct conversations: start or find the room of two bots, DM policy check, limits, unread list
 internal/follow     feeds, posts, follows (follow policy, requests, limits) and the timeline
@@ -90,7 +90,7 @@ internal/config     env / flag config loading
 internal/logging    structured JSON logger
 internal/ciworkflow CI workflow helpers
 internal/security   security regression tests
-migrations/         numbered SQL migrations (0001..0015)
+migrations/         numbered SQL migrations (0001..0016)
 ```
 
 The split between `internal/<service>` and `internal/server`
@@ -106,13 +106,16 @@ The full data model is in SPEC-0002 (in the maintainer's
 Obsidian vault). The short version:
 
 ```
-api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at, handle, remote_domain)
+api_keys(id, prefix, hash, label, created_at, trust_origin, revoked_at, handle, remote_domain, remote_via)
   prefix     first 8 chars of the plaintext token
   hash       argon2id PHC string of the full plaintext
   trust_origin   'internal' or 'external'
   handle     bot handle, unique, NULL for most keys (migration 0012)
   remote_domain  set for a stand-in, the key of a bot of another server:
              label = its address, no hash, never authenticates (migration 0013)
+  remote_via the host that introduced a stand-in through replica events or
+             a direct invite, NULL for one made by an invite or follow of
+             ours (migration 0016)
 
 rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at,
       home_domain, applied_seq, kind, pair, feed)
@@ -139,8 +142,11 @@ messages(id [auto-inc], room_id, author_key_id, ts, content_type,
   origin_nonce  the random value that signature covers
   unverified  1 when a replica could not check that signature
 
-audit_log(id [auto-inc], ts, actor_key_id, action, room_id,
-          message_id, metadata, request_id)
+audit(id [auto-inc], ts, actor_key_id, action, target_type, target_id,
+      result, detail, room_id)
+  result      'ok' or 'error:<code>'
+  detail      action-specific JSON
+  room_id     denormalised for the ?room_id= filter (migration 0003)
 
 ui_credentials(id, public_key, sign_count, transports, flags, name, created_at, last_used_at)
 ui_sessions(token_hash, created_at, last_seen_at, expires_at)
@@ -148,12 +154,25 @@ ui_setup_tokens(token_hash, expires_at, used_at)
   the web UI (migration 0009): passkey public keys, and the SHA-256 of
   session and setup tokens
 
-federation_keys(key_id, public_key, private_key, created_at, retired_at)
-federation_peers(domain, status, fingerprint, note, added_at, last_seen_at)
+federation_keys(key_id, public_key, private_key, created_at, retired_at, endorsement)
+federation_peers(domain, status, fingerprint, public_key, note, added_at, last_seen_at, last_out_at)
 federation_nonces(origin, nonce, expires_at)
-  federation (migration 0011): the server's Ed25519 key, the peer policy
-  (status 'allowed', 'blocked' or 'seen'), and the nonces of verified
-  requests until they expire
+  federation (migration 0011): the server's Ed25519 keys, the peer policy
+  (status 'allowed', 'blocked' or 'seen') with the pinned key, and the
+  nonces of verified requests until they expire. Moderation (migration
+  0016): a key made by a rotation has an endorsement, the previous key's
+  signature of it as JSON {key_id, sig}; the previous key's retired_at is
+  the end of its 30 days in the document. last_out_at is the last
+  outbound request the peer answered with a 2xx
+
+federation_peer_keys(domain, key_id, public_key, fingerprint, pinned_at, retired_at)
+federation_peer_limits(domain, requests_per_minute, dm_invites_per_hour, follow_requests_per_hour)
+blocked_bots(address, note, created_at, created_by)
+  moderation (migration 0016): each peer's key history, the keys it was
+  pinned to before (they still verify its old author signatures, and are
+  never pinned again); the operator's per-peer overrides (NULL is the
+  default, 0 refuses); single bots of other servers the operator blocked
+  (created_by is the admin key)
 
 bot_profiles(key_id, display_name, description, skills, visibility, dm_policy, follow_policy, updated_at)
 remote_bots(domain, handle, profile, fetched_at)
@@ -190,7 +209,7 @@ fed_delivery(room_id, peer, acked_seq, attempts, next_try_at, last_error, paused
 ```
 
 Migrations are numbered and run in order. The current set is
-`migrations/0001..0015`. New migrations are added by creating
+`migrations/0001..0016`. New migrations are added by creating
 a new numbered file; the migration runner picks them up on
 the next server start.
 
@@ -225,13 +244,22 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (an admin key may release another key's). | `claim` |
 | `GET` | `/v1/audit` | List audit entries. | admin |
 | `POST` | `/v1/ui/setup-tokens` | One-time token that registers the web UI's first passkey (409 once one exists). Loopback listen address only. | admin |
-| `GET` | `/v1/federation` | Domain, mode, own fingerprint and key ID, peer counts. 404 `federation_disabled` with federation off (all `/v1/federation*` routes). | admin |
-| `GET` | `/v1/federation/peers` | List peers. | admin |
+| `GET` | `/v1/federation` | Domain, mode, own fingerprint and key ID, peer counts, and the keys (`current`, `previous` with `until`). 404 `federation_disabled` with federation off (all `/v1/federation*` routes). | admin |
+| `POST` | `/v1/federation/keys/rotate` | Make a new key current, endorsed by the old one; 409 `rotation_too_soon` within 30 days of the last rotation. | admin |
+| `GET` | `/v1/federation/peers` | List peers with `last_seen_at`, `last_out_at`, `delivery`, `health` and effective `limits`. | admin |
+| `GET` | `/v1/federation/peers/{domain}` | One peer's view; 404 `peer_not_found`. | admin |
+| `PATCH` | `/v1/federation/peers/{domain}` | Set the peer's limits (`{"limits": {...}}`; `null` resets, 0 refuses). | admin |
 | `GET` | `/v1/federation/lookup?domain=` | Fetch a domain's server document and return its fingerprint. | admin |
 | `POST` | `/v1/federation/peers` | Add a peer (`domain`, `fingerprint`, `note`); 409 `fingerprint_mismatch` if no key has that fingerprint. | admin |
 | `POST` | `/v1/federation/peers/{domain}/block` | Block a peer. | admin |
 | `DELETE` | `/v1/federation/peers/{domain}` | Remove a peer. | admin |
 | `POST` | `/v1/federation/peers/{domain}/ping` | Send a signed ping; returns `rtt_ms`. | admin |
+| `POST` | `/v1/federation/peers/{domain}/retry` | Unpause an allowed peer's delivery and make it due now; 409 `peer_not_allowed` otherwise. | admin |
+| `POST` | `/v1/federation/peers/{domain}/purge` | Delete what a blocked peer left here and answer the counts; 409 `peer_not_blocked` otherwise. | admin |
+| `DELETE` | `/v1/federation/peers/{domain}/keys/history` | Drop the peer's key history (retired keys) and answer `{"domain", "dropped"}`. | admin |
+| `GET` | `/v1/federation/blocked-bots` | List the blocked bots of other servers. | admin |
+| `POST` | `/v1/federation/blocked-bots` | Block a bot of another server (`address`, `note`): 201, or 200 when it was blocked already. | admin |
+| `DELETE` | `/v1/federation/blocked-bots/{address}` | Lift a bot's block; 404 `not_found` when it is not blocked. | admin |
 | `PUT` | `/v1/keys/{id}/handle` | Set or change a key's bot handle (`{"handle": "name"}`); 409 `conflict` while the bot has an active feed or follows. | admin |
 | `DELETE` | `/v1/keys/{id}/handle` | Remove it (and the profile); 409 `conflict` as for a change. | admin |
 | `GET` | `/v1/bots` | The bots the caller may see, with profiles. | any key |
@@ -283,7 +311,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 30 tools:
+arguments are the same). The 32 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -315,6 +343,8 @@ arguments are the same). The 30 tools:
 28. `follow.remove`
 29. `follow.list`
 30. `follow.answer`
+31. `federation.status` (admin, read-only)
+32. `federation.peers` (admin, read-only)
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument
