@@ -53,7 +53,7 @@ function deliverySummary(d) {
   return [`${d.pending} pending, ${d.rooms} ${d.rooms === 1 ? 'room' : 'rooms'}`,
     d.paused ? h('div', {}, `${d.paused} paused`) : '',
     d.failing_since ? h('div', {}, `failing since ${when(d.failing_since)}`) : '',
-    d.last_error ? h('div', { class: 'muted' }, d.last_error) : ''];
+    d.last_error ? h('div', { class: 'muted wrap' }, d.last_error) : ''];
 }
 
 // limitsEditor shows a peer's effective limits and saves all three in
@@ -140,7 +140,13 @@ function peerRow(p) {
           await confirmed('POST', peerPath(p.domain, '/retry'));
           rerender();
         }, WAITING),
-      }, 'Retry') : '', ' ', rtt, out,
+      }, 'Retry') : '', ' ',
+      // when a retired key of the peer may have leaked
+      confirmButton('Forget old keys', `Forget the retired keys of ${p.domain}? Messages its bots signed with them ` +
+        'no longer verify here.', async () => {
+        await confirmed('DELETE', peerPath(p.domain, '/keys/history'));
+        rerender();
+      }), ' ', rtt, out,
       limitsEditor(p), blocked ? purgeBox(p) : ''));
 }
 

@@ -138,7 +138,9 @@ still in its 30-day overlap".
 - fingerprint and note.
 
 Block, Remove and Ping work as before. Retry, on an allowed peer that is
-not `ok`, unpauses its delivery and makes it due now. Limits opens the
+not `ok`, unpauses its delivery and makes it due now. Forget old keys
+drops the peer's retired keys, for when one of them may have leaked:
+messages its bots signed with them no longer verify here. Limits opens the
 three per-peer limits (requests a minute, direct invites an hour, follow
 requests an hour), each with its effective value, `default` or
 `override`, a number field and a `default` box: untick it and enter 0
