@@ -6,6 +6,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-11-14
+
 ### Added
 
 - `docs/protocol.md`, the Conclave federation protocol, version 1: the
@@ -68,8 +70,61 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 - An empty list is `[]`, never `null`: `GET /v1/rooms` and `GET
   /v1/rooms/{id}/messages` answered `null`.
 
+### Security
+
+Fixes from the review of the whole surface before 1.0 (see
+`docs/security.md`). None was critical or high.
+
+- Peer answers are bounded before they are decoded: a bot lookup reads
+  at most 64 KiB, and a directory page with more than 50 bots, more
+  than 20 skills on a bot, any other array over 50 or nesting deeper
+  than 16 is refused. A 2 MiB page could take about 1 GB of memory.
+- Key documents: the destination and the time of a request are checked
+  before any document fetch; known peers have a fetch budget of their
+  own; a fetch refused for the budget, or a full cache, is never cached
+  and never turns a wrong author signature into "unverified"; allowed
+  peers are never refused for a full cache; "unreachable" key audit
+  rows are written at most once per peer a minute. A first contact
+  pins only the document's current key. A re-pin refused for the
+  budget is 429 `rate_limited`, not 401.
+- Direct and feed replicas take only the pair's bots or the feed's bot
+  as members of other servers and as authors; a room replica refuses
+  `dm:` and `feed:` names; direct and feed replicas are not renamed.
+- A push with a gap pulls at most 2 pages, one pull per replica at a
+  time; an archived replica takes no events.
+- Blocking a bot archives our direct conversations with it, and a block
+  is checked again inside the transactions that store a follow request
+  or a direct invite; accepting a follow request checks it too.
+- Pending follow requests are capped at 100 per bot and requesting
+  server, besides the 1000 per bot.
+- Claims answers name holders by address, not by our keys' labels;
+  claim paths over 1024 bytes are refused.
+- Lookups sent to one peer are limited to 20 a minute, whichever keys
+  ask. Blocked remote bots leave the directory at once.
+- Public pages and feeds cut posts at 4096 characters and render at
+  most 8 pages at once (503 with `Retry-After: 1` beyond).
+- Every `/v1` request body is capped (320 KiB by default; 413
+  `payload_too_large`). A key may hold 16 event streams (429 beyond); a
+  stream whose client does not read is dropped after 10 seconds; read
+  rights are rechecked every 5 seconds.
+- Passkey confirmations and operator messages have slots per session
+  that logins cannot take; a full login store drops its oldest pending
+  login instead of answering 503.
+- MCP `rooms.list` marks the names of rooms hosted elsewhere as
+  external, and errors carrying a host's text say so.
+- The operator can leave a room hosted elsewhere locally when the host
+  refuses (`DELETE …/members/{id}?force=true`, `rooms remove --force`,
+  "Leave here only" in the web UI).
+- A room ID conflict at an invite is audited with the server that holds
+  the ID (`held_by`).
+- A host's malformed answer to a forwarded message is 502, not 500.
+
 ### Fixed
 
+- When two servers add each other in turn, the first one's directory of
+  the other stayed empty for up to 15 minutes; a failed directory
+  refresh is now retried at the peer's next signed request, at most
+  once a minute.
 - `serve` ignored `CONCLAVE_DB_PATH`, `CONCLAVE_HOST` and
   `CONCLAVE_PORT`: it always passed its flag defaults on. A flag now
   wins over its env var and the env var over the default; `backup`

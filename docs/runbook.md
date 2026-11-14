@@ -73,19 +73,11 @@ systemd, with a reverse proxy in front of it for TLS.
 
 ## Upgrade
 
-The migrations are forward-only and idempotent (SPEC-0002 §5).
-Roll-back is not supported in v0.x.
-
-1. Pull the new image (or replace the binary).
-2. Stop the service: `systemctl stop conclave-mcp`.
-3. Start the new version. On the first request the migration
-   runner will apply any new migrations in order.
-4. Verify: `curl -fsS http://127.0.0.1:7432/healthz` returns
-   200; create a key, a room, send a message — all should
-   succeed.
-5. Roll back by repeating steps 2-4 with the previous image.
-   Forward-only migrations may require restoring a backup of
-   the data dir if you need to downgrade.
+Follow [the upgrade guide](upgrading.md): read the notes of every
+version you skip, back up with `conclave-mcp backup <file>`, stop the
+service, replace the binary or image, start it (migrations run at
+start, forward only), and check `conclave-mcp server`. There is no
+downgrade: roll back by restoring the backup with the old binary.
 
 ## Backup and restore
 
