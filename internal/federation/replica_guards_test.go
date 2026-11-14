@@ -209,3 +209,48 @@ func TestFollowRemote_FeedBotOnly(t *testing.T) {
 		t.Errorf("%d events refused, want 3", n)
 	}
 }
+
+// Blocking a bot archives our replicas of the conversations with it:
+// our bots can no longer write to it through its host.
+func TestBlockBot_ArchivesConversation(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1 := g.dmBot(t, "b1", "peers")
+	room := ulid.Make().String()
+	if rec := h.directInvite(t, g, room, h.pairOf(g, "b1"), "b1"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	other := ulid.Make().String() // a conversation with another bot of the server stays
+	if rec := h.directInvite(t, g, other, dmName("b1@"+local, h.addr("z")), "b1"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	g.block(t, h.addr("x"))
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NOT NULL`, room); n != 1 {
+		t.Error("the conversation with the blocked bot is active")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, other); n != 1 {
+		t.Error("the conversation with another bot was archived")
+	}
+	before := len(h.received())
+	wantErr(t, g.do(b1, http.MethodPost, "/rooms/"+room+"/messages", `{"content":"hi","message_type":"question"}`), http.StatusGone, "not_found")
+	if len(h.received()) != before {
+		t.Error("a message was forwarded to the blocked bot's server")
+	}
+}
+
+// The block check of a direct invite runs in its transaction too: a bot
+// whose stand-in is revoked does not join a conversation.
+func TestDirectRemote_RevokedStandIn(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	g.dmBot(t, "b1", "peers")
+	if _, err := g.db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, trust_origin, remote_domain, revoked_at)
+		VALUES (?, '', '', '2026-01-01T00:00:00Z', 'external', ?, '2026-01-02T00:00:00Z')`, h.addr("x"), h.id.Domain); err != nil {
+		t.Fatal(err)
+	}
+	room := ulid.Make().String()
+	wantErr(t, h.directInvite(t, g, room, h.pairOf(g, "b1"), "b1"), http.StatusForbidden, "bot_blocked")
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ?`, room); n != 0 {
+		t.Error("the conversation was made")
+	}
+}

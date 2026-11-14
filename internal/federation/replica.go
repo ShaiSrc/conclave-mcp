@@ -398,11 +398,21 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 // so is an invite while we host a room of the pair with a lower id:
 // when both bots start at once, the lower room is the pair's on both
 // servers, since each refuses the other's higher one. Rooms of the pair
-// are those whose pair is name, the pair's name. On an error it answers
-// and returns false.
+// are those whose pair is name, the pair's name. A bot refusedBot
+// refuses is 403 bot_blocked. On an error it answers and returns false.
 func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, name, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
 	ctx := r.Context()
+	// Blocked in the transaction too: a block between the check before it
+	// and here would otherwise leave the bot in the conversation.
+	switch err := refusedBot(ctx, tx, other); {
+	case errors.Is(err, errRefused):
+		refuse(http.StatusForbidden, "bot_blocked", other+" is blocked on this server")
+		return false
+	case err != nil:
+		s.fail(w, r, err)
+		return false
+	}
 	key, err := fedrooms.StandInVia(ctx, tx, other, origin)
 	if errors.Is(err, fedrooms.ErrStandInLimit) {
 		refuse(http.StatusConflict, "limit", err.Error())
@@ -1313,8 +1323,9 @@ type blockCounts struct {
 
 // blockBot blocks address, a bot of another server, for the admin key
 // actor, and cuts it off. In one transaction its row is stored, its
-// stand-in revoked and taken out of the replicas here, and the follows
-// from and to it end, our bots leaving the replicas of its feed. Then
+// stand-in revoked and taken out of the replicas here, our replicas of
+// direct conversations with it archived, and the follows from and to it
+// end, our bots leaving the replicas of its feed. Then
 // its stand-in leaves each room hosted here with a member.remove event
 // (leaveHosted), and its server is told, best effort, that our bots
 // withdraw their pending follows of it and leave its feed. It reports
@@ -1393,6 +1404,11 @@ func (s *Service) blockBot(ctx context.Context, address, note string, actor int6
 	if err == nil {
 		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE feed = ? AND home_domain IS NOT NULL`,
 			now, address)
+	}
+	if err == nil { // so are our replicas of the conversations with it: our bots no longer write to it there
+		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?1) WHERE kind = 'direct'
+			AND home_domain = ?3 AND instr('~' || substr(pair, length(?4) + 1) || '~', '~' || ?2 || '~') > 0`,
+			now, address, domain, fedrooms.DirectPrefix)
 	}
 	if err == nil {
 		err = tx.Commit()
