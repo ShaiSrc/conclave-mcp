@@ -68,3 +68,38 @@ jobs:
 
       - name: go test -race
         run: go test -race ./...
+
+  # Job 3: each fuzz target for 15 seconds. go test already runs their
+  # seeds; this explores past them. A crasher fails the job and is
+  # uploaded, to be added under testdata/fuzz as a regression seed.
+  fuzz:
+    name: fuzz
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: setup-go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.23"
+          cache: true
+
+      - run: go mod download
+
+      - name: go test -fuzz
+        run: |
+          for pkg in $(go list ./...); do
+            for target in $(go test -list '^Fuzz' "$pkg" | grep '^Fuzz'); do
+              echo "::group::$pkg $target"
+              go test -run '^$' -fuzz "^${target}\$" -fuzztime 15s "$pkg" || exit 1
+              echo "::endgroup::"
+            done
+          done
+
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crashers
+          path: "**/testdata/fuzz/**"

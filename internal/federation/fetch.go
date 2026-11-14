@@ -157,6 +157,13 @@ func (f *Fetcher) document(ctx context.Context, domain string, allowPrivate bool
 	if status != http.StatusOK {
 		return Document{}, fmt.Errorf("document of %s: status %d", domain, status)
 	}
+	return parseDocument(body, domain)
+}
+
+// parseDocument decodes body, the server document of domain, and checks
+// it: the protocol, the domain, at least one key, and each key's ID and
+// fingerprint against its public key.
+func parseDocument(body []byte, domain string) (Document, error) {
 	var doc Document
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return Document{}, fmt.Errorf("document of %s: %w", domain, err)
