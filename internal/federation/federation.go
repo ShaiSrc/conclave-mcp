@@ -54,6 +54,7 @@ type Service struct {
 	rotation     map[string]string // per peer, the last room id its last run attempted
 	runs         sync.WaitGroup    // delivery runs
 	slots        chan struct{}     // of delivery runs, maxPeerRuns
+	renders      chan struct{}     // public pages rendering, maxRenders
 	now          func() time.Time
 	jitter       func() float64 // in [0, 1)
 	budget       time.Duration  // per peer and pass, of delivery and of catch-up
@@ -64,6 +65,7 @@ type Service struct {
 	mu          sync.Mutex
 	limiters    map[string]*peerLimiters // per verified peer (limitersOf)
 	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
+	peerLookups map[string]*rate.Limiter // remote lookups, per peer
 
 	warnLog, keyAudits minuteGate
 	docs               docCache // peers' documents, for re-pinning
@@ -89,6 +91,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 	}
 	s := &Service{db: db, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
 		peers: &Peers{db: db}, limiters: map[string]*peerLimiters{}, keyLimiters: map[int64]*rate.Limiter{},
+		peerLookups: map[string]*rate.Limiter{}, renders: make(chan struct{}, maxRenders),
 		botStore: bots.NewStore(db), refresh: make(chan string, 16), deliver: make(chan struct{}, 1),
 		running: map[string]bool{}, rotation: map[string]string{}, slots: make(chan struct{}, maxPeerRuns),
 		now: time.Now, jitter: rand.Float64, budget: peerBudget,

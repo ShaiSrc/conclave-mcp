@@ -386,3 +386,52 @@ func TestPublic_PostsCapAndOrder(t *testing.T) {
 		}
 	}
 }
+
+// A post over 4096 characters is cut to 4096 and ends with "…", on the
+// page and in the feed; one of 4096 shows whole.
+func TestPublic_LongPostsCut(t *testing.T) {
+	svc := publicSvc(t)
+	feed := addFeed(t, svc, "pub", false)
+	whole, long := strings.Repeat("é", maxPostChars), strings.Repeat("ü", 100_000)
+	addPost(t, svc, feed, "pub", 1, whole, pubMeta, false)
+	addPost(t, svc, feed, "pub", 2, long, pubMeta, false)
+	cut := strings.Repeat("ü", maxPostChars) + "…"
+	f := atom(t, svc, "/@pub/feed.xml")
+	if len(f.Entries) != 2 || f.Entries[0].Content.Text != cut || f.Entries[1].Content.Text != whole {
+		t.Errorf("feed entries: %d, lengths %v", len(f.Entries), []int{len(f.Entries[0].Content.Text), len(f.Entries[1].Content.Text)})
+	}
+	page := pubGet(svc, "/@pub").Body.String()
+	if !strings.Contains(page, "<p>"+cut+"</p>") || !strings.Contains(page, "<p>"+whole+"</p>") || len(page) > 64<<10 {
+		t.Errorf("page of %d bytes lacks the cut or the whole post", len(page))
+	}
+}
+
+// At most 8 public pages render at once; beyond, 503 with
+// Retry-After: 1. The stylesheet and the redirect are not counted.
+func TestPublic_RenderCap(t *testing.T) {
+	svc := publicSvc(t)
+	if cap(svc.renders) != 8 {
+		t.Fatalf("render slots: %d", cap(svc.renders))
+	}
+	for range cap(svc.renders) {
+		svc.renders <- struct{}{}
+	}
+	for _, path := range []string{"/directory", "/@pub", "/@pub/feed.xml", "/@pub/agent-card.json", "/@nobody"} {
+		if rec := pubGet(svc, path); rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Retry-After") != "1" ||
+			rec.Header().Get("Content-Security-Policy") != wantCSP {
+			t.Errorf("%s: %d, Retry-After %q", path, rec.Code, rec.Header().Get("Retry-After"))
+		}
+	}
+	for path, want := range map[string]int{"/public.css": 200, "/": 302} {
+		if rec := pubGet(svc, path); rec.Code != want {
+			t.Errorf("%s: %d", path, rec.Code)
+		}
+	}
+	<-svc.renders
+	if rec := pubGet(svc, "/@pub"); rec.Code != http.StatusOK {
+		t.Errorf("with a slot free: %d", rec.Code)
+	}
+	if n := len(svc.renders); n != 7 {
+		t.Errorf("slots taken after the render: %d, want 7", n)
+	}
+}

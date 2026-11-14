@@ -27,6 +27,13 @@ const maxPublicBots = 1000
 // maxPublicPosts is the most posts a bot page and its feed show.
 const maxPublicPosts = 20
 
+// maxPostChars is the most characters of a post a bot page and its
+// feed show; a longer post is cut and ends with "…".
+const maxPostChars = 4096
+
+// maxRenders is the most public pages rendered at once.
+const maxRenders = 8
+
 var (
 	pages = map[string]*template.Template{}
 	css   []byte
@@ -61,16 +68,32 @@ func noCache(next http.Handler) http.Handler {
 	})
 }
 
+// renderSlot lets at most maxRenders public pages render at once, so
+// a flood of requests cannot pile up memory; the others get 503 with
+// Retry-After: 1.
+func (s *Service) renderSlot(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.renders <- struct{}{}:
+			defer func() { <-s.renders }()
+			next.ServeHTTP(w, r)
+		default:
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "busy, try again", http.StatusServiceUnavailable)
+		}
+	})
+}
+
 // publicRoutes mounts the pages of public bots. They need no
 // signature and show nothing but public profiles.
 func (s *Service) publicRoutes(r chi.Router) {
 	r.Group(func(r chi.Router) {
 		r.Use(noCache)
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/directory", http.StatusFound) })
-		r.Get("/directory", s.handlePublicDirectory)
-		r.Get("/@{name}", s.handlePublicBot)
-		r.Get("/@{name}/agent-card.json", s.handlePublicCard)
-		r.Get("/@{name}/feed.xml", s.handlePublicFeed)
+		r.With(s.renderSlot).Get("/directory", s.handlePublicDirectory)
+		r.With(s.renderSlot).Get("/@{name}", s.handlePublicBot)
+		r.With(s.renderSlot).Get("/@{name}/agent-card.json", s.handlePublicCard)
+		r.With(s.renderSlot).Get("/@{name}/feed.xml", s.handlePublicFeed)
 		r.Get("/public.css", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
 			_, _ = w.Write(css)
@@ -164,13 +187,14 @@ func (s *Service) publicBot(r *http.Request) (p bots.Profile, ok bool, err error
 
 // publicPosts returns the newest public posts of p, a bot of ours:
 // its own undeleted messages in its active feed whose metadata says
-// public, newest first.
+// public, newest first, each cut to maxPostChars characters.
 func (s *Service) publicPosts(ctx context.Context, p bots.Profile) ([]postView, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.ts, m.content FROM messages m
+	// One character more than shown tells whether to cut.
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.ts, substr(m.content, 1, ?) FROM messages m
 		JOIN rooms r ON r.id = m.room_id AND r.feed = ? AND r.home_domain IS NULL AND r.archived_at IS NULL
 		WHERE m.author_key_id = ? AND m.deleted_at IS NULL
 		AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.visibility') END = 'public'
-		ORDER BY m.ts DESC, m.id DESC LIMIT ?`, p.Handle+"@"+s.id().Domain, p.KeyID, maxPublicPosts)
+		ORDER BY m.ts DESC, m.id DESC LIMIT ?`, maxPostChars+1, p.Handle+"@"+s.id().Domain, p.KeyID, maxPublicPosts)
 	if err != nil {
 		return nil, err
 	}
@@ -186,6 +210,10 @@ func (s *Service) publicPosts(ctx context.Context, p bots.Profile) ([]postView, 
 		}
 		if v.TS, err = time.Parse(time.RFC3339Nano, ts); err != nil {
 			return nil, err
+		}
+		// ponytail: no page shows one post, so a cut post has no link to the rest.
+		if rs := []rune(v.Text); len(rs) > maxPostChars {
+			v.Text = string(rs[:maxPostChars]) + "…"
 		}
 		out = append(out, v)
 	}
