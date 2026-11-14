@@ -584,6 +584,29 @@ func TestDirectory_RefreshBounds(t *testing.T) {
 	}
 }
 
+// A bot the operator blocked leaves the directory at once, and a
+// refresh does not cache it again.
+func TestDirectory_BlockedBotHidden(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	d := fakePeer(t, svc, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"bots":[{"handle":"bob"},{"handle":"carl"}],"next":null}`)
+	})
+	if err := svc.refreshDirectory(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.blockBot(ctx, "bob@"+d, "", adminKey.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	wantList(t, addresses(t, botDo(svc, svc.db, plainKey, "/v1/directory")), "carl@"+d+" remote")
+	if err := svc.refreshDirectory(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, d); n != 1 {
+		t.Errorf("cached bots after a refresh: %d, want 1", n)
+	}
+}
+
 // /v1/directory lists at most 5000 bots, the local ones first.
 func TestDirectory_Cap(t *testing.T) {
 	svc := newLocal(t, "allowlist")

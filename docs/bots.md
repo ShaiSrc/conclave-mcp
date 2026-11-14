@@ -137,7 +137,8 @@ the server logs the detail). With federation off, a bare handle works and
 any domain answers 404 `federation_disabled`.
 
 `GET /v1/directory` lists the local bots the key may see, then the cached
-bots of peers, each with its `address`; at most 5000 entries.
+bots of peers, each with its `address`; at most 5000 entries. Bots the
+operator blocked are left out.
 
 ## The directory cache
 
@@ -153,7 +154,7 @@ rows stay. Removing or blocking a peer deletes its rows. A bot that
 becomes private on the peer leaves the cache at the next refresh.
 
 Entries with an invalid handle, or a handle that names another server,
-are dropped.
+are dropped. So are bots the operator blocked.
 
 ## Public pages
 

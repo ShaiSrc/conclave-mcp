@@ -286,9 +286,11 @@ func (s *Service) lookupLimiter(keyID int64) *rate.Limiter {
 }
 
 // cachedBots returns up to limit cached bots of peers, by domain and
-// handle.
+// handle, but none the operator blocked.
 func (s *Service) cachedBots(ctx context.Context, limit int) ([]entry, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT domain, profile FROM remote_bots ORDER BY domain, handle LIMIT ?`, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT domain, profile FROM remote_bots rb
+		WHERE NOT EXISTS (SELECT 1 FROM blocked_bots b WHERE b.address = rb.handle || '@' || rb.domain)
+		ORDER BY domain, handle LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +384,8 @@ func (s *Service) retryDirectory(domain string) {
 // refreshDirectory reads up to 20 pages of domain's directory and
 // replaces its cached bots with them, cleaned: at most 50 of a page and
 // 1000 in all. Entries with an invalid handle, one naming a server
-// included, are dropped. On an error the old rows stay. A peer no longer
+// included, are dropped, and so are bots the operator blocked. On an
+// error the old rows stay. A peer no longer
 // allowed when the rows are written gets none.
 func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 	var got []bots.Profile
@@ -438,7 +441,8 @@ func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 		for _, p := range got {
 			profile, _ := json.Marshal(p)
 			if _, err := tx.ExecContext(ctx, `INSERT OR REPLACE INTO remote_bots(domain, handle, profile, fetched_at)
-				VALUES (?, ?, ?, ?)`, domain, p.Handle, string(profile), now); err != nil {
+				SELECT ?, ?, ?, ? WHERE NOT EXISTS (SELECT 1 FROM blocked_bots WHERE address = ?)`,
+				domain, p.Handle, string(profile), now, p.Handle+"@"+domain); err != nil {
 				return err
 			}
 		}
