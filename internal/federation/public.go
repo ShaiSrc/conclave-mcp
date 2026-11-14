@@ -2,11 +2,16 @@ package federation
 
 import (
 	"bytes"
+	"context"
 	"embed"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
+	"fmt"
 	"html/template"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -18,6 +23,9 @@ var publicFS embed.FS
 
 // maxPublicBots is the most bots the directory page lists.
 const maxPublicBots = 1000
+
+// maxPublicPosts is the most posts a bot page and its feed show.
+const maxPublicPosts = 20
 
 var (
 	pages = map[string]*template.Template{}
@@ -62,6 +70,7 @@ func (s *Service) publicRoutes(r chi.Router) {
 		r.Get("/directory", s.handlePublicDirectory)
 		r.Get("/@{name}", s.handlePublicBot)
 		r.Get("/@{name}/agent-card.json", s.handlePublicCard)
+		r.Get("/@{name}/feed.xml", s.handlePublicFeed)
 		r.Get("/public.css", func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "text/css; charset=utf-8")
 			_, _ = w.Write(css)
@@ -71,9 +80,16 @@ func (s *Service) publicRoutes(r chi.Router) {
 
 type skillView struct{ ID, Name, Description string }
 
+type postView struct {
+	ID   int64
+	TS   time.Time
+	Text string
+}
+
 type botView struct {
 	Handle, Name, Address, Description string
 	Skills                             []skillView
+	Posts                              []postView // on the bot page only
 }
 
 type pageData struct {
@@ -146,17 +162,125 @@ func (s *Service) publicBot(r *http.Request) (p bots.Profile, ok bool, err error
 	return p, p.Visibility == bots.Public, nil
 }
 
+// publicPosts returns the newest public posts of p, a bot of ours:
+// its own undeleted messages in its active feed whose metadata says
+// public, newest first.
+func (s *Service) publicPosts(ctx context.Context, p bots.Profile) ([]postView, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.id, m.ts, m.content FROM messages m
+		JOIN rooms r ON r.id = m.room_id AND r.feed = ? AND r.home_domain IS NULL AND r.archived_at IS NULL
+		WHERE m.author_key_id = ? AND m.deleted_at IS NULL
+		AND CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.visibility') END = 'public'
+		ORDER BY m.ts DESC, m.id DESC LIMIT ?`, p.Handle+"@"+s.id.Domain, p.KeyID, maxPublicPosts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []postView
+	for rows.Next() {
+		var (
+			v  postView
+			ts string
+		)
+		if err := rows.Scan(&v.ID, &ts, &v.Text); err != nil {
+			return nil, err
+		}
+		if v.TS, err = time.Parse(time.RFC3339Nano, ts); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func (s *Service) handlePublicBot(w http.ResponseWriter, r *http.Request) {
 	p, ok, err := s.publicBot(r)
+	v := s.view(p)
+	if err == nil && ok {
+		v.Posts, err = s.publicPosts(r.Context(), p)
+	}
 	switch {
 	case err != nil:
 		s.internalError(w, "public bot", err)
 	case !ok:
 		s.notFound(w)
 	default:
-		v := s.view(p)
 		s.render(w, http.StatusOK, "bot", pageData{Title: v.Name + " · " + v.Address, Foot: v.Address, Bot: &v})
 	}
+}
+
+type atomFeed struct {
+	XMLName xml.Name    `xml:"http://www.w3.org/2005/Atom feed"`
+	ID      string      `xml:"id"`
+	Title   string      `xml:"title"`
+	Updated string      `xml:"updated"`
+	Author  atomAuthor  `xml:"author"`
+	Links   []atomLink  `xml:"link"`
+	Entries []atomEntry `xml:"entry"`
+}
+
+type atomAuthor struct {
+	Name string `xml:"name"`
+	URI  string `xml:"uri"`
+}
+
+type atomLink struct {
+	Rel  string `xml:"rel,attr"`
+	Type string `xml:"type,attr"`
+	Href string `xml:"href,attr"`
+}
+
+type atomEntry struct {
+	ID      string   `xml:"id"`
+	Title   string   `xml:"title"`
+	Updated string   `xml:"updated"`
+	Content atomText `xml:"content"`
+}
+
+type atomText struct {
+	Type string `xml:"type,attr"`
+	Text string `xml:",chardata"`
+}
+
+// handlePublicFeed serves the posts of the bot page as an Atom feed.
+// encoding/xml escapes the text and replaces characters XML forbids.
+func (s *Service) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
+	p, ok, err := s.publicBot(r)
+	var posts []postView
+	if err == nil && ok {
+		posts, err = s.publicPosts(r.Context(), p)
+	}
+	switch {
+	case err != nil:
+		s.internalError(w, "public feed", err)
+		return
+	case !ok:
+		s.notFound(w)
+		return
+	}
+	v, page := s.view(p), "https://"+s.id.Domain+"/@"+p.Handle
+	f := atomFeed{ID: "tag:" + s.id.Domain + ",2026:feed/" + p.Handle, Title: v.Name,
+		Updated: p.UpdatedAt.UTC().Format(time.RFC3339), Author: atomAuthor{v.Name, page},
+		Links: []atomLink{{"self", "application/atom+xml", page + "/feed.xml"}, {"alternate", "text/html", page}}}
+	for i, post := range posts {
+		updated := post.TS.UTC().Format(time.RFC3339)
+		if i == 0 {
+			f.Updated = updated
+		}
+		title, _, _ := strings.Cut(post.Text, "\n")
+		title = strings.TrimSpace(title)
+		if rs := []rune(title); len(rs) > 80 {
+			title = string(rs[:80])
+		}
+		f.Entries = append(f.Entries, atomEntry{ID: fmt.Sprintf("tag:%s,2026:post/%d", s.id.Domain, post.ID), Title: title,
+			Updated: updated, Content: atomText{"text", post.Text}})
+	}
+	body, err := xml.Marshal(f)
+	if err != nil {
+		s.internalError(w, "public feed", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/atom+xml; charset=utf-8")
+	_, _ = w.Write(append([]byte(xml.Header), body...))
 }
 
 // handlePublicCard serves the bot's A2A agent card, the subset

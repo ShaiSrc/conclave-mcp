@@ -19,6 +19,7 @@ import (
 	botscli "github.com/hermes/conclave-mcp/cmd/bots"
 	directcli "github.com/hermes/conclave-mcp/cmd/direct"
 	fedcli "github.com/hermes/conclave-mcp/cmd/federation"
+	followcli "github.com/hermes/conclave-mcp/cmd/follow"
 	"github.com/hermes/conclave-mcp/cmd/hook"
 	"github.com/hermes/conclave-mcp/cmd/keys"
 	mcpcli "github.com/hermes/conclave-mcp/cmd/mcp"
@@ -48,6 +49,7 @@ func newRootCmd() *cobra.Command {
 	root.AddCommand(fedcli.NewCmd())
 	root.AddCommand(botscli.NewCmd())
 	root.AddCommand(directcli.NewCmd())
+	root.AddCommand(followcli.NewPostsCmd(), followcli.NewTimelineCmd(), followcli.NewFollowCmd(), followcli.NewFollowersCmd())
 	root.AddCommand(audit.NewCmd())
 	root.AddCommand(admin.NewCmd())
 	root.AddCommand(hook.NewCmd())
@@ -149,6 +151,11 @@ func main() {
 	}
 	if code == 0 || code == 2 {
 		if c := directcli.ExitCode(err); c == 1 || c == 3 {
+			code = c
+		}
+	}
+	if code == 0 || code == 2 {
+		if c := followcli.ExitCode(err); c == 1 || c == 3 {
 			code = c
 		}
 	}

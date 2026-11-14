@@ -31,6 +31,7 @@ import (
 	"github.com/hermes/conclave-mcp/internal/direct"
 	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/federation"
+	"github.com/hermes/conclave-mcp/internal/follow"
 	"github.com/hermes/conclave-mcp/internal/keys"
 	"github.com/hermes/conclave-mcp/internal/mcp"
 	"github.com/hermes/conclave-mcp/internal/messages"
@@ -107,7 +108,10 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		}
 		s.fedSvc, s.fedRun = fedSvc, fedSvc.Run
 	}
-	s.router = s.buildRouter(deps, uiSvc, fedSvc)
+	var err error
+	if s.router, err = s.buildRouter(deps, uiSvc, fedSvc); err != nil {
+		return nil, err
+	}
 	s.http = &http.Server{
 		Addr:              net.JoinHostPort(strings.Trim(cfg.Host, "[]"), strconv.Itoa(cfg.Port)),
 		Handler:           s.router,
@@ -181,7 +185,7 @@ type DBHealthChecker interface {
 	PingContext(ctx context.Context) error
 }
 
-func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Service) chi.Router {
+func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Service) (chi.Router, error) {
 	r := chi.NewRouter()
 	r.Use(RequestIDMiddleware())
 	r.Use(RecoveryMiddleware(s.logger))
@@ -228,6 +232,10 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	botsStore := bots.NewStore(deps.DB)
 	// Direct conversations post through the messages service's send path.
 	directSvc := &direct.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.Send}
+	// Posts are messages: stored through the send path's post entry, the
+	// one way into a feed, deleted through the message delete.
+	followSvc := &follow.Service{DB: deps.DB, MaxMessageBytes: messagesSvc.MaxMessageBytes, Send: messagesSvc.SendPost,
+		Delete: messagesSvc.Delete}
 	// Federated rooms: rooms and messages log changes of rooms with
 	// remote members, invite by address through the federation service
 	// and wake its delivery worker after each change; the federation
@@ -240,6 +248,12 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// claims never import federation.
 	if fedSvc != nil {
 		roomsSvc.FedDomain, messagesSvc.FedDomain, directSvc.FedDomain = fedSvc.Domain(), fedSvc.Domain(), fedSvc.Domain()
+		followSvc.FedDomain, followSvc.FedNotify = fedSvc.Domain(), fedSvc.DeliverSoon
+		// Follows of bots of peers: a signed follow request out, and a feed
+		// invite to bring in a follower of a peer; unfollowing leaves the
+		// replica through its host.
+		followSvc.Request, followSvc.InviteRemote, followSvc.Leave = fedSvc.FollowRemote, fedSvc.InviteRemote, fedSvc.LeaveRemote
+		followSvc.Withdraw = fedSvc.WithdrawFollow
 		roomsSvc.MaxMessageBytes = messagesSvc.MaxMessageBytes
 		roomsSvc.InviteRemote, roomsSvc.Leave = fedSvc.InviteRemote, fedSvc.LeaveRemote
 		// Direct conversations with bots of peers start with a direct
@@ -250,7 +264,15 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		claimsLocal := chi.NewRouter()
 		claimsSvc.Routes(claimsLocal)
 		fedSvc.Rooms = federation.RoomHooks{Send: messagesSvc.SendFromPeer, Claims: claimsLocal,
-			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica}
+			MaxMessageBytes: messagesSvc.MaxMessageBytes, Replicate: messagesSvc.StoreReplica, Follow: followSvc.Remote,
+			Withdraw: followSvc.RemoteWithdraw}
+	}
+	// A bot's address changes when federation is turned on or its domain
+	// changes: its feed and the follows of it move to the new one.
+	if deps.DB != nil {
+		if err := followSvc.Reconcile(context.Background()); err != nil {
+			return nil, fmt.Errorf("follow reconcile: %w", err)
+		}
 	}
 
 	r.Route("/v1", func(r chi.Router) {
@@ -273,6 +295,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		claimsSvc.Routes(r)
 		botsStore.Routes(r)
 		directSvc.Routes(r)
+		followSvc.Routes(r)
 		// GET /v1/bots/lookup and /v1/directory, with federation off too.
 		federation.BotRoutes(r, botsStore, fedSvc)
 		if fedSvc != nil {
@@ -314,7 +337,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		uiSvc.Router = r
 	}
 
-	return r
+	return r, nil
 }
 
 // mcpProxy returns a handler that forwards a single JSON-RPC

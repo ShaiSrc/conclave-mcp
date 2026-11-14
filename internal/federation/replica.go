@@ -112,8 +112,20 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // otherwise). The replica is created under the host's room id, of the
 // invite's kind, or updated and made active again; a room of that id
 // that is not the origin's replica of that kind is a 409. A room name
-// starting with dm: is a direct conversation's (400 otherwise). The
-// answer has the kind and max_events_bytes.
+// starting with dm: is a direct conversation's (400 otherwise), one
+// starting with feed: a feed's (400 otherwise). The answer has the kind
+// and max_events_bytes.
+//
+// A feed invite (kind feed) brings our bot into the feed of a bot of the
+// origin, whose address it carries as feed, named feed:<address> or that
+// cut and suffixed with #<room id> by its host (400 otherwise); from a
+// host that sends no feed, the address is read from the name. It needs a
+// follow of our bot toward that address, on the origin's domain (403
+// invite_refused otherwise), which it makes accepted, keeping the seq
+// the invite says the feed's log is at as its admitted_seq. The bot gets
+// read, whatever the host sent, and the replica keeps the address in
+// rooms.feed. The same invite again, into the replica with an accepted
+// follow, changes nothing and is taken.
 //
 // A direct invite (kind direct) starts a conversation with our bot: it
 // takes one only from an allowed peer (seen ones get 403 dm_refused,
@@ -132,10 +144,16 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
 		Kind   string   `json:"kind"`
+		Feed   string   `json:"feed"` // a feed's bot
+		Seq    int64    `json:"seq"`  // where a feed's log is: a removal of our bot up to it is older than this invite
 	}
 	derr := json.NewDecoder(r.Body).Decode(&in)
 	in.Kind = cmp.Or(in.Kind, "room")
-	direct := in.Kind == kindDirect
+	direct, feed := in.Kind == kindDirect, in.Kind == kindFeed
+	feedOf := in.Feed
+	if feedOf == "" { // a host that does not send it: the name holds it, unless it was cut
+		feedOf, _, _ = strings.Cut(strings.TrimPrefix(in.Name, fedrooms.FeedPrefix), "#")
+	}
 	switch allowed, err := s.originAllowed(ctx); {
 	case err != nil:
 		s.fail(w, r, err)
@@ -171,8 +189,11 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := ulid.ParseStrict(roomID)
 	set, rerr := rights.Parse(in.Rights)
-	if direct {
+	switch {
+	case direct:
 		set, rerr = fedrooms.DirectRights, nil
+	case feed: // a follower reads only
+		set, rerr = rights.Set{rights.Read}, nil
 	}
 	switch {
 	case err != nil || id.String() != roomID:
@@ -184,11 +205,20 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case rerr != nil:
 		refuse(http.StatusBadRequest, "bad_request", rerr.Error())
 		return
-	case in.Kind != "room" && !direct:
-		refuse(http.StatusBadRequest, "bad_request", "kind must be room or direct")
+	case in.Kind != "room" && !direct && !feed:
+		refuse(http.StatusBadRequest, "bad_request", "kind must be room, direct or feed")
 		return
 	case !direct && strings.HasPrefix(in.Name, fedrooms.DirectPrefix):
 		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.DirectPrefix+" are reserved for direct conversations")
+		return
+	case feed != strings.HasPrefix(in.Name, fedrooms.FeedPrefix):
+		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.FeedPrefix+" are reserved for feeds, and a feed's starts with it")
+		return
+	case feed && in.Feed != "" && in.Name != fedrooms.FeedPrefix+in.Feed && in.Name != fedrooms.Suffixed(fedrooms.FeedPrefix+in.Feed, roomID):
+		refuse(http.StatusBadRequest, "bad_request", "a feed's name is "+fedrooms.FeedPrefix+"<address>, or that cut with #<room id>")
+		return
+	case feed && !strings.HasSuffix(feedOf, "@"+origin):
+		refuse(http.StatusForbidden, "invite_refused", "a feed is the feed of a bot of its host")
 		return
 	}
 	var keyID int64
@@ -236,9 +266,11 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+	// A direct room keeps its pair, a feed its bot.
 	var home, pair sql.NullString
 	var kind string
-	switch err := tx.QueryRowContext(ctx, `SELECT home_domain, kind, pair FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind, &pair); {
+	switch err := tx.QueryRowContext(ctx, `SELECT home_domain, CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(pair, feed)
+		FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind, &pair); {
 	case errors.Is(err, sql.ErrNoRows):
 		var n int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM rooms WHERE home_domain = ?`, origin).Scan(&n); err != nil {
@@ -258,12 +290,16 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			now := storage.FormatTS(time.Now())
-			var newPair any // a direct replica keeps the pair's name, checked above
-			if direct {
+			column := in.Kind
+			var newPair, newFeed any // a direct replica keeps the pair's name, checked above, a feed its bot
+			switch {
+			case direct:
 				newPair = in.Name
+			case feed:
+				column, newFeed = "room", feedOf
 			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind, pair)
-				VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, in.Kind, newPair)
+			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind, pair, feed)
+				VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, column, newPair, newFeed)
 		}
 		if err != nil {
 			s.fail(w, r, err)
@@ -272,9 +308,26 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.fail(w, r, err)
 		return
-	case home.String != origin || kind != in.Kind || direct && pair.String != in.Name: // a direct room keeps its pair
+	case home.String != origin || kind != in.Kind || direct && pair.String != in.Name || feed && pair.String != feedOf:
 		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
 		return
+	}
+	if feed { // the follow of our bot toward the feed's bot is accepted now; without one, no replica
+		res, err := tx.ExecContext(ctx, `UPDATE follows SET status = 'accepted', decided_at = COALESCE(decided_at, ?),
+			admitted_seq = MAX(COALESCE(admitted_seq, 0), ?)
+			WHERE follower_key_id = ? AND target = ? AND target_key_id IS NULL`, storage.FormatTS(time.Now()), max(in.Seq, 0), keyID, feedOf)
+		var n int64
+		if err == nil {
+			n, err = res.RowsAffected()
+		}
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if n == 0 {
+			refuse(http.StatusForbidden, "invite_refused", h+" does not follow the feed's bot")
+			return
+		}
 	}
 	if direct {
 		if !s.directPair(w, r, tx, roomID, in.Name, origin, keyID, other, refuse) {
@@ -379,19 +432,24 @@ const DMInvitesPerHour = 100
 // kindDirect is the kind of a direct conversation's room.
 const kindDirect = "direct"
 
-// dmLimiter returns origin's limiter of direct invites, which takes the
+// dmLimiter returns origin's limiter of direct invites.
+func (s *Service) dmLimiter(origin string) *rate.Limiter {
+	return s.hourly(&s.dmLimits, origin, DMInvitesPerHour)
+}
+
+// hourly returns origin's limiter of n an hour in *m, which takes the
 // time from s.now. ponytail: one per peer, never evicted; peers are
 // bounded by the table.
-func (s *Service) dmLimiter(origin string) *rate.Limiter {
+func (s *Service) hourly(m *map[string]*rate.Limiter, origin string, n int) *rate.Limiter {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.dmLimits == nil {
-		s.dmLimits = map[string]*rate.Limiter{}
+	if *m == nil {
+		*m = map[string]*rate.Limiter{}
 	}
-	lim := s.dmLimits[origin]
+	lim := (*m)[origin]
 	if lim == nil {
-		lim = rate.NewLimiter(rate.Every(time.Hour/DMInvitesPerHour), DMInvitesPerHour)
-		s.dmLimits[origin] = lim
+		lim = rate.NewLimiter(rate.Every(time.Hour/time.Duration(n)), n)
+		(*m)[origin] = lim
 	}
 	return lim
 }
@@ -516,7 +574,7 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 	case fedrooms.EventMember:
 		err = s.applyMember(ctx, tx, roomID, host, ev.Payload)
 	case fedrooms.EventMemberRemove:
-		err = s.applyRemove(ctx, tx, roomID, ev.Payload)
+		err = s.applyRemove(ctx, tx, roomID, host, ev.Seq, ev.Payload)
 	case fedrooms.EventMessageDelete, fedrooms.EventMessage:
 		err = applyDelete(ctx, tx, roomID, ev.Payload)
 	default:
@@ -529,7 +587,9 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 }
 
 // applyRoom renames the replica, and archives it when the host did. Its
-// kind is the invite's: a room event of another kind is refused.
+// kind is the invite's: a room event of another kind is refused. An
+// archived feed ends the accepted follows of our bots in it, but not of
+// those in a newer active replica of the same feed from that host.
 func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.RoomPayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.Name == "" || len(p.Name) > 128 {
@@ -545,6 +605,12 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 	if p.Archived {
 		_, err := tx.ExecContext(ctx, `UPDATE rooms SET name = ?, archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
 			p.Name, storage.FormatTS(time.Now()), roomID)
+		if err == nil { // as on its host, an archived feed ends its accepted follows
+			_, err = tx.ExecContext(ctx, `DELETE FROM follows WHERE status = 'accepted' AND target_key_id IS NULL
+				AND target = (SELECT feed FROM rooms WHERE id = ?1)
+				AND NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = follows.follower_key_id
+					WHERE o.feed = follows.target AND o.home_domain = ?2 AND o.id != ?1 AND o.archived_at IS NULL)`, roomID, host)
+		}
 		return err
 	}
 	err := nameReplica(ctx, tx, roomID, p.Name, host, false)
@@ -558,9 +624,10 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 // of this server must be one of its bots; a direct conversation takes
 // ours by invite only, which checks their DM policy, so here it only
 // sets the rights of one it has, and it has one bot of the host, which
-// joined with the invite: another is refused. When it is the first bot
-// of ours in an archived replica (invited again), the replica is active
-// again.
+// joined with the invite: another is refused. A feed takes ours by
+// invite only too, which checks their follow, and gives them read. When
+// it is the first bot of ours in an archived replica (invited again),
+// the replica is active again.
 func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MemberPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -585,20 +652,23 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 			return refused("member event: a direct conversation has one bot of the host, not %s too", p.Address)
 		}
 	}
-	var bot, ours, uninvited bool
+	var bot, ours, invited bool
+	var kind string
 	if local {
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM api_keys WHERE id = ? AND handle IS NOT NULL
 			AND is_admin = 0 AND revoked_at IS NULL), `+localMember+`,
-			EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
-			AND NOT EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?)`,
-			key, roomID, roomID, roomID, key).Scan(&bot, &ours, &uninvited); err != nil {
+			EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id = ?),
+			(SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END FROM rooms WHERE id = ?)`,
+			key, roomID, roomID, key, roomID).Scan(&bot, &ours, &invited, &kind); err != nil {
 			return err
 		}
 		switch {
 		case !bot:
 			return refused("member event: no bot of ours is %s", p.Address)
-		case uninvited:
-			return refused("member event: %s was not invited into the direct conversation", p.Address)
+		case kind != "room" && !invited:
+			return refused("member event: %s was not invited into the %s", p.Address, kind)
+		case kind == kindFeed:
+			set = rights.Set{rights.Read}
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)
@@ -626,8 +696,16 @@ const localMember = `EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.i
 	WHERE m.room_id = ? AND k.remote_domain IS NULL)`
 
 // applyRemove removes a member from the replica. When no bot of ours is
-// left, the replica is archived.
-func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID string, payload json.RawMessage) error {
+// left, the replica is archived. A bot of ours out of a feed no longer
+// follows the feed's bot, unless it is in a newer active replica of that
+// feed from host; a pending follow is newer than any membership, so it
+// stays. A removal of our bot from a feed at seq, logged at or
+// before the host's latest invite of it (its follow's admitted_seq), is
+// older than that invite: it came late, after our bot unfollowed and
+// followed again, and changes nothing. ponytail: admitted_seq is one per
+// follow, compared in any replica of the feed; at worst our bot stays a
+// member of an older replica, as an archived one keeps its members.
+func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID, host string, seq int64, payload json.RawMessage) error {
 	var p fedrooms.RemovePayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return refused("member.remove event: bad payload")
@@ -636,7 +714,20 @@ func (s *Service) applyRemove(ctx context.Context, tx *sql.Tx, roomID string, pa
 	if err != nil || key == 0 {
 		return err
 	}
+	if local {
+		var stale bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM follows WHERE follower_key_id = ? AND target_key_id IS NULL
+			AND target = (SELECT feed FROM rooms WHERE id = ?) AND admitted_seq >= ?)`, key, roomID, seq).Scan(&stale); err != nil || stale {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id = ? AND key_id = ?`, roomID, key); err != nil || !local {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ?1 AND target_key_id IS NULL AND status = 'accepted'
+		AND target = (SELECT feed FROM rooms WHERE id = ?2)
+		AND NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = ?1
+			WHERE o.feed = follows.target AND o.home_domain = ?3 AND o.id != ?2 AND o.archived_at IS NULL)`, key, roomID, host); err != nil {
 		return err
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE id = ? AND NOT `+localMember,
@@ -918,8 +1009,9 @@ func (s *Service) catchUp(ctx context.Context) {
 
 // dropPeer cuts the rooms shared with domain once it is blocked or
 // removed: its bots' stand-ins leave the rooms hosted here, with
-// member.remove events, delivery to it pauses, and our replicas of its
-// rooms are archived.
+// member.remove events, delivery to it pauses, our replicas of its
+// rooms are archived, and our bots' follows of its bots, pending and
+// accepted, end.
 func (s *Service) dropPeer(ctx context.Context, domain string) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT m.room_id, m.key_id FROM room_members m JOIN api_keys k ON k.id = m.key_id
 		JOIN rooms r ON r.id = m.room_id WHERE k.remote_domain = ? AND r.home_domain IS NULL`, domain)
@@ -954,13 +1046,17 @@ func (s *Service) dropPeer(ctx context.Context, domain string) error {
 		storage.FormatTS(time.Now()), domain); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM follows WHERE target_key_id IS NULL
+		AND substr(target, instr(target, '@') + 1) = ?`, domain); err != nil {
+		return err
+	}
 	s.DeliverSoon()
 	return nil
 }
 
 // leaveHosted removes stand-in keyID from room roomID hosted here and
-// logs its member.remove event, in one transaction. It reports whether
-// keyID was a member.
+// logs its member.remove event, in one transaction; out of a feed, its
+// follow of the feed's bot ends. It reports whether keyID was a member.
 func (s *Service) leaveHosted(ctx context.Context, roomID string, keyID int64) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -975,6 +1071,14 @@ func (s *Service) leaveHosted(ctx context.Context, roomID string, keyID int64) (
 		return false, err
 	}
 	if err := fedrooms.LogRemove(ctx, tx, roomID, keyID, s.id.Domain); err != nil {
+		return false, err
+	}
+	// Out of an archived feed, the follow ends only when no active feed of
+	// the same address holds the bot, as a member removal does.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ?1 AND target = (SELECT feed FROM rooms WHERE id = ?2)
+		AND (EXISTS (SELECT 1 FROM rooms WHERE id = ?2 AND archived_at IS NULL)
+		  OR NOT EXISTS (SELECT 1 FROM rooms o JOIN room_members m ON m.room_id = o.id AND m.key_id = ?1
+		    WHERE o.feed = follows.target AND o.archived_at IS NULL))`, keyID, roomID); err != nil {
 		return false, err
 	}
 	return true, tx.Commit()

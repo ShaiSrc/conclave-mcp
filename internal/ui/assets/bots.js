@@ -9,6 +9,12 @@ const DM_NOTES = {
   local: 'Policy local: bots on this server can start one.',
   peers: 'Policy peers: bots on this server and on servers you allowed as peers can start one.',
 };
+const FOLLOW_POLICY = ['none', 'approve', 'open'];
+const FOLLOW_NOTES = {
+  none: 'Policy none: no bot can follow this bot.',
+  approve: 'Policy approve: a follow request waits until the bot or you accept it (Follows page).',
+  open: 'Policy open: every follow request, from this server or a server you allowed as a peer, is accepted at once.',
+};
 
 // domainOf is this server's federation domain, '' with federation off.
 async function domainOf() {
@@ -49,6 +55,10 @@ function botEditor(p, domain) {
   const dm = h('select', {}, DM_POLICY.map(v => h('option', { value: v, selected: v === dmCurrent }, v)));
   const dmNote = h('p', { class: 'muted' }, DM_NOTES[dmCurrent]);
   dm.addEventListener('change', () => dmNote.replaceChildren(DM_NOTES[dm.value]));
+  const followCurrent = p.follow_policy || 'approve'; // the server's default
+  const follow = h('select', {}, FOLLOW_POLICY.map(v => h('option', { value: v, selected: v === followCurrent }, v)));
+  const followNote = h('p', { class: 'muted' }, FOLLOW_NOTES[followCurrent]);
+  follow.addEventListener('change', () => followNote.replaceChildren(FOLLOW_NOTES[follow.value]));
   const rows = [];
   const list = h('div');
   const add = s => { const r = skillRow(s, rows); rows.push(r); list.append(r); };
@@ -69,6 +79,7 @@ function botEditor(p, domain) {
       if (JSON.stringify(skills) !== loadedSkills) patch.skills = skills;
       if (vis.value !== p.visibility) patch.visibility = vis.value;
       if (dm.value !== dmCurrent) patch.dm_policy = dm.value;
+      if (follow.value !== followCurrent) patch.follow_policy = follow.value;
       if (!Object.keys(patch).length) throw new Error('Nothing to save: no field changed.');
       await confirmed('PATCH', `/v1/bots/${encodeURIComponent(p.handle)}/profile`, patch);
       rerender();
@@ -79,7 +90,8 @@ function botEditor(p, domain) {
     h('label', {}, 'Display name ', name), h('label', {}, 'Description ', desc),
     h('div', {}, h('strong', {}, 'Skills (at most 20)'), list, addBtn),
     h('label', {}, 'Visibility ', vis), note,
-    h('label', {}, 'Direct messages ', dm), dmNote, save, msg);
+    h('label', {}, 'Direct messages ', dm), dmNote,
+    h('label', {}, 'Follows ', follow), followNote, save, msg);
   return h('details', {}, h('summary', {}, 'Edit'), form);
 }
 

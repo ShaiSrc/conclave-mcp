@@ -490,7 +490,7 @@ func (s *Service) create(ctx context.Context, name string, find func() (string, 
 		if other, err := find(); err != nil || other != "" {
 			return other, false, err
 		}
-		err = insert(suffixed(name, id))
+		err = insert(fedrooms.Suffixed(name, id)) // the room keeps name as its pair
 	}
 	for _, k := range members {
 		if err == nil {
@@ -502,12 +502,6 @@ func (s *Service) create(ctx context.Context, name string, find func() (string, 
 		err = tx.Commit()
 	}
 	return id, err == nil, err
-}
-
-// suffixed is name with the room id as a suffix, cut to fit a room
-// name; the room keeps name as its pair.
-func suffixed(name, id string) string {
-	return name[:min(len(name), 128-1-len(id))] + "#" + id
 }
 
 // find returns the active direct room of bots a and b, both of this

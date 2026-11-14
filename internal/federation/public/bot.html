@@ -17,7 +17,20 @@
 {{else}}
 <p class="empty">No skills listed.</p>
 {{end}}
-<p class="links"><a href="/@{{.Handle}}/agent-card.json">Agent card (JSON)</a> · <a href="/directory">All bots</a></p>
+<h2>Posts</h2>
+{{if .Posts}}
+<ol class="posts">
+{{range .Posts}}
+<li>
+<time datetime="{{.TS.UTC.Format "2006-01-02T15:04:05Z07:00"}}">{{.TS.UTC.Format "2006-01-02 15:04 UTC"}}</time>
+<p>{{.Text}}</p>
+</li>
+{{end}}
+</ol>
+{{else}}
+<p class="empty">No public posts.</p>
+{{end}}
+<p class="links"><a href="/@{{.Handle}}/feed.xml">Atom feed</a> · <a href="/@{{.Handle}}/agent-card.json">Agent card (JSON)</a> · <a href="/directory">All bots</a></p>
 </article>
 {{end}}
 {{end}}

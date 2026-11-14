@@ -102,7 +102,9 @@ export async function roomPage(view, id) {
     api('GET', '/v1/keys')]);
   const allKeys = keys.keys || [];
   const home = room.home || ''; // set on a replica: the room is hosted there
-  const direct = room.kind === 'direct'; // no invites, rights or claims
+  const direct = room.kind === 'direct';
+  const feed = room.kind === 'feed'; // a bot's posts: its followers join through follows
+  const fixed = direct || feed; // no invites, rights or claims
   // Delivery state exists only for rooms hosted here that have remote members.
   let delivery = [];
   if (!home && (members.members || []).some(m => m.address)) {
@@ -145,7 +147,7 @@ export async function roomPage(view, id) {
         m.unverified ? h('span', { class: 'ext' }, 'unverified') : '', extMark(m.trust_origin), m.operator ? h('span', { class: 'operator' }, 'operator ✓') : '',
         m.message_type && m.message_type !== 'system' ? h('span', {}, `<${m.message_type}>`) : '',
         replyTo(m) ? h('span', {}, `re #${replyTo(m)}`) : '',
-        room.archived_at || home ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
+        room.archived_at || home || feed ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
         home ? '' : confirmButton('Delete', 'Delete this message?', async () => {
           await confirmed('DELETE', `${base}/messages/${m.id}`);
           msgs.delete(m.id);
@@ -172,7 +174,8 @@ export async function roomPage(view, id) {
   }
   // A replica takes messages of bots only: the host knows no address for
   // the operator key.
-  const compose = room.archived_at || home ? '' : h('form', { onsubmit: e => e.preventDefault() },
+  // A feed takes its bot's posts only (POST /v1/posts): the server refuses operator messages there.
+  const compose = room.archived_at || home || feed ? '' : h('form', { onsubmit: e => e.preventDefault() },
     h('label', {}, 'Type ', type), replying, h('label', { for: 'compose-text' }, 'Message'), text,
     h('button', {
       type: 'button',
@@ -226,13 +229,14 @@ export async function roomPage(view, id) {
   view.replaceChildren(
     h('h1', {}, room.name),
     direct ? h('p', { class: 'muted' }, 'direct conversation') : '',
+    feed ? h('p', { class: 'muted' }, `feed of ${room.feed}`) : '',
     home ? h('p', { class: 'muted' }, `hosted by ${home}`) : '',
     room.archived_at ? h('p', { class: 'muted' }, 'Archived ' + when(room.archived_at)) : '',
     h('h2', {}, 'Open requests'), requests,
     h('h2', {}, 'Messages'), live, list, compose,
-    ...(direct ? [] : [h('h2', {}, 'Active claims'), !held.error ? claimsTable(held.claims || [])
+    ...(fixed ? [] : [h('h2', {}, 'Active claims'), !held.error ? claimsTable(held.claims || [])
       : home ? h('p', { class: 'muted' }, `Claims are held on ${home}, which shows them to member bots only.`) : errorBox(held.error)]),
-    h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys, home, direct),
+    h('h2', {}, 'Members'), membersSection(base, members.members || [], allKeys, home, fixed),
     // replaceChildren does not flatten arrays, unlike h().
     ...(delivery.length ? [h('h2', {}, 'Delivery to member servers'), deliveryTable(delivery)] : []),
     room.archived_at || home ? '' : h('p', {}, confirmButton('Archive room', 'Archive this room? Agents can no longer write to it.', async () => {
@@ -256,7 +260,8 @@ function deliveryTable(delivery) {
     h('td', {}, d.paused ? 'unreachable' : d.acked_seq >= d.last_seq ? 'up to date' : 'pending'))));
 }
 
-function membersSection(base, members, keys, home, direct) {
+// fixed: a direct room or a feed, whose members and rights the server sets.
+function membersSection(base, members, keys, home, fixed) {
   const serverOf = m => (m.address ? m.address.slice(m.address.lastIndexOf('@') + 1) : 'this server');
   const rows = members.map(m => {
     const picker = rightsPicker(m.rights || []);
@@ -284,7 +289,7 @@ function membersSection(base, members, keys, home, direct) {
     return h('tr', {},
       h('td', {}, m.address || m.label), h('td', {}, serverOf(m)),
       h('td', {}, m.trust_origin, ' ', extMark(m.trust_origin)),
-      h('td', {}, home || direct ? (m.rights || []).join(', ') : [picker.el, ' ', save, ' ', msg]),
+      h('td', {}, home || fixed ? (m.rights || []).join(', ') : [picker.el, ' ', save, ' ', msg]),
       h('td', {}, home && m.address ? '' : confirmButton('Remove', `Remove ${m.label} from this room?`, async () => {
         await confirmed('DELETE', `${base}/members/${m.key_id}`);
         rerender();
@@ -298,9 +303,9 @@ function membersSection(base, members, keys, home, direct) {
   const msg = h('div');
   return h('div', {},
     members.length ? table(['Member', 'Server', 'Trust', 'Rights', ''], rows) : h('p', {}, 'No members.'),
-    home || direct ? '' : [h('h2', {}, 'Invite a bot of another server'), inviteAddress(base)],
-    home || direct ? '' : h('h2', {}, 'Invite a key'),
-    home || direct ? '' : candidates.length
+    home || fixed ? '' : [h('h2', {}, 'Invite a bot of another server'), inviteAddress(base)],
+    home || fixed ? '' : h('h2', {}, 'Invite a key'),
+    home || fixed ? '' : candidates.length
       ? h('form', {
         onsubmit: async e => {
           e.preventDefault();

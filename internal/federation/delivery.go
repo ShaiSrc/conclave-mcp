@@ -331,11 +331,28 @@ func (s *Service) reads(ctx context.Context, roomID, peer string) (bool, error) 
 // message.delete, which carries only an id, lets one that lost read
 // delete its copy. An event over limit goes as a skip too, so it cannot
 // stall the room; one federation.delivery.oversize row per call names
-// them.
+// them. A feed's followers are not the peer's business: a member event
+// of a feed about a bot that is neither the feed's nor one of the
+// peer's goes as a skip too, the log's snapshot included.
 func (s *Service) loadEvents(ctx context.Context, roomID, peer string, since, upto int64, limit int) ([]fedrooms.Event, error) {
 	reader, err := s.reads(ctx, roomID, peer)
 	if err != nil {
 		return nil, err
+	}
+	var feed string // the feed's bot, "" for a room that is no feed
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(feed, '') FROM rooms WHERE id = ?`, roomID).Scan(&feed); err != nil {
+		return nil, err
+	}
+	// hidden is whether a member or member.remove event is about another
+	// follower of the feed than the peer's.
+	hidden := func(typ, payload string) bool {
+		if feed == "" || typ != fedrooms.EventMember && typ != fedrooms.EventMemberRemove {
+			return false
+		}
+		var p struct{ Address string }
+		_ = json.Unmarshal([]byte(payload), &p)
+		_, domain, _ := strings.Cut(p.Address, "@")
+		return p.Address != feed && domain != peer
 	}
 	if limit <= 0 {
 		limit = s.eventsLimit()
@@ -357,7 +374,7 @@ func (s *Service) loadEvents(ctx context.Context, roomID, peer string, since, up
 		}
 		over := false
 		switch {
-		case e.Type == fedrooms.EventMessage && !reader:
+		case e.Type == fedrooms.EventMessage && !reader, hidden(e.Type, payload):
 			e.Type, payload = fedrooms.EventSkip, ""
 		case len(payload)+eventWrap > limit:
 			e.Type, payload, over = fedrooms.EventSkip, "", true

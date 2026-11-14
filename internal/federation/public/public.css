@@ -37,11 +37,13 @@ footer.site { border-top: 1px solid var(--rule); margin-top: 3rem; }
 .address { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9rem; color: var(--muted); margin: 0 0 1rem; }
 .description, .summary { white-space: pre-line; }
 .summary { margin: 0.25rem 0 0; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
-ul.bots, ul.skills { list-style: none; margin: 1rem 0; padding: 0; }
-ul.bots li, ul.skills li { background: var(--card); border: 1px solid var(--rule); border-radius: 0.5rem; padding: 0.75rem 1rem; margin: 0 0 0.75rem; }
+ul.bots, ul.skills, ol.posts { list-style: none; margin: 1rem 0; padding: 0; }
+ul.bots li, ul.skills li, ol.posts li { background: var(--card); border: 1px solid var(--rule); border-radius: 0.5rem; padding: 0.75rem 1rem; margin: 0 0 0.75rem; }
 ul.bots .name { font-weight: 600; font-size: 1.1rem; margin-right: 0.5rem; }
 ul.bots .address { display: inline-block; margin: 0; }
 ul.skills p { margin: 0.25rem 0 0; color: var(--muted); white-space: pre-line; }
+ol.posts time { color: var(--muted); font-size: 0.85rem; }
+ol.posts p { margin: 0.25rem 0 0; white-space: pre-wrap; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; color: var(--muted); }
 .empty { color: var(--muted); }
 @media (max-width: 30rem) {

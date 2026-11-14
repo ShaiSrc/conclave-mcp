@@ -48,6 +48,14 @@ type RoomHooks struct {
 	// Replicate is the messages service's store for a message of a
 	// replica room, published to subscribers like a sent one.
 	Replicate func(ctx context.Context, roomID string, m fedrooms.ReplicaMessage) (int64, error)
+	// Follow takes the follow request of follower, a bot of the signing
+	// server, toward our bot handle and returns the follow's status as the
+	// follower sees it; a refusal is a *fedrooms.Error (internal/follow).
+	Follow func(ctx context.Context, follower, handle string) (string, error)
+	// Withdraw deletes the pending or rejected follow request of follower,
+	// a bot of the signing server, toward our bot handle, and reports
+	// whether there was one (internal/follow).
+	Withdraw func(ctx context.Context, follower, handle string) (bool, error)
 }
 
 // Domain returns this server's federation domain.
@@ -116,7 +124,11 @@ func (s *Service) authorSigned(ctx context.Context, m MessageSig, sig string) (b
 // what that server reads a push up to (its answer's max_events_bytes,
 // 0 when it does not say), which the room's delivery cursor keeps. The
 // rooms service calls it before it adds the bot's stand-in. Only
-// allowed peers are asked. A refusal is a *fedrooms.Error.
+// allowed peers are asked. The invite names the room's kind: direct,
+// feed for a feed, else room; an answer that does not name it back is
+// a refusal (403). A feed's invite carries its bot's address too, which
+// its name may hold cut, and the seq its log is at. A refusal is a
+// *fedrooms.Error.
 func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string, set []string) (int, error) {
 	handle, domain, _ := strings.Cut(address, "@")
 	h, herr := bots.NormalizeHandle(handle)
@@ -134,8 +146,13 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	if peer.Status != statusAllowed {
 		return 0, &fedrooms.Error{Status: http.StatusForbidden, Code: "peer_not_allowed", Message: d + " is not an allowed peer"}
 	}
-	var kind string
-	if err := s.db.QueryRowContext(ctx, `SELECT kind FROM rooms WHERE id = ?`, roomID).Scan(&kind); err != nil {
+	// A feed's invite carries the seq of its log now: the member server
+	// skips a removal of the bot logged before it.
+	var kind, feed string
+	var seq int64
+	if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(feed, ''),
+		CASE WHEN feed IS NOT NULL THEN (SELECT COALESCE(MAX(seq), 0) FROM fed_events WHERE room_id = rooms.id) ELSE 0 END
+		FROM rooms WHERE id = ?`, roomID).Scan(&kind, &feed, &seq); err != nil {
 		return 0, err
 	}
 	body, _ := json.Marshal(struct {
@@ -143,7 +160,9 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 		Handle string   `json:"handle"`
 		Rights []string `json:"rights"`
 		Kind   string   `json:"kind"`
-	}{name, h, set, kind})
+		Feed   string   `json:"feed,omitempty"`
+		Seq    int64    `json:"seq,omitempty"`
+	}{name, h, set, kind, feed, seq})
 	status, out, err := s.sendSigned(ctx, http.MethodPost, d, "/fed/v1/rooms/"+roomID+"/invite", body, maxBody)
 	var refusal *fedrooms.Error
 	switch {
@@ -153,6 +172,8 @@ func (s *Service) InviteRemote(ctx context.Context, roomID, name, address string
 	case (status == http.StatusOK || status == http.StatusCreated) && kind == kindDirect && answerKind(out) != kindDirect:
 		// A peer before direct conversations takes it as a room.
 		refusal = &fedrooms.Error{Status: http.StatusForbidden, Code: "dm_refused", Message: "the peer does not support direct conversations"}
+	case (status == http.StatusOK || status == http.StatusCreated) && kind == kindFeed && answerKind(out) != kindFeed:
+		refusal = &fedrooms.Error{Status: http.StatusForbidden, Code: "invite_refused", Message: "the peer does not support feeds"}
 	case status == http.StatusOK || status == http.StatusCreated:
 	case status == http.StatusNotFound:
 		refusal = &fedrooms.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no bot " + h + " on " + d}
@@ -486,7 +507,7 @@ func (s *Service) handleRoomLeave(w http.ResponseWriter, r *http.Request) {
 // within the events budget and M, what the origin reads the answer up
 // to (ours without it), and with <, > and & as stored; message events
 // are skips unless the origin has a reader in the room, and so is an
-// event over M.
+// event over M and a feed's member event about another follower.
 func (s *Service) handleRoomEvents(w http.ResponseWriter, r *http.Request) {
 	roomID, ok := s.roomPeer(w, r)
 	if !ok {

@@ -283,6 +283,33 @@ func TestProfile_DMPolicy(t *testing.T) {
 	}
 }
 
+// The follow policy is approve without a saved one, only admin keys
+// change it, and a bot's own save keeps it.
+func TestProfile_FollowPolicy(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	fresh := addKey(t, w.db, "fresh", false)
+	if err := w.s.SetHandle(ctx, fresh, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"fresh", "pub"} {
+		if p := profileOf(t, do(w.s, adminC(w.admin), "GET", "/v1/bots/"+h, "")); p.FollowPolicy != FollowApprove {
+			t.Errorf("%s: follow_policy %q, want approve", h, p.FollowPolicy)
+		}
+	}
+	want(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"follow_policy":"open"}`), 403, "forbidden")
+	want(t, do(w.s, adminC(w.admin), "PATCH", "/v1/bots/pub/profile", `{"follow_policy":"everyone"}`), 400, "bad_request")
+	if p := profileOf(t, do(w.s, adminC(w.admin), "PATCH", "/v1/bots/pub/profile", `{"follow_policy":"open"}`)); p.FollowPolicy != FollowOpen {
+		t.Errorf("admin set: %+v", p)
+	}
+	if p := profileOf(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"description":"d"}`)); p.FollowPolicy != FollowOpen || p.Visibility != Public {
+		t.Errorf("bot's save: %+v", p)
+	}
+	if p, err := w.s.Update(ctx, "fresh", Patch{Description: new(string)}, false); err != nil || p.FollowPolicy != FollowApprove {
+		t.Errorf("first save: %+v, %v", p, err)
+	}
+}
+
 // A bot's save writes only the fields it sent: it keeps the visibility
 // and the other fields an admin set, also when the bot read the profile
 // before the admin wrote it. A first save fills the rest with defaults.
@@ -413,6 +440,7 @@ func TestAudit_Rows(t *testing.T) {
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"B","visibility":"public"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"C","description":"d","visibility":"public"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"dm_policy":"peers"}`), 200, "")
+	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"follow_policy":"none"}`), 200, "")
 	want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 204, "")
 
 	rows, err := db.Query(`SELECT actor_key_id, action, target_type, target_id, result, detail FROM audit ORDER BY id`)
@@ -431,10 +459,11 @@ func TestAudit_Rows(t *testing.T) {
 	}
 	wantRows := []string{
 		fmt.Sprintf(`%d bot.handle.set key %d ok {"handle":"bob"}`, admin, k),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private","dm_policy":"local"}`, k),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public","dm_policy":"local"}`, admin),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public","dm_policy":"local"}`, admin),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["dm_policy"],"visibility":"public","dm_policy":"peers"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private","dm_policy":"local","follow_policy":"approve"}`, k),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public","dm_policy":"local","follow_policy":"approve"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public","dm_policy":"local","follow_policy":"approve"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["dm_policy"],"visibility":"public","dm_policy":"peers","follow_policy":"approve"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["follow_policy"],"visibility":"public","dm_policy":"peers","follow_policy":"none"}`, admin),
 		fmt.Sprintf(`%d bot.handle.remove key %d ok {"handle":"bob"}`, admin, k),
 	}
 	if !slices.Equal(got, wantRows) {
@@ -455,4 +484,39 @@ func TestSetHandle_RefusesStandIn(t *testing.T) {
 	if err := s.SetHandle(context.Background(), id, "bob"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("SetHandle on a stand-in: %v, want ErrNotFound", err)
 	}
+}
+
+// A bot's feed and follows name it by its address: its handle neither
+// changes nor goes while it has an active feed here or any follow, as
+// follower or as target. The same handle again changes nothing.
+func TestHandle_FeedAndFollowsKeepIt(t *testing.T) {
+	s, db := testStore(t)
+	admin, k, other := addKey(t, db, "root", true), addKey(t, db, "agent", false), addKey(t, db, "other", false)
+	want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent"}`), 200, "")
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refused := func(what string) {
+		t.Helper()
+		want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent2"}`), 409, "conflict")
+		want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 409, "conflict")
+		want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent"}`), 200, "")
+		if p, err := s.ByKey(context.Background(), k); err != nil || p.Handle != "agent" {
+			t.Errorf("%s: the handle changed: %+v %v", what, p, err)
+		}
+	}
+	exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, feed) VALUES ('F1', 'feed:agent', ?, '2026-01-01T00:00:00Z', 'agent')`, k)
+	refused("feed")
+	exec(`UPDATE rooms SET archived_at = '2026-01-02T00:00:00Z' WHERE id = 'F1'`)
+	exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at) VALUES (?, 'other', ?, 'pending', '2026-01-01T00:00:00Z')`,
+		k, other)
+	refused("follow as follower")
+	exec(`UPDATE follows SET follower_key_id = ?, target = 'agent', target_key_id = ?`, other, k)
+	refused("follow as target")
+	exec(`DELETE FROM follows`)
+	want(t, do(s, adminC(admin), "PUT", handlePath(k), `{"handle":"agent2"}`), 200, "")
+	want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 204, "")
 }

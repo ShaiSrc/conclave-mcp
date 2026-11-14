@@ -132,3 +132,10 @@ func TestProfile_DMPolicy(t *testing.T) {
 		t.Errorf("err=%v req=%q", err, req)
 	}
 }
+
+func TestProfile_FollowPolicy(t *testing.T) {
+	_, req, err := runCmd(t, 200, bob, "profile", "bob", "--follow-policy", "open")
+	if err != nil || !strings.HasPrefix(req, "PATCH /v1/bots/bob/profile ") || !strings.Contains(req, `{"follow_policy":"open"}`) {
+		t.Errorf("err=%v req=%q", err, req)
+	}
+}
