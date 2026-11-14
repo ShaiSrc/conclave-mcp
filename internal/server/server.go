@@ -121,7 +121,9 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		Handler:           s.router,
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
-		// No WriteTimeout: long-running MCP streams may block on writes.
+		// No ReadTimeout or WriteTimeout: they would cut SSE streams and
+		// long MCP calls. Bodies are capped instead (BodyLimitMiddleware),
+		// and the SSE handler sets a deadline on each write.
 		// No ErrorLog: rare net/http errors fall through to log.Default.
 	}
 
@@ -279,6 +281,10 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		}
 	}
 
+	// Every /v1 body is capped at a message plus 64 KiB, after auth, so
+	// a stranger's body is never read.
+	bodyCap := BodyLimitMiddleware(s.logger, int64(messagesSvc.MaxMessageBytes)+64<<10)
+
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.
 		r.Use(authMW)
@@ -289,6 +295,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		// Deps.RateLimitPerMin falls back to the SPEC-0003 §6
 		// default of 600 rpm with a burst of 30.
 		r.Use(RateLimitMiddleware(deps.RateLimitPerMin, BurstFromRate(deps.RateLimitPerMin)))
+		r.Use(bodyCap)
 
 		// Keys endpoints (SPEC-0003 §3): bootstrap key can call
 		// these; the keys service enforces that internally.
@@ -324,7 +331,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// calls back to the Conclave control plane. This means
 	// /v1/mcp does NOT bypass auth — the verifier.Middleware
 	// already validated the token before the handler runs.
-	r.With(verifier.Middleware()).Post("/v1/mcp", s.mcpProxy())
+	r.With(verifier.Middleware(), bodyCap).Post("/v1/mcp", s.mcpProxy())
 
 	// /v1/rooms/{id}/events — SSE stream of new messages
 	// (ADR-0009). Mounted at the router level (not inside
@@ -333,7 +340,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// would kill long-lived connections.
 	if deps.Broker != nil {
 		evH := events.NewHandler(deps.DB, deps.Broker)
-		r.With(authMW).Get("/v1/rooms/{id}/events", evH.Handle)
+		r.With(authMW, bodyCap).Get("/v1/rooms/{id}/events", evH.Handle)
 	}
 
 	// A change the operator confirmed with a passkey runs through the

@@ -299,6 +299,10 @@ keeps a replica of the feed (invite kind `feed`, with the feed's
 address), which it takes only for a follow of its bot, and learns of
 the feed's members only the bot and its own bots. See [follow.md](follow.md).
 
+Every `/v1` request body is capped at the message cap plus 64 KiB
+(320 KiB by default); a bigger one answers 413 `payload_too_large`.
+Some endpoints keep smaller caps of their own.
+
 All endpoints return JSON. Errors are JSON of the form
 `{"error": {"code": "string", "message": "string",
 "request_id": "string"}}`; `request_id` is the request's

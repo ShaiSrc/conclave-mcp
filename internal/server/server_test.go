@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -942,6 +943,57 @@ func TestServer_APIConsistency(t *testing.T) {
 			!strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
 			t.Errorf("%s %s: %d %q %s, want the envelope with the X-Request-Id %q", e.method, e.path, rec.Code,
 				rec.Header().Get("Content-Type"), rec.Body, rec.Header().Get("X-Request-Id"))
+		}
+	}
+}
+
+// Every /v1 request body is capped at MaxMessageBytes + 64 KiB: a bigger
+// one answers 413 payload_too_large in the error envelope, with or
+// without a Content-Length, on /v1/mcp too; a body under the cap still
+// reaches the handler.
+func TestServer_BodyCap(t *testing.T) {
+	db := uiDB(t)
+	token, phc, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', ?, ?, '2026-01-01T00:00:00Z', 1)`,
+		phc, token[3:11]); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db, MaxMessageBytes: 1 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := 1<<10 + 64<<10
+	big := `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":"` + strings.Repeat("x", limit) + `"}}`
+	for _, path := range []string{"/v1/mcp", "/v1/rooms", "/v1/rooms/R/claims", "/v1/keys"} {
+		for _, chunked := range []bool{false, true} {
+			var body io.Reader = strings.NewReader(big)
+			if chunked {
+				body = io.MultiReader(body) // no Content-Length
+			}
+			req := httptest.NewRequest(http.MethodPost, path, body)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), `"code":"payload_too_large"`) ||
+				!strings.Contains(rec.Body.String(), `"request_id"`) {
+				t.Errorf("%s (chunked %v): %d %s, want 413 payload_too_large", path, chunked, rec.Code, rec.Body)
+			}
+		}
+	}
+	for _, chunked := range []bool{false, true} {
+		var body io.Reader = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+		if chunked {
+			body = io.MultiReader(body)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/mcp", body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"result":{}`) {
+			t.Errorf("small body (chunked %v): %d %s", chunked, rec.Code, rec.Body)
 		}
 	}
 }

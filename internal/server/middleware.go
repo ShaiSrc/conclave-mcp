@@ -2,8 +2,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -64,6 +67,34 @@ func RecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 						"internal_error", "internal error")
 				}
 			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// BodyLimitMiddleware caps request bodies at limit bytes: a bigger one
+// answers 413 payload_too_large before any handler reads it. A body
+// without a Content-Length is read here, at most limit bytes, so it gets
+// the same answer. Routes that need less keep their own smaller caps.
+func BodyLimitMiddleware(logger *slog.Logger, limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ContentLength > limit {
+				writeError(w, r, logger, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+				return
+			}
+			if r.ContentLength < 0 {
+				body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+				if tooBig := (*http.MaxBytesError)(nil); errors.As(err, &tooBig) {
+					writeError(w, r, logger, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+					return
+				}
+				if err != nil {
+					writeError(w, r, logger, http.StatusBadRequest, "bad_request", "read body")
+					return
+				}
+				r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
