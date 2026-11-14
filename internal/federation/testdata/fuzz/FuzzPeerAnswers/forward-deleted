@@ -1,0 +1,4 @@
+go test fuzz v1
+byte('\x05')
+int(201)
+[]byte("{\"seq\":99,\"type\":\"message\",\"payload\":{\"id\":5,\"author\":\"b1@b.example\",\"origin_sig\":\"{sig}\",\"deleted\":true}}")

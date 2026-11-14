@@ -1,0 +1,4 @@
+go test fuzz v1
+byte('\x05')
+int(201)
+[]byte("{\"000\":0,\"tYpe\":\"message\",\"pAYloAd\":{\"id\":1,\"Author\":\"b1@b.example\",\"origin_sig\":\"{sig}\"}}")

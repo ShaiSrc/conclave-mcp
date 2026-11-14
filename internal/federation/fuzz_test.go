@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"golang.org/x/time/rate"
 
+	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/bots"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/rights"
@@ -236,27 +239,49 @@ const peerDomain = "m.example"
 
 // fuzzRig is a server with an allowed peer whose bot m1 is a member of
 // the room hosted here and whose replica has our bot b1. The peer's
-// server answers every request with 201, naming an invite's kind back.
+// server answers every request with answer, or else with 201, naming an
+// invite's kind back.
 type fuzzRig struct {
 	g               *roomRig
 	peer            *Identity
+	b1              int64
 	hosted, replica string
+
+	mu sync.Mutex
+	// answer returns the status and body the peer answers a request
+	// with body req; a status of 0 drops the connection.
+	answer func(req []byte) (int, []byte)
 }
 
 func newFuzzRig(tb testing.TB) *fuzzRig {
 	tb.Helper()
 	ctx := context.Background()
 	g := newRoomRig(tb)
+	rg := &fuzzRig{g: g, peer: testIdentity(tb, peerDomain), replica: ulid.Make().String()}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var in struct{ Kind string }
-		_ = json.NewDecoder(r.Body).Decode(&in)
-		writeJSON(w, http.StatusCreated, map[string]string{"kind": in.Kind})
+		req, _ := io.ReadAll(r.Body)
+		rg.mu.Lock()
+		answer := rg.answer
+		rg.mu.Unlock()
+		if answer == nil {
+			var in struct{ Kind string }
+			_ = json.Unmarshal(req, &in)
+			writeJSON(w, http.StatusCreated, map[string]string{"kind": in.Kind})
+			return
+		}
+		status, out := answer(req)
+		if status == 0 {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			_ = conn.Close()
+			return
+		}
+		w.WriteHeader(status)
+		_, _ = w.Write(out)
 	}))
 	tb.Cleanup(srv.Close)
 	g.svc.fetch.client.Transport.(*http.Transport).DialContext = func(ctx context.Context, network, _ string) (net.Conn, error) {
 		return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
 	}
-	rg := &fuzzRig{g: g, peer: testIdentity(tb, peerDomain), replica: ulid.Make().String()}
 	allow(tb, g.svc, rg.peer)
 	// The fuzzer sends far more than a peer may; re-pin fetches keep
 	// their limit.
@@ -267,7 +292,7 @@ func newFuzzRig(tb testing.TB) *fuzzRig {
 	inf := rate.NewLimiter(rate.Inf, 0)
 	lims.requests, lims.dmInvites, lims.followRequests = inf, inf, inf
 
-	g.bot(tb, "b1")
+	rg.b1 = g.bot(tb, "b1")
 	open, peers := bots.FollowOpen, bots.DMPeers
 	if _, err := bots.NewStore(g.db).Update(ctx, "b1", bots.Patch{FollowPolicy: &open, DMPolicy: &peers}, true); err != nil {
 		tb.Fatal(err)
@@ -392,6 +417,189 @@ func FuzzApplyEvents(f *testing.F) {
 		var out struct{ Applied int64 }
 		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &out) != nil || out.Applied != applied+2 {
 			t.Fatalf("%s: %d %s, want 200 applied %d", body, rec.Code, rec.Body, applied+2)
+		}
+	})
+}
+
+// peerCalls are the outgoing calls that parse a peer's answer, by
+// FuzzPeerAnswers' selector.
+var peerCalls = []string{"directory", "lookup", "invite room", "invite direct", "invite feed", "forward message",
+	"claims", "claim", "claims heartbeat", "claims release", "pull", "follow", "follow withdraw"}
+
+// wantRefusal fails unless err is nil or a refusal our caller answers
+// with its own status: a *fedrooms.Error of a 4xx or 502. Any other
+// error is a 500 there.
+func wantRefusal(t *testing.T, call string, err error) {
+	t.Helper()
+	fe := (*fedrooms.Error)(nil)
+	if err != nil && (!errors.As(err, &fe) || fe.Status < 400 || fe.Status >= 500 && fe.Status != http.StatusBadGateway) {
+		t.Fatalf("%s: %v (%T): a 500 for our caller", call, err, err)
+	}
+}
+
+// FuzzPeerAnswers gives each outgoing call that parses a peer's answer
+// any status and body as that answer; {sig} and {nonce} in the body
+// become those of the request, so an answer can echo them. Nothing
+// panics, our caller never gets a 500, and an answer that fails its
+// checks stores nothing.
+func FuzzPeerAnswers(f *testing.F) {
+	ctx := context.Background()
+	rg := newFuzzRig(f)
+	g, svc := rg.g, rg.g.svc
+	// Rooms of each kind hosted here, to invite the peer's bot into.
+	direct, feed := ulid.Make().String(), ulid.Make().String()
+	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind, feed) VALUES
+		(?, 'dm:b1@b.example~m1@m.example', ?, '2026-01-01T00:00:00Z', 'private', 'direct', NULL),
+		(?, 'feed:b1@b.example', ?, '2026-01-01T00:00:00Z', 'private', 'room', 'b1@b.example')`,
+		direct, g.admin.KeyID, feed, rg.b1); err != nil {
+		f.Fatal(err)
+	}
+	svc.keyLimiters[g.admin.KeyID] = rate.NewLimiter(rate.Inf, 0) // remote lookups
+	api := chi.NewRouter()
+	api.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), auth.ClaimsKey{}, g.admin)))
+		})
+	})
+	BotRoutes(api, bots.NewStore(g.db), svc)
+	get := func(path string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		api.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		return rec
+	}
+	snapshot := func(t *testing.T, query string, args ...any) string {
+		t.Helper()
+		var s string
+		if err := g.db.QueryRow(query, args...).Scan(&s); err != nil {
+			t.Fatal(err)
+		}
+		return s
+	}
+	const (
+		botsOfPeer = `SELECT COALESCE(group_concat(handle || ' ' || profile, char(10)), '') FROM
+			(SELECT handle, profile FROM remote_bots WHERE domain = 'm.example' ORDER BY handle)`
+		replicaState = `SELECT applied_seq || ' ' || (SELECT COUNT(*) FROM messages WHERE room_id = rooms.id) FROM rooms WHERE id = ?`
+		ourMessages  = `SELECT COUNT(*) FROM messages WHERE room_id = ? AND author_key_id = ?`
+		ts           = `"ts":"2026-11-13T00:00:00.000000000Z"`
+	)
+	profile := `{"handle":"m1","display_name":"M1 ‮","description":"d\r\n<b>","skills":[{"id":"s1","name":"n","description":"d"},{"id":"BAD ID"}],"visibility":"public","updated_at":"2026-11-13T00:00:00+02:00"}`
+	errBody := `{"error":{"code":"dm_refused","message":"no\nthanks"}}`
+	for _, s := range []struct {
+		call   string
+		status int
+		body   string
+	}{
+		{"directory", 200, `{"bots":[` + profile + `,{"handle":"admin"},{"handle":"m2@x.example"}],"next":null}`},
+		{"directory", 200, `{"bots":[{"handle":"m3"}],"next":2}`},
+		{"directory", 403, errBody},
+		{"lookup", 200, profile},
+		{"lookup", 200, `{"handle":"m2"}`},
+		{"lookup", 404, errBody},
+		{"invite room", 201, `{"kind":"room","max_events_bytes":589824}`},
+		{"invite room", 409, `{"error":{"code":"name_taken"}}`},
+		{"invite direct", 201, `{"kind":"direct","max_events_bytes":-1}`},
+		{"invite direct", 429, errBody},
+		{"invite feed", 201, `{"kind":"feed"}`},
+		{"invite feed", 0, ``},
+		{"forward message", 201, `{"seq":1,"type":"message","payload":{"id":7,"author":"b1@b.example",` + ts +
+			`,"content_type":"text/plain","message_type":"answer","content":"hi","metadata":{"k":1},"origin_sig":"{sig}","nonce":"{nonce}"}}`},
+		{"forward message", 201, `{"seq":9,"type":"message","payload":{"id":8,"author":"b1@b.example",` + ts +
+			`,"content_type":"text/plain","message_type":"answer","content":"hi","metadata":{"k":1},"origin_sig":"{sig}","nonce":"{nonce}"}}`},
+		{"forward message", 400, errBody},
+		{"claims", 200, `{"claims":[{"id":1,"path":"x/","address":"b1@b.example","note":"n","expires_at":"2026-11-14T00:00:00Z"},` +
+			`{"id":2,"path":"y/","address":"m1@m.example","auto":true,"expires_at":"2026-11-14T00:00:00+02:00"},{"id":"3","path":"../z"}]}`},
+		{"claim", 409, `{"error":{"code":"conflict"},"conflicts":[{"path":"x/","held_path":"x/","address":"m1@m.example","expires_at":"2026-11-14T00:00:00Z"}]}`},
+		{"claim", 201, `{"claims":[{"id":4,"path":"x/","address":"b1@b.example","expires_at":"2026-11-14T00:00:00Z"}]}`},
+		{"claims heartbeat", 200, `{"refreshed":1}`},
+		{"claims release", 200, `{"released":["x/","../bad",1]}`},
+		{"pull", 200, `{"events":[{"seq":1,"type":"message","payload":{"id":11,"author":"m1@m.example",` + ts +
+			`,"content_type":"text/plain","message_type":"answer","content":"pulled"}},{"seq":2,"type":"room","payload":{"name":"proj"}}]}`},
+		{"pull", 200, `{"events":[{"seq":3,"type":"member","payload":{}}]}`},
+		{"follow", 201, `{"status":"pending"}`},
+		{"follow", 403, `{"error":{"code":"follow_refused"}}`},
+		{"follow", 302, ``},
+		{"follow withdraw", 204, ``},
+		{"follow withdraw", 200, errBody},
+	} {
+		i := 0
+		for peerCalls[i] != s.call {
+			i++
+		}
+		f.Add(uint8(i), s.status, []byte(s.body))
+	}
+	f.Fuzz(func(t *testing.T, call uint8, status int, body []byte) {
+		if status != 0 && (status < 200 || status > 599) {
+			return
+		}
+		rg.mu.Lock()
+		rg.answer = func(req []byte) (int, []byte) {
+			var in struct{ Sig, Nonce string }
+			_ = json.Unmarshal(req, &in)
+			return status, []byte(strings.NewReplacer("{sig}", in.Sig, "{nonce}", in.Nonce).Replace(string(body)))
+		}
+		rg.mu.Unlock()
+		name := peerCalls[int(call)%len(peerCalls)]
+		switch name {
+		case "directory":
+			before := snapshot(t, botsOfPeer)
+			if err := svc.refreshDirectory(ctx, peerDomain); err != nil && snapshot(t, botsOfPeer) != before {
+				t.Fatalf("a refused directory (%v) changed the cached bots", err)
+			}
+			if rec := get("/directory"); rec.Code != http.StatusOK {
+				t.Fatalf("/v1/directory: %d %s", rec.Code, rec.Body)
+			}
+		case "lookup":
+			rec := get("/bots/lookup?handle=m1@" + peerDomain)
+			var e entry
+			switch {
+			case rec.Code >= 500 && rec.Code != http.StatusBadGateway:
+				t.Fatalf("lookup: %d %s", rec.Code, rec.Body)
+			case rec.Code == http.StatusOK && (json.Unmarshal(rec.Body.Bytes(), &e) != nil || e.Handle != "m1" ||
+				e.Address != "m1@"+peerDomain || !e.Remote):
+				t.Fatalf("lookup answered another bot: %s", rec.Body)
+			}
+		case "invite room", "invite direct", "invite feed":
+			room := map[string][2]string{"invite room": {rg.hosted, "hosted"},
+				"invite direct": {direct, "dm:b1@b.example~m1@m.example"}, "invite feed": {feed, "feed:b1@b.example"}}[name]
+			_, err := svc.InviteRemote(ctx, room[0], room[1], "m1@"+peerDomain, []string{rights.Read})
+			wantRefusal(t, name, err)
+		case "forward message":
+			before := snapshot(t, ourMessages, rg.replica, rg.b1)
+			_, err := svc.ForwardMessage(ctx, rg.replica, rg.b1, fedrooms.MessagePayload{ContentType: "text/plain",
+				MessageType: "answer", Content: "hi", Metadata: []byte(`{"k":1}`)})
+			wantRefusal(t, name, err)
+			if err != nil && snapshot(t, ourMessages, rg.replica, rg.b1) != before {
+				t.Fatalf("a refused forward (%v) stored the message", err)
+			}
+		case "claims", "claim", "claims heartbeat", "claims release":
+			path := map[string]string{"claims": "/claims", "claim": "/claims", "claims heartbeat": "/claims/heartbeat",
+				"claims release": "/claims/release"}[name]
+			method, reqBody := http.MethodPost, `{"paths":["x/"]}`
+			if name == "claims" {
+				method, reqBody = http.MethodGet, ""
+			}
+			req := httptest.NewRequest(method, "/rooms/"+rg.replica+path, strings.NewReader(reqBody))
+			code, out, err := svc.ForwardClaims(req, rg.replica, rg.b1)
+			wantRefusal(t, name, err)
+			if err == nil && (!json.Valid(out) || code/100 != 2 && code != http.StatusConflict) {
+				t.Fatalf("%s answers %d %s", name, code, out)
+			}
+		case "pull":
+			if _, err := g.db.Exec(`UPDATE rooms SET applied_seq = 0 WHERE id = ?`, rg.replica); err != nil {
+				t.Fatal(err)
+			}
+			before := snapshot(t, replicaState, rg.replica)
+			var out struct{ Events []fedrooms.Event }
+			bad := status != http.StatusOK || json.Unmarshal([]byte(strings.NewReplacer("{sig}", "", "{nonce}", "").Replace(string(body))), &out) != nil ||
+				len(out.Events) > maxRoomEvents
+			_, _ = svc.pull(ctx, rg.replica, peerDomain, &refusals{})
+			if bad && snapshot(t, replicaState, rg.replica) != before {
+				t.Fatalf("a refused pull answer changed the replica: %s", body)
+			}
+		case "follow":
+			wantRefusal(t, name, svc.FollowRemote(ctx, "b1@"+local, "m1@"+peerDomain))
+		case "follow withdraw":
+			_ = svc.WithdrawFollow(ctx, "b1@"+local, "m1@"+peerDomain) // best effort: its caller goes on either way
 		}
 	})
 }
