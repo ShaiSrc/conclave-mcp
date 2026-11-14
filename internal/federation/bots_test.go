@@ -31,7 +31,7 @@ var (
 
 // addBot creates a key on db with handle, display name "Bot <handle>"
 // and visibility vis.
-func addBot(t *testing.T, db *sql.DB, handle, vis string) {
+func addBot(t testing.TB, db *sql.DB, handle, vis string) {
 	t.Helper()
 	ctx := context.Background()
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES (?, 'x', ?, '2026-01-01T00:00:00Z')`, handle, handle)

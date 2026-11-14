@@ -195,7 +195,7 @@ func TestPublic_Stylesheet(t *testing.T) {
 
 // addFeed makes a feed of handle on local, archived or active, and
 // returns its id.
-func addFeed(t *testing.T, svc *Service, handle string, archived bool) string {
+func addFeed(t testing.TB, svc *Service, handle string, archived bool) string {
 	t.Helper()
 	id := "feed-" + handle + fmt.Sprint(archived)
 	var arch any
@@ -212,7 +212,7 @@ func addFeed(t *testing.T, svc *Service, handle string, archived bool) string {
 
 // addPost stores a message by author in room at minute min of a day,
 // with metadata meta ("" for none), deleted or not.
-func addPost(t *testing.T, svc *Service, room, author string, min int, content, meta string, deleted bool) int64 {
+func addPost(t testing.TB, svc *Service, room, author string, min int, content, meta string, deleted bool) int64 {
 	t.Helper()
 	var m, del any
 	if meta != "" {

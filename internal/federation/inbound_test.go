@@ -31,11 +31,11 @@ type remote struct {
 
 func (rm *remote) domain() string { return rm.id.Domain }
 
-func newRemote(t *testing.T) *remote { return newRemoteHook(t, nil) }
+func newRemote(t testing.TB) *remote { return newRemoteHook(t, nil) }
 
 // newRemoteHook is newRemote, calling onFetch with the remote's
 // identity before it serves its document.
-func newRemoteHook(t *testing.T, onFetch func(*Identity)) *remote {
+func newRemoteHook(t testing.TB, onFetch func(*Identity)) *remote {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -56,7 +56,7 @@ func newRemoteHook(t *testing.T, onFetch func(*Identity)) *remote {
 	return rm
 }
 
-func newLocal(t *testing.T, mode string) *Service {
+func newLocal(t testing.TB, mode string) *Service {
 	t.Helper()
 	svc, err := New(testDB(t), Options{Domain: local, Mode: mode, InsecureHTTP: true, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
@@ -71,7 +71,7 @@ func allowLoopback(svc *Service) {
 	svc.fetch.client.Transport.(*http.Transport).DialContext = (&net.Dialer{}).DialContext
 }
 
-func allow(t *testing.T, svc *Service, id *Identity) {
+func allow(t testing.TB, svc *Service, id *Identity) {
 	t.Helper()
 	if err := svc.peers.Allow(context.Background(), id.Domain, id.Public, ""); err != nil {
 		t.Fatal(err)

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-func testIdentity(t *testing.T, domain string) *Identity {
+func testIdentity(t testing.TB, domain string) *Identity {
 	t.Helper()
 	id, err := LoadOrCreateIdentity(context.Background(), testDB(t), domain)
 	if err != nil {
