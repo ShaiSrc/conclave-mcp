@@ -46,7 +46,10 @@ func (f *fedEnv) messages(k apiKey, room string) map[string]fedMsg {
 // servers is asynchronous.
 func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); !ok(); time.Sleep(25 * time.Millisecond) {
+	// Every 100 ms: the admin key's rate limit refills 10 requests a
+	// second, so polling alone never drains it, even when a wait runs long
+	// under load.
+	for deadline := time.Now().Add(10 * time.Second); !ok(); time.Sleep(100 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
