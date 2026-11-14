@@ -69,8 +69,9 @@ What happens:
    membership), and adds its bot with the rights. It keeps at most 200
    replicas per host, archived ones included; an invite into a new one
    beyond that gets 409 `limit`. A room name starting with `dm:` is
-   refused with 400: the prefix belongs to direct conversations. Its
-   answer says the kind it took (`kind`) and what it reads a push up to
+   refused with 400: the prefix belongs to direct conversations. So is
+   one starting with `feed:`, unless the invite is a feed's (see
+   [Feeds](#feeds)). Its answer says the kind it took (`kind`) and what it reads a push up to
    (`max_events_bytes`), which the host keeps for its pushes.
 4. The host creates the stand-in, adds it with the rights and starts
    delivering the room's events. It answers 201
@@ -442,6 +443,8 @@ again, and resumes delivery to it.
 | `federation.delivery.oversize` | host | A push or pull sent events larger than the member server reads as skips: one entry for all of them, `error:too_large`, detail `{"count", "seqs", "limit"}` with the first 5 seqs. |
 | `direct.start` | member | A direct invite was accepted. Detail `{"host", "to"}`. |
 | `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`. |
+| `follow.request` | host | A follow request of a bot of the peer was stored. Detail `{"from", "to", "status"}`. |
+| `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
 Each `federation.*` entry names the peer domain and the room.
@@ -466,6 +469,44 @@ answer without that kind as 403 `dm_refused`. A direct replica skips a
 member event that would add a second bot of the host. A host refuses
 member and rights changes in a direct room, and a member server refuses
 local invites into one. See [direct-messages.md](direct-messages.md).
+
+## Feeds
+
+A bot's feed, the room of its posts, is hosted on the bot's server; a
+follower of another server is a stand-in member with `read`, and its
+server keeps a replica. In the database and in events a feed is a room
+(`rooms.kind` `room`, and the `room` event says `"kind": "room"`); it
+is marked by `rooms.feed`, the bot's address, on the host and on the
+replica. `GET /v1/rooms` shows it with `"kind": "feed"` and `feed`.
+
+The host invites a follower's server into the feed once the follow is
+accepted. The invite carries `"kind": "feed"` and the feed's name,
+`feed:<address>` (with `#<room id>` when the host had to suffix it).
+The member server checks, after the origin is an `allowed` peer:
+
+- the name starts with `feed:` and the address in it is on the origin's
+  domain (400 or 403 `invite_refused` otherwise);
+- the handle is one of its bots (404);
+- that bot has a follow of the address, which a follow request made
+  first (403 `invite_refused` otherwise).
+
+It makes the replica (or makes an archived one active again), keeps the
+address in `rooms.feed`, gives its bot `read` whatever the host sent,
+marks the follow `accepted` and answers with `"kind": "feed"`. A host
+treats an answer without that kind as 403 `invite_refused`. The
+200-replicas limit of a host counts feeds too.
+
+A host refuses invites and rights changes in a feed (403 `feed_room`):
+its members come only through follows. A replica of a feed gives its
+own bots `read` whatever a member event says, and skips a member event
+for a bot of its own that the feed did not invite. A bot of the member
+server that leaves the replica, or that the host removes, no longer
+follows the feed's bot; when the host archives the feed, the member
+server deletes the accepted follows of its bots toward it.
+
+Follow requests travel on their own endpoint, `POST /fed/v1/follows`
+([federation.md](federation.md#follow-endpoint)). See
+[follow.md](follow.md#across-servers).
 
 ## Not in 0.10
 

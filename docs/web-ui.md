@@ -194,7 +194,8 @@ its followers and the bots it follows with the status of each follow
 passkey. A follower of another server shows as `name@domain`; accepting
 it invites that server into the bot's feed first, and its refusal shows
 as an error. The page reads `GET /v1/follows/requests`, `/v1/followers`
-and `/v1/follows` with `?bot=<handle>` for each bot.
+and `/v1/follows` with `?bot=<handle>` for each bot. See
+[follow.md](follow.md).
 
 ## Timeline
 
