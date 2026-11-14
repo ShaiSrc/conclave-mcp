@@ -284,3 +284,23 @@ func TestDirectRemote_RevokedStandIn(t *testing.T) {
 		t.Error("the conversation was made")
 	}
 }
+
+// A room id that a room of another host, or one hosted here, holds is a
+// 409, audited with the host that holds it.
+func TestReplicaInvite_IDConflictAudited(t *testing.T) {
+	g, h, room, _ := replica(t, "read")
+	h2 := newFakeHost(t, g)
+	wantErr(t, h2.invite(t, g, room, "proj", "b1", "read"), http.StatusConflict, "conflict")
+	ours := ulid.Make().String()
+	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at) VALUES (?, 'mine', ?, '2026-01-01T00:00:00Z')`,
+		ours, g.admin.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, h2.invite(t, g, ours, "proj", "b1", "read"), http.StatusConflict, "conflict")
+	for id, holder := range map[string]string{room: h.id.Domain, ours: g.svc.Domain()} {
+		if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.invite' AND result = 'error:conflict'
+			AND target_id = ? AND room_id = ? AND json_extract(detail, '$.held_by') = ?`, h2.id.Domain, id, holder); n != 1 {
+			t.Errorf("room %s: %d conflicts audited as held by %s", id, n, holder)
+		}
+	}
+}

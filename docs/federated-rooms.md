@@ -87,6 +87,13 @@ The replica takes the host's room name. If an active local room has
 that name, the replica is named `name@host`. If that is taken too, the
 member server refuses the invite with 409.
 
+Room ids are one namespace on a member server, whatever the host. An
+invite under an id that a room of another host, or a room hosted here,
+already has gets 409 `conflict`. The member server audits it as
+`federation.room.invite` `error:conflict`, with `held_by` in the detail
+naming the server that holds the id. An allowed peer can use this to
+squat another host's room id; purging that peer frees it.
+
 When a room gets its first remote member, the host starts its event
 log with a snapshot: the room, its members (not admin keys) and its
 latest 200 messages. A snapshot message whose event would be larger

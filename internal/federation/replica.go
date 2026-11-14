@@ -171,11 +171,16 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	// The audit row is written outside the transaction, which holds the
 	// write lock: it is rolled back first.
 	var tx *sql.Tx
+	var heldBy string // on a 409, the host of the room that has the id here
 	refuse := func(status int, code, msg string) {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
-		detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
+		d := map[string]any{"handle": in.Handle, "rights": in.Rights}
+		if heldBy != "" {
+			d["held_by"] = heldBy
+		}
+		detail, _ := json.Marshal(d)
 		s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:"+code, string(detail))
 		writeErr(w, r, status, code, msg)
 	}
@@ -333,6 +338,10 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	case home.String != origin || kind != in.Kind || direct && pair.String != in.Name || feed && pair.String != feedOf:
+		// ponytail: room ids are one namespace for all hosts, so one host
+		// can hold another's id here; audited with the host that holds it.
+		// Key replicas by (host, id) if that is ever used.
+		heldBy = cmp.Or(home.String, s.id().Domain)
 		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
 		return
 	}
