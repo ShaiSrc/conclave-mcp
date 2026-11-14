@@ -8,12 +8,14 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/bots"
 	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
@@ -42,6 +44,9 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Delete("/peers/{domain}", s.handleRemovePeer)
 		r.Post("/peers/{domain}/ping", s.handlePingPeer)
 		r.Post("/peers/{domain}/retry", s.handleRetryPeer)
+		r.Get("/blocked-bots", s.handleListBlocked)
+		r.Post("/blocked-bots", s.handleBlockBot)
+		r.Delete("/blocked-bots/{address}", s.handleUnblockBot)
 	})
 	r.With(adminOnly).Get("/rooms/{id}/delivery", s.handleRoomDelivery)
 }
@@ -477,4 +482,122 @@ func (s *Service) handlePingPeer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"domain": domain, "rtt_ms": rtt.Milliseconds()})
+}
+
+// blockedBot is a row of blocked_bots as the admin API answers it;
+// created_by is the admin key that blocked the bot.
+type blockedBot struct {
+	Address   string `json:"address"`
+	Note      string `json:"note"`
+	CreatedAt string `json:"created_at"`
+	CreatedBy *int64 `json:"created_by"`
+}
+
+// blockedBots returns the blocked bots by address, or only address
+// unless it is "".
+func (s *Service) blockedBots(ctx context.Context, address string) ([]blockedBot, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT address, note, created_at, created_by FROM blocked_bots
+		WHERE ? IN ('', address) ORDER BY address`, address)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []blockedBot{}
+	for rows.Next() {
+		var b blockedBot
+		if err := rows.Scan(&b.Address, &b.Note, &b.CreatedAt, &b.CreatedBy); err != nil {
+			return nil, err
+		}
+		if t, err := time.Parse(time.RFC3339Nano, b.CreatedAt); err == nil {
+			b.CreatedAt = t.UTC().Format(time.RFC3339)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// botAddress returns the canonical form of raw, the address of a bot of
+// another server (name@domain, name a bot's handle), or answers 400
+// itself.
+func (s *Service) botAddress(w http.ResponseWriter, r *http.Request, raw string) (string, bool) {
+	name, domain, _ := strings.Cut(raw, "@")
+	h, herr := bots.NormalizeHandle(name)
+	d, derr := NormalizeDomain(domain)
+	switch {
+	case herr != nil || derr != nil:
+		writeErr(w, r, http.StatusBadRequest, "invalid_address", "address must be name@domain, name a bot's handle")
+	case d == s.id().Domain:
+		writeErr(w, r, http.StatusBadRequest, "own_domain", "a bot of this server is not blocked: revoke its key")
+	default:
+		return h + "@" + d, true
+	}
+	return "", false
+}
+
+func (s *Service) handleListBlocked(w http.ResponseWriter, r *http.Request) {
+	out, err := s.blockedBots(r.Context(), "")
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"blocked_bots": out})
+}
+
+// handleBlockBot blocks a bot of another server and cuts it off
+// (blockBot), and answers its row: 201, or 200 when it was blocked
+// already, after the cleanup ran again, which finishes one that failed.
+// Audit federation.bot.block with the note and what ended.
+func (s *Service) handleBlockBot(w http.ResponseWriter, r *http.Request) {
+	var in struct{ Address, Note string }
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBody)).Decode(&in); err != nil {
+		writeErr(w, r, http.StatusBadRequest, "invalid_json", err.Error())
+		return
+	}
+	address, ok := s.botAddress(w, r, in.Address)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	c, _ := auth.FromContext(ctx)
+	created, ended, err := s.blockBot(ctx, address, in.Note, c.KeyID)
+	var rows []blockedBot
+	if err == nil {
+		rows, err = s.blockedBots(ctx, address)
+	}
+	if err == nil && len(rows) == 0 {
+		err = errors.New("the block was lifted meanwhile")
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	detail, _ := json.Marshal(struct {
+		Note string `json:"note"`
+		blockCounts
+	}{in.Note, ended})
+	s.auditTarget(ctx, "federation.bot.block", "bot", address, "", "ok", string(detail))
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, rows[0])
+}
+
+// handleUnblockBot lifts the block of a bot of another server
+// (unblockBot): its memberships and follows stay ended. 204, or 404 when
+// it is not blocked. Audit federation.bot.unblock.
+func (s *Service) handleUnblockBot(w http.ResponseWriter, r *http.Request) {
+	address, ok := s.botAddress(w, r, chi.URLParam(r, "address"))
+	if !ok {
+		return
+	}
+	switch lifted, err := s.unblockBot(r.Context(), address); {
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+	case !lifted:
+		writeErr(w, r, http.StatusNotFound, "not_found", address+" is not blocked")
+	default:
+		s.auditTarget(r.Context(), "federation.bot.unblock", "bot", address, "", "ok", "")
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

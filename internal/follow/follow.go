@@ -429,17 +429,26 @@ func (s *Service) handle(w http.ResponseWriter, r *http.Request, to string) (str
 }
 
 // followRemote has bot caller follow the bot at address on server
-// domain, an allowed peer. The follow is stored pending, then the peer
-// is asked, which checks its bot, its policy and its own limit, and
-// invites our bot into the feed before it answers when it accepts. On a
-// refusal the follow is deleted and the peer's status and code passed
-// on; without an answer it stays pending, and the next follow asks
-// again. An accepted follow is answered as it is, after the peer was
-// asked again, best effort, in case it lost the answer to its invite.
+// domain, an allowed peer, unless the operator blocked it (403
+// bot_blocked). The follow is stored pending, then the peer is asked,
+// which checks its bot, its policy and its own limit, and invites our
+// bot into the feed before it answers when it accepts. On a refusal the
+// follow is deleted and the peer's status and code passed on; without an
+// answer it stays pending, and the next follow asks again. An accepted
+// follow is answered as it is, after the peer was asked again, best
+// effort, in case it lost the answer to its invite.
 func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller int64, address, domain string) {
 	ctx := r.Context()
 	if s.Request == nil {
 		writeErr(w, r, http.StatusNotFound, "federation_disabled", "following bots of other servers is not enabled on this server")
+		return
+	}
+	switch blocked, err := fedrooms.Blocked(ctx, s.DB, address); {
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "block lookup")
+		return
+	case blocked:
+		s.refuse(w, r, caller, address, "blocked", http.StatusForbidden, "bot_blocked", address+" is blocked on this server")
 		return
 	}
 	var allowed bool
@@ -1307,8 +1316,8 @@ func (s *Service) auditAs(ctx context.Context, actor int64, action string, v fol
 	_ = audit.Write(ctx, s.DB, actor, action, "follow", strconv.FormatInt(v.ID, 10), "", "ok", string(detail))
 }
 
-// refuse audits a refused follow (reason: not a bot, policy, limit) and
-// answers it.
+// refuse audits a refused follow (reason: not a bot, policy, limit,
+// blocked) and answers it.
 func (s *Service) refuse(w http.ResponseWriter, r *http.Request, caller int64, to, reason string, status int, code, msg string) {
 	s.refused(r.Context(), caller, "", to, reason, code)
 	writeErr(w, r, status, code, msg)

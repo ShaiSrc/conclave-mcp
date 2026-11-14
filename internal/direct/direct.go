@@ -214,11 +214,12 @@ func (s *Service) start(w http.ResponseWriter, r *http.Request) {
 
 // startRemote finds or starts the conversation of bot caller with the
 // bot name on server domain, an allowed peer, and posts the message of
-// body to it. A new one is hosted here: the room is made, the peer is
-// asked to take its bot in, which checks the bot's policy and its own
-// limit, and on refusal the room is removed and the peer's status and
-// code passed on. Without an answer the room stays pending; when the
-// message fails after the peer took the bot in, it is archived.
+// body to it; a bot the operator blocked is 403 bot_blocked. A new one
+// is hosted here: the room is made, the peer is asked to take its bot
+// in, which checks the bot's policy and its own limit, and on refusal
+// the room is removed and the peer's status and code passed on. Without
+// an answer the room stays pending; when the message fails after the
+// peer took the bot in, it is archived.
 func (s *Service) startRemote(w http.ResponseWriter, r *http.Request, caller int64, name, domain string, body []byte) {
 	ctx := r.Context()
 	handle, err := bots.NormalizeHandle(name)
@@ -231,6 +232,14 @@ func (s *Service) startRemote(w http.ResponseWriter, r *http.Request, caller int
 		return
 	}
 	toAddr := handle + "@" + domain
+	switch blocked, err := fedrooms.Blocked(ctx, s.DB, toAddr); {
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "block lookup")
+		return
+	case blocked:
+		s.refuse(w, r, caller, toAddr, "blocked", http.StatusForbidden, "bot_blocked", toAddr+" is blocked on this server")
+		return
+	}
 	var allowed bool
 	if err := s.DB.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM federation_peers WHERE domain = ? AND status = 'allowed')`,
 		domain).Scan(&allowed); err != nil {
@@ -564,8 +573,8 @@ func retryAfter(lim *rate.Limiter) string {
 	return strconv.Itoa(int(max(delay, time.Second).Seconds()))
 }
 
-// refuse audits a refused start (reason: not a bot, policy, limit) and
-// answers it.
+// refuse audits a refused start (reason: not a bot, policy, limit,
+// blocked) and answers it.
 func (s *Service) refuse(w http.ResponseWriter, r *http.Request, caller int64, to, reason string, status int, code, msg string) {
 	detail, _ := json.Marshal(map[string]string{"to": to, "reason": reason})
 	_ = audit.Write(r.Context(), s.DB, caller, "direct.refused", "bot", to, "", "error:"+code, string(detail))

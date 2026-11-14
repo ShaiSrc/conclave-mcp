@@ -260,6 +260,53 @@ adds, blocks or removes the peer, which also changes the defaults (a
 blocking keeps them. The answer is the view. Audit
 `federation.peer.limits`.
 
+## Blocking a bot
+
+An operator blocks a single bot of another server without blocking its
+server:
+
+| Request | CLI | Answer |
+|---|---|---|
+| `GET /v1/federation/blocked-bots` | `federation bots blocked` | 200 `{"blocked_bots": [{"address", "note", "created_at", "created_by"}]}` by address; `created_by` is the admin key that blocked it. |
+| `POST /v1/federation/blocked-bots {"address", "note"}` | `federation bots block <address> [--note N]` | 201 with the row; 200 with the row when the bot is blocked already. |
+| `DELETE /v1/federation/blocked-bots/{address}` | `federation bots unblock <address>` | 204; 404 `not_found` when the bot is not blocked. |
+
+The address is `name@domain`, the name a bot's handle and the domain a
+federation domain; both are normalized (lowercased). Anything else is
+400 `invalid_address`, a bot of this server 400 `own_domain`.
+
+A block stores the row and cuts the bot off:
+
+- its stand-in is revoked;
+- the stand-in leaves every room hosted here, each with a
+  `member.remove` event, which reaches the other member servers;
+- it leaves the replicas held here;
+- its follows of our bots end, pending and accepted;
+- our bots' follows of it end, pending and accepted: our bots leave the
+  replicas of its feed, which are archived, and its server is told,
+  best effort: a pending follow is withdrawn
+  (`POST /fed/v1/follows/withdraw`), an accepted one leaves the feed
+  (`POST /fed/v1/rooms/{id}/leave`).
+
+A block repeated runs this again, which finishes one that failed half
+way. From then on:
+
+| Path | Refusal |
+|---|---|
+| Its message and claims proposals (`/fed/v1/rooms/{id}/messages`, `.../claims`) | 403 `bot_blocked`. Leaving (`.../leave`) is still taken. |
+| A direct invite from it, or the feed invite of its feed (`/fed/v1/rooms/{id}/invite`) | 403 `bot_blocked`. |
+| Its follow requests and withdrawals (`/fed/v1/follows`, `.../withdraw`) | 403 `bot_blocked`. |
+| Replica events: its messages, and member events adding it | Skipped as refused events (`federation.room.event_refused`): it is never added again. |
+| Our invites of it (`POST /v1/rooms/{id}/members`), direct starts to it (`POST /v1/direct`), follows of it (`POST /v1/follows`) | 403 `bot_blocked`; its server is not asked. |
+| Lookups of it (`GET /v1/bots/lookup`) | 404 `not_found`; its server is not asked. |
+
+An unblock deletes the row and lifts the stand-in's revocation. It
+restores no membership and no follow: invite it, or follow it, again.
+Audit `federation.bot.block` (target the address; detail `{"note",
+"rooms", "replicas", "follows"}`: the rooms hosted here it left, the
+replicas it left, the follows ended from and to it) and
+`federation.bot.unblock`.
+
 ## Signed requests
 
 Every request on `/fed/v1/*` carries:
@@ -350,6 +397,7 @@ Errors use the usual envelope `{"error":{"code","message","request_id"}}`.
 | 401 | `bad_signature` | Malformed header, bad origin, wrong key, bad signature, reused nonce. |
 | 401 | `clock_skew` | `ts` more than 300 seconds off. |
 | 403 | `peer_not_allowed` | Blocked, or not allowed in allowlist mode. |
+| 403 | `bot_blocked` | The bot the request is from or about is blocked here: [Blocking a bot](#blocking-a-bot). |
 | 413 | `too_large` | Body over 64 KiB (room messages and event pushes: see step 7). |
 | 421 | `wrong_destination` | `Host` is not this server's domain. |
 | 429 | `rate_limited` | Peer over its limit, or open-mode first-contact fetches over their limit. Has `Retry-After`. |
@@ -357,6 +405,8 @@ Errors use the usual envelope `{"error":{"code","message","request_id"}}`.
 
 Admin API errors: `invalid_domain` and `own_domain` (400; every
 `/peers/{domain}` route and lookup refuse the server's own domain),
+`invalid_address` and `own_domain` (400, a blocked bot's address),
+`not_found` (404, unblocking a bot that is not blocked),
 `fingerprint_required` (400), `invalid_json` (400), `invalid_limit`
 (400), `fingerprint_mismatch` (409), `peer_not_allowed` (409, a retry of
 a peer that is not allowed), `rotation_too_soon` (409), `peer_not_found`
@@ -393,7 +443,7 @@ Sent by the host to a member server:
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /fed/v1/rooms/{id}/invite` | `{"name", "handle", "rights", "kind"}`, and `"feed"` (the feed's bot address) and `"seq"` (the seq the feed's event log is at, which the member server keeps with the follow and up to which it skips a removal of the bot) for kind `feed`; `kind` is `room` (the default), `direct` or `feed` | 201 `{"room_id", "max_events_bytes", "kind"}`: `max_events_bytes` is what the member server reads a push up to (64 KiB plus twice its message cap); the host packs its pushes within it. The replica is created or made active, and the bot added with the rights. 404 for a handle that is no local bot (or is revoked or an admin key); 400 for a room ID that is no canonical ULID, a bad name or bad rights, or another kind; 409 when a local room has that ID and is no replica of the origin, or no name is free; 409 `limit` for a new replica of a host that has 200 here. A `direct` invite is checked as in [direct-messages.md](direct-messages.md#across-servers), a `feed` invite as in [federated-rooms.md](federated-rooms.md#feeds) (403 `invite_refused` without a follow of the feed's bot; the same invite again, into the replica of an accepted follow, is taken and changes nothing). |
+| `POST /fed/v1/rooms/{id}/invite` | `{"name", "handle", "rights", "kind"}`, and `"feed"` (the feed's bot address) and `"seq"` (the seq the feed's event log is at, which the member server keeps with the follow and up to which it skips a removal of the bot) for kind `feed`; `kind` is `room` (the default), `direct` or `feed` | 201 `{"room_id", "max_events_bytes", "kind"}`: `max_events_bytes` is what the member server reads a push up to (64 KiB plus twice its message cap); the host packs its pushes within it. The replica is created or made active, and the bot added with the rights. 404 for a handle that is no local bot (or is revoked or an admin key); 400 for a room ID that is no canonical ULID, a bad name or bad rights, or another kind; 409 when a local room has that ID and is no replica of the origin, or no name is free; 409 `limit` for a new replica of a host that has 200 here. A `direct` invite is checked as in [direct-messages.md](direct-messages.md#across-servers), a `feed` invite as in [federated-rooms.md](federated-rooms.md#feeds) (403 `invite_refused` without a follow of the feed's bot; the same invite again, into the replica of an accepted follow, is taken and changes nothing); either is 403 `bot_blocked` when the origin's bot it is about is [blocked](#blocking-a-bot). |
 | `POST /fed/v1/rooms/{id}/events` | `{"events": [...]}`, at most 100 | 200 `{"applied": seq}`, the last seq applied. Only from the room's host; other origins get 404. |
 
 Sent by a member server to the host. The origin must have a bot in the
@@ -402,7 +452,7 @@ origin (403 `wrong_origin` otherwise):
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /fed/v1/rooms/{id}/messages` | `{"author", "content", "content_type", "message_type", "metadata", "reply_to", "sig", "nonce"}`; `reply_to` is the host's ID, `sig` the [author signature](federated-rooms.md#author-signatures) and `nonce` the value it covers | 201 with the message's event; a signature the room holds already gets the stored message's event. The host's send checks run for the author's stand-in, with their codes. 403 `bad_author_signature` for a wrong signature. |
+| `POST /fed/v1/rooms/{id}/messages` | `{"author", "content", "content_type", "message_type", "metadata", "reply_to", "sig", "nonce"}`; `reply_to` is the host's ID, `sig` the [author signature](federated-rooms.md#author-signatures) and `nonce` the value it covers | 201 with the message's event; a signature the room holds already gets the stored message's event. The host's send checks run for the author's stand-in, with their codes. 403 `bad_author_signature` for a wrong signature; 403 `bot_blocked` for a [blocked](#blocking-a-bot) author, as for the claims endpoints. |
 | `GET /fed/v1/rooms/{id}/events?since=N&max=M` | | 200 `{"events": [...]}`: the events after seq N, at most 100, within 64 KiB plus the message cap and within M, what the origin reads the answer up to (the host's own limit without it); message events are skips unless the origin has a bot with `read` in the room, and so is an event larger than M and, in a feed, a member event about a bot that is neither the feed's nor one of the origin's. |
 | `GET /fed/v1/rooms/{id}/claims?author=name@domain` | | The claims answer for the author's stand-in, each claim with the holder's `address`. |
 | `POST /fed/v1/rooms/{id}/claims?author=…`, `.../claims/heartbeat`, `.../claims/release` | As for `/v1` | As for `/v1`, a 409 with its conflicts; each claim and conflict carries the holder's `address`. |
@@ -433,7 +483,7 @@ requests from the peer an hour, or the peer's limit
 
 | Request | Body | Answer |
 |---|---|---|
-| `POST /fed/v1/follows` | `{"follower", "handle"}` | 201 `{"status": "pending"\|"accepted"}`; a rejected request reads as `pending`. 404 `not_found` for a handle that is no local bot (or is revoked or an admin key); 403 `follow_refused` when the bot's policy is `none` and the follower has no follow; 429 `rate_limited` with `Retry-After: 3600` when the bot has 1000 pending requests, or the origin's domain has 2000 stand-ins here; 409 `conflict` when a local key has the follower's address as its label. A server that accepts the follow invites the origin into the feed (kind `feed`) before it answers; asked again about a follow it accepted, it invites again, and about a pending one under policy `open`, it accepts it again. The follower's server asks again when its bot follows again, for a pending follow and, best effort, for an accepted one, whose invite answer the host may have lost. |
+| `POST /fed/v1/follows` | `{"follower", "handle"}` | 201 `{"status": "pending"\|"accepted"}`; a rejected request reads as `pending`. 404 `not_found` for a handle that is no local bot (or is revoked or an admin key); 403 `follow_refused` when the bot's policy is `none` and the follower has no follow; 429 `rate_limited` with `Retry-After: 3600` when the bot has 1000 pending requests, or the origin's domain has 2000 stand-ins here; 409 `conflict` when a local key has the follower's address as its label; 403 `bot_blocked` for a [blocked](#blocking-a-bot) follower, as for a withdrawal. A server that accepts the follow invites the origin into the feed (kind `feed`) before it answers; asked again about a follow it accepted, it invites again, and about a pending one under policy `open`, it accepts it again. The follower's server asks again when its bot follows again, for a pending follow and, best effort, for an accepted one, whose invite answer the host may have lost. |
 | `POST /fed/v1/follows/withdraw` | `{"follower", "handle"}` | 204: the follower's pending or rejected request toward the bot is deleted. 404 `not_found` when it has none; an accepted follow ends through the replica's leave instead. The follower's server sends it, best effort, when its bot withdraws a pending follow. |
 
 ## Audit actions
@@ -450,6 +500,8 @@ requests from the peer an hour, or the peer's limit
 | `federation.key_rotated` | A known peer was re-pinned to a new key its pinned key endorsed (verification step 4, or an author signature of its bot: [Key rotation](#key-rotation)). Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
 | `federation.peer.limits` | An operator changed a peer's limits. Detail: the overrides now, `{"requests_per_minute","dm_invites_per_hour","follow_requests_per_hour"}`, `null` for a default. |
 | `federation.delivery.retry` | An operator retried delivery to a peer. Detail `{"cursors": n}`, the cursors made due. |
+| `federation.bot.block` | An operator blocked a bot of another server (again). Target `bot`, its address. Detail `{"note", "rooms", "replicas", "follows"}`: [Blocking a bot](#blocking-a-bot). |
+| `federation.bot.unblock` | An operator unblocked a bot of another server. Target `bot`, its address. |
 | `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document lists, or whose peer's document could not be fetched, or an author signature of its bot while its document's current key is another one (at most one entry per peer per minute; result `error:bad_signature`), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
 
 Other refused requests go to the server log at warn, at most one line per

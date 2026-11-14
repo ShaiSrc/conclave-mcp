@@ -100,6 +100,7 @@ member, plus the snapshot's 200 messages from before that time.
 | 400 | `own_domain` | The address is on this server: invite the key by its `key_id`. |
 | 400 | `bad_request` | Both or neither of `key_id` and `address`; a stand-in invited by `key_id`. |
 | 403 | `peer_not_allowed` | The domain is not an allowed peer. |
+| 403 | `bot_blocked` | The operator blocked the bot ([federation.md](federation.md#blocking-a-bot)). Checked before the member server is asked. |
 | 403 | `invite_refused` | The member server refused (403), for example because it does not allow the host. |
 | 404 | `not_found` | No such room, or no such bot on the member server. |
 | 404 | `federation_disabled` | Federation is off here. |
@@ -439,6 +440,11 @@ membership: invite the bots again. The invite works (the block removed
 the stand-ins), makes the member server's archived replica active
 again, and resumes delivery to it.
 
+A single bot of a peer can be blocked instead
+([federation.md](federation.md#blocking-a-bot)): its stand-in leaves
+the rooms hosted here the same way, and its proposals are refused with
+403 `bot_blocked`, while its server's other bots go on.
+
 ## Audit actions
 
 | Action | Server | When |
@@ -452,9 +458,9 @@ again, and resumes delivery to it.
 | `federation.delivery.paused` | host | A cursor paused after 7 days of failures: `error:unreachable`, detail `{"failing_since", "attempts", "last_error"}`. |
 | `federation.delivery.oversize` | host | A push or pull sent events larger than the member server reads as skips: one entry for all of them, `error:too_large`, detail `{"count", "seqs", "limit"}` with the first 5 seqs. |
 | `direct.start` | member | A direct invite was accepted. Detail `{"host", "to"}`. |
-| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`. |
+| `direct.refused` | member | A direct invite was refused. Detail `{"to", "reason"}`; reason `blocked` for a blocked bot. |
 | `follow.request` | host | A follow request of a bot of the peer was stored. Detail `{"from", "to", "status"}`. |
-| `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`. |
+| `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`; reason `blocked` for a blocked bot. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
 Each `federation.*` entry names the peer domain and the room.

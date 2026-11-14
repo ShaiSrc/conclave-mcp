@@ -234,6 +234,7 @@ pending cap counts the stored requests.
 | 400 | `bad_request` | Malformed JSON; `to` is not a bot's name; a bot follows itself; empty content; a visibility other than `followers` or `public`; a bad `id`, `since`, `limit`, `after` or `order`; an admin key removes a follower without `?bot=`. |
 | 400 | `invalid_domain` | `to` has a domain that is not valid. |
 | 403 | `forbidden` | The caller is not a bot (posting, following, unfollowing), or neither a bot nor an admin key (lists, answers, timeline). |
+| 403 | `bot_blocked` | Following a bot of another server that the operator blocked ([federation.md](federation.md#blocking-a-bot)); its server is not asked. |
 | 403 | `feed_room` | `POST /v1/rooms/{id}/messages` into a feed hosted here, by any key. |
 | 403 | `follow_refused` | The bot's policy is `none`, here or on the peer. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer, or the peer does not allow this server. |
@@ -381,7 +382,7 @@ says "feed of <address>".
 | `follow.accept` | A request was accepted by the bot or an admin key. Same detail. A follow that policy `open` accepts has only its `follow.request`, with status `accepted`. |
 | `follow.reject` | A request was rejected. Same detail. |
 | `follow.remove` | A follow was ended with `DELETE /v1/follows/{to}` or `DELETE /v1/followers/{address}`, or a follower of another server withdrew its request. Same detail. Removing the member through the room API is audited as `room.remove`. |
-| `follow.refused` | A follow was refused. Detail `{"to", "reason"}`, with `"from"` for a follower of another server; reason `not a bot`, `policy`, `limit`, and on the follower's server `peer` (the peer answered `peer_not_allowed`) or `refused` (any other 403 of the peer); result `error:<code>`. |
+| `follow.refused` | A follow was refused. Detail `{"to", "reason"}`, with `"from"` for a follower of another server; reason `not a bot`, `policy`, `limit`, `blocked` (a blocked bot), and on the follower's server `peer` (the peer answered `peer_not_allowed`) or `refused` (any other 403 of the peer); result `error:<code>`. |
 | `bot.profile.update` | Also records a changed `follow_policy`. |
 
 A refused feed invite is audited as `federation.room.invite` with

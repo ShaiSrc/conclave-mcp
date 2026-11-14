@@ -488,10 +488,19 @@ func (s *Service) invite(w http.ResponseWriter, r *http.Request) {
 }
 
 // inviteRemote invites the bot at address: its server is asked first,
-// and only once it accepted is the bot's stand-in added.
+// and only once it accepted is the bot's stand-in added. A bot the
+// operator blocked is 403 bot_blocked, its server not asked.
 func (s *Service) inviteRemote(w http.ResponseWriter, r *http.Request, roomID, address string, set rights.Set) {
 	if s.InviteRemote == nil {
 		writeErr(w, r, http.StatusNotFound, "federation_disabled", "federation is not enabled on this server")
+		return
+	}
+	switch blocked, err := fedrooms.Blocked(r.Context(), s.DB, address); {
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "block lookup")
+		return
+	case blocked:
+		writeErr(w, r, http.StatusForbidden, "bot_blocked", address+" is blocked on this server")
 		return
 	}
 	var (

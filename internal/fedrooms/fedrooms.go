@@ -127,6 +127,15 @@ type DB interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
+// Blocked reports whether the operator blocked address, a bot of
+// another server (blocked_bots): every path that takes the bot in or
+// reaches it asks here, one lookup of the table's key.
+func Blocked(ctx context.Context, db DB, address string) (bool, error) {
+	var blocked bool
+	err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM blocked_bots WHERE address = ?)`, address).Scan(&blocked)
+	return blocked, err
+}
+
 // Address returns the address keyID has on the wire: a stand-in's
 // label, handle@ourDomain for a bot, operator@ourDomain for the
 // operator key, and key-<id>@ourDomain for any other local key.

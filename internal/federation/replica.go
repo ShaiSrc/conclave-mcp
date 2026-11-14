@@ -136,6 +136,9 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // member, of ours or of the origin, it is a 409; the same invite again
 // changes nothing; an older active replica of the pair from the origin
 // is archived.
+//
+// A direct invite from a bot the operator blocked, or the feed invite of
+// one, is 403 bot_blocked.
 func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	var in struct {
@@ -248,6 +251,23 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 			refuse(http.StatusBadRequest, "bad_request", "a direct conversation's name is dm:<address>~<address>, sorted, of the invited bot and one of the host's")
 			return
 		}
+	}
+	who := other // the origin's bot a direct or feed invite is about
+	if feed {
+		who = feedOf
+	}
+	switch blocked, err := fedrooms.Blocked(ctx, s.db, who); {
+	case err != nil:
+		s.fail(w, r, err)
+		return
+	case blocked && direct:
+		dmRefuse(http.StatusForbidden, "bot_blocked", "blocked", who+" is blocked on this server")
+		return
+	case blocked:
+		refuse(http.StatusForbidden, "bot_blocked", who+" is blocked on this server")
+		return
+	}
+	if direct {
 		if policy != bots.DMPeers {
 			dmRefuse(http.StatusForbidden, "dm_refused", "policy", h+" does not take direct conversations from other servers")
 			return
@@ -739,8 +759,9 @@ func applyDelete(ctx context.Context, tx *sql.Tx, roomID string, payload json.Ra
 // memberKey returns the key that stands for address in a replica, and
 // whether it is a key of this server. An address of this server is our
 // own key: handle@, operator@ (the operator key) or key-<id>@. Any other
-// is its stand-in, created when create is set. It returns 0 for an
-// address without a key.
+// is its stand-in, created when create is set; a bot the operator
+// blocked is refused then, so it is never added again and its messages
+// are not taken. It returns 0 for an address without a key.
 func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, create bool) (id int64, local bool, err error) {
 	name, domain, ok := strings.Cut(address, "@")
 	if !ok {
@@ -748,6 +769,12 @@ func (s *Service) memberKey(ctx context.Context, tx *sql.Tx, address string, cre
 	}
 	if domain != s.id().Domain {
 		if create {
+			switch blocked, err := fedrooms.Blocked(ctx, tx, address); {
+			case err != nil:
+				return 0, false, err
+			case blocked:
+				return 0, false, refused("%s is blocked", address)
+			}
 			if id, err = fedrooms.StandIn(ctx, tx, address); errors.Is(err, fedrooms.ErrAddress) {
 				err = refused("%v", err)
 			}
@@ -1009,31 +1036,8 @@ func (s *Service) catchUp(ctx context.Context) {
 // rooms are archived, and our bots' follows of its bots, pending and
 // accepted, end.
 func (s *Service) dropPeer(ctx context.Context, domain string) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT m.room_id, m.key_id FROM room_members m JOIN api_keys k ON k.id = m.key_id
-		JOIN rooms r ON r.id = m.room_id WHERE k.remote_domain = ? AND r.home_domain IS NULL`, domain)
-	if err != nil {
+	if _, err := s.leaveAll(ctx, `k.remote_domain = ?`, domain); err != nil {
 		return err
-	}
-	type membership struct {
-		room string
-		key  int64
-	}
-	var ms []membership
-	for rows.Next() {
-		var m membership
-		if err := rows.Scan(&m.room, &m.key); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		ms = append(ms, m)
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	for _, m := range ms {
-		if _, err := s.leaveHosted(ctx, m.room, m.key); err != nil {
-			return err
-		}
 	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE fed_delivery SET paused = 1 WHERE peer = ?`, domain); err != nil {
 		return err
@@ -1048,6 +1052,179 @@ func (s *Service) dropPeer(ctx context.Context, domain string) error {
 	}
 	s.DeliverSoon()
 	return nil
+}
+
+// leaveAll takes the stand-ins that cond picks (on their key k, with
+// arg) out of every room hosted here (leaveHosted), and returns how many
+// memberships ended.
+func (s *Service) leaveAll(ctx context.Context, cond string, arg any) (int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT m.room_id, m.key_id FROM room_members m JOIN api_keys k ON k.id = m.key_id
+		JOIN rooms r ON r.id = m.room_id WHERE r.home_domain IS NULL AND `+cond, arg)
+	if err != nil {
+		return 0, err
+	}
+	type membership struct {
+		room string
+		key  int64
+	}
+	var ms []membership
+	for rows.Next() {
+		var m membership
+		if err := rows.Scan(&m.room, &m.key); err != nil {
+			_ = rows.Close()
+			return 0, err
+		}
+		ms = append(ms, m)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, m := range ms {
+		left, err := s.leaveHosted(ctx, m.room, m.key)
+		if err != nil {
+			return n, err
+		}
+		if left {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// blockCounts are what a block ended: the stand-in's memberships of
+// rooms hosted here and of replicas, and the follows from and to the
+// bot.
+type blockCounts struct {
+	Rooms    int   `json:"rooms"`
+	Replicas int64 `json:"replicas"`
+	Follows  int64 `json:"follows"`
+}
+
+// blockBot blocks address, a bot of another server, for the admin key
+// actor, and cuts it off. In one transaction its row is stored, its
+// stand-in revoked and taken out of the replicas here, and the follows
+// from and to it end, our bots leaving the replicas of its feed. Then
+// its stand-in leaves each room hosted here with a member.remove event
+// (leaveHosted), and its server is told, best effort, that our bots
+// withdraw their pending follows of it and leave its feed. It reports
+// whether the row is new, and what ended.
+// ponytail: those requests run one after the other within the
+// operator's request; a background queue if a bot has many followers.
+func (s *Service) blockBot(ctx context.Context, address, note string, actor int64) (created bool, n blockCounts, err error) {
+	_, domain, _ := strings.Cut(address, "@")
+	now := storage.FormatTS(s.now())
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, n, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	affected := func(res sql.Result, err error) (int64, error) {
+		if err != nil {
+			return 0, err
+		}
+		return res.RowsAffected()
+	}
+	added, err := affected(tx.ExecContext(ctx, `INSERT INTO blocked_bots(address, note, created_at, created_by) VALUES (?, ?, ?, ?)
+		ON CONFLICT(address) DO NOTHING`, address, note, now, actor))
+	var key int64 // its stand-in, 0 for none
+	if err == nil {
+		if err = tx.QueryRowContext(ctx, `SELECT id FROM api_keys WHERE label = ? AND remote_domain = ?`, address, domain).
+			Scan(&key); errors.Is(err, sql.ErrNoRows) {
+			err = nil
+		}
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE api_keys SET revoked_at = COALESCE(revoked_at, ?) WHERE id = ?`, now, key)
+	}
+	if err == nil {
+		n.Replicas, err = affected(tx.ExecContext(ctx, `DELETE FROM room_members WHERE key_id = ?
+			AND room_id IN (SELECT id FROM rooms WHERE home_domain IS NOT NULL)`, key))
+	}
+	if err == nil {
+		n.Follows, err = affected(tx.ExecContext(ctx, `DELETE FROM follows WHERE follower_key_id = ?`, key))
+	}
+	// Our bots' follows of it, with the replica of its feed each is in.
+	type follow struct {
+		key           int64
+		from, replica string
+		pending       bool
+	}
+	var ours []follow
+	var rows *sql.Rows
+	if err == nil {
+		rows, err = tx.QueryContext(ctx, `SELECT f.follower_key_id, k.handle || '@' || ?, f.status = 'pending',
+			COALESCE((SELECT r.id FROM rooms r JOIN room_members m ON m.room_id = r.id AND m.key_id = f.follower_key_id
+				WHERE r.feed = f.target AND r.home_domain IS NOT NULL AND r.archived_at IS NULL), '')
+			FROM follows f JOIN api_keys k ON k.id = f.follower_key_id WHERE f.target = ? AND f.target_key_id IS NULL`,
+			s.id().Domain, address)
+	}
+	for err == nil && rows.Next() {
+		var f follow
+		if err = rows.Scan(&f.key, &f.from, &f.pending, &f.replica); err == nil {
+			ours = append(ours, f)
+		}
+	}
+	if rows != nil {
+		if err == nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+	}
+	if err == nil {
+		var k int64
+		k, err = affected(tx.ExecContext(ctx, `DELETE FROM follows WHERE target = ? AND target_key_id IS NULL`, address))
+		n.Follows += k
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `DELETE FROM room_members WHERE room_id IN (SELECT id FROM rooms WHERE feed = ? AND home_domain IS NOT NULL)
+			AND key_id IN (SELECT id FROM api_keys WHERE remote_domain IS NULL)`, address)
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = COALESCE(archived_at, ?) WHERE feed = ? AND home_domain IS NOT NULL`,
+			now, address)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err == nil {
+		n.Rooms, err = s.leaveAll(ctx, `k.id = ?`, key)
+	}
+	if err != nil {
+		return false, n, err
+	}
+	s.DeliverSoon()
+	for _, f := range ours { // best effort: it ended here either way
+		switch {
+		case f.replica != "":
+			_ = s.LeaveRemote(ctx, f.replica, f.key)
+		case f.pending:
+			_ = s.WithdrawFollow(ctx, f.from, address)
+		}
+	}
+	return added == 1, n, nil
+}
+
+// unblockBot lifts the block of address: its row goes and its stand-in
+// is no longer revoked. It reports whether address was blocked.
+func (s *Service) unblockBot(ctx context.Context, address string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `DELETE FROM blocked_bots WHERE address = ?`, address)
+	var n int64
+	if err == nil {
+		n, err = res.RowsAffected()
+	}
+	if err != nil || n == 0 {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE api_keys SET revoked_at = NULL WHERE label = ? AND remote_domain IS NOT NULL`, address); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // leaveHosted removes stand-in keyID from room roomID hosted here and

@@ -101,6 +101,7 @@ Errors on a start:
 |---|---|---|
 | 400 | `bad_request` | The message type is `system` or not a message type, the content is empty, or `to` is not a bot's name. |
 | 403 | `dm_refused` | The recipient's policy does not allow it, the recipient is not a bot, the caller is an admin key, or the peer does not support direct conversations. |
+| 403 | `bot_blocked` | The operator blocked the recipient, a bot of another server ([federation.md](federation.md#blocking-a-bot)). Its server is not asked. |
 | 403 | `forbidden` | The caller is not a bot. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer. |
 | 404 | `not_found` | No such bot. |
@@ -211,7 +212,7 @@ start, last activity, host, state); each opens as a room.
 | Action | When |
 |---|---|
 | `direct.start` | A conversation was made. On the server of the sender: detail `{"from", "to"}`. On the recipient's server, for an accepted invite: detail `{"host", "to"}`. |
-| `direct.refused` | A start was refused. Detail `{"to", "reason"}`, reason `not a bot`, `policy` or `limit`; result `error:<code>`. |
+| `direct.refused` | A start was refused. Detail `{"to", "reason"}`, reason `not a bot`, `policy`, `limit` or `blocked`; result `error:<code>`. |
 | `bot.profile.update` | Also records a changed `dm_policy`. |
 
 ## Not included

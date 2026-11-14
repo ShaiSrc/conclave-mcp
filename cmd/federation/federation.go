@@ -7,6 +7,9 @@
 //	conclave-mcp federation peers add <domain> [--fingerprint F] [--note N]
 //	conclave-mcp federation peers block|remove|ping|retry <domain>
 //	conclave-mcp federation peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]
+//	conclave-mcp federation bots block <address> [--note N]
+//	conclave-mcp federation bots unblock <address>
+//	conclave-mcp federation bots blocked
 package federation
 
 import (
@@ -30,7 +33,9 @@ func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "federation", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers := &cobra.Command{Use: "peers", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers.AddCommand(newListCmd(), newShowCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd(), newRetryCmd(), newLimitsCmd())
-	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers)
+	bots := &cobra.Command{Use: "bots", Short: "Block single bots of other servers", Args: cobra.NoArgs}
+	bots.AddCommand(newBotBlockCmd(), newBotUnblockCmd(), newBotsBlockedCmd())
+	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers, bots)
 	return cmd
 }
 
@@ -366,6 +371,71 @@ func newPingCmd() *cobra.Command {
 				}
 				_, _ = fmt.Fprintf(out, "%s: %d ms\n", args[0], resp.RTT)
 				return nil
+			})
+		},
+	}
+}
+
+const blockedPath = "/v1/federation/blocked-bots"
+
+func newBotBlockCmd() *cobra.Command {
+	var note string
+	cmd := &cobra.Command{
+		Use: "block <address>", Short: "Block a bot of another server: it leaves the rooms here and its follows end", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				status, err := c.Do(ctx, client.Request{Method: "POST", Path: blockedPath, Body: map[string]string{"address": args[0], "note": note}})
+				if err != nil {
+					return err
+				}
+				if status == http.StatusOK {
+					_, _ = fmt.Fprintf(out, "bot %s was blocked already\n", args[0])
+				} else {
+					_, _ = fmt.Fprintf(out, "bot %s blocked\n", args[0])
+				}
+				return nil
+			})
+		},
+	}
+	cmd.Flags().StringVar(&note, "note", "", "free-text note")
+	return cmd
+}
+
+func newBotUnblockCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "unblock <address>", Short: "Lift a bot's block; its memberships and follows stay ended", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				if _, err := c.Do(ctx, client.Request{Method: "DELETE", Path: blockedPath + "/" + url.PathEscape(args[0])}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "bot %s unblocked\n", args[0])
+				return nil
+			})
+		},
+	}
+}
+
+func newBotsBlockedCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "blocked", Short: "List the blocked bots of other servers", Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var resp struct {
+					BlockedBots []struct {
+						Address, Note string
+						CreatedAt     string `json:"created_at"`
+					} `json:"blocked_bots"`
+				}
+				if _, err := c.Do(ctx, client.Request{Method: "GET", Path: blockedPath, Out: &resp}); err != nil {
+					return err
+				}
+				tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+				_, _ = fmt.Fprintln(tw, "ADDRESS\tBLOCKED_AT\tNOTE")
+				for _, b := range resp.BlockedBots {
+					_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\n", b.Address, b.CreatedAt, b.Note)
+				}
+				return tw.Flush()
 			})
 		},
 	}

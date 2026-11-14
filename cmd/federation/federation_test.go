@@ -166,3 +166,33 @@ func TestAPIErrorExitCode(t *testing.T) {
 		t.Errorf("err=%v code=%d", err, ExitCode(err))
 	}
 }
+
+func TestBots(t *testing.T) {
+	out, req, err := runCmd(t, 201, `{"address":"c1@b.example","note":"spam"}`, "bots", "block", "c1@b.example", "--note", "spam")
+	if err != nil || req != `POST /v1/federation/blocked-bots {"address":"c1@b.example","note":"spam"}` || out != "bot c1@b.example blocked\n" {
+		t.Errorf("block: err=%v req=%q out=%q", err, req, out)
+	}
+	out, _, err = runCmd(t, 200, `{"address":"c1@b.example","note":""}`, "bots", "block", "c1@b.example")
+	if err != nil || out != "bot c1@b.example was blocked already\n" {
+		t.Errorf("block again: err=%v out=%q", err, out)
+	}
+	out, req, err = runCmd(t, 204, ``, "bots", "unblock", "c1@b.example")
+	if err != nil || !strings.HasPrefix(req, "DELETE /v1/federation/blocked-bots/c1@b.example ") || out != "bot c1@b.example unblocked\n" {
+		t.Errorf("unblock: err=%v req=%q out=%q", err, req, out)
+	}
+	out, req, err = runCmd(t, 200, `{"blocked_bots":[{"address":"c1@b.example","note":"spam","created_at":"2026-11-14T10:00:00Z","created_by":1}]}`,
+		"bots", "blocked")
+	if err != nil || !strings.HasPrefix(req, "GET /v1/federation/blocked-bots ") || !strings.Contains(out, "ADDRESS") ||
+		!strings.Contains(out, "c1@b.example") || !strings.Contains(out, "spam") || !strings.Contains(out, "2026-11-14T10:00:00Z") {
+		t.Errorf("blocked: err=%v req=%q out=%q", err, req, out)
+	}
+	for _, args := range [][]string{{"block"}, {"unblock"}, {"block", "a@b.example", "c@d.example"}} {
+		if _, req, err := runCmd(t, 201, `{}`, append([]string{"bots"}, args...)...); err == nil || req != "" {
+			t.Errorf("%v: err=%v req=%q", args, err, req)
+		}
+	}
+	_, _, err = runCmd(t, 400, `{"error":{"code":"own_domain","message":"m"}}`, "bots", "block", "c1@a.example")
+	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "own_domain") {
+		t.Errorf("400: err=%v", err)
+	}
+}

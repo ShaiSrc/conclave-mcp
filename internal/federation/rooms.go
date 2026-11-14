@@ -312,6 +312,20 @@ func (s *Service) standIn(w http.ResponseWriter, r *http.Request, author string)
 	return id, true
 }
 
+// botBlocked answers 403 bot_blocked, or the failure of the lookup, and
+// returns true when the operator blocked address.
+func (s *Service) botBlocked(w http.ResponseWriter, r *http.Request, address string) bool {
+	blocked, err := fedrooms.Blocked(r.Context(), s.db, address)
+	switch {
+	case err != nil:
+		s.fail(w, r, err)
+		return true
+	case blocked:
+		writeErr(w, r, http.StatusForbidden, "bot_blocked", address+" is blocked on this server")
+	}
+	return blocked
+}
+
 // asStandIn returns a copy of r for the local services: authenticated
 // as stand-in keyID (no scopes, so no admin key; its trust origin,
 // external, is its key's), with path and body, outside the federation
@@ -330,7 +344,7 @@ func asStandIn(r *http.Request, keyID int64, path string, body []byte) *http.Req
 // of the origin's bot, with its server's author signature. It runs the
 // local send path as the bot's stand-in, so membership, rights, types,
 // reply_to, the size cap and the archived check apply, and answers the
-// message's event.
+// message's event. A bot the operator blocked is 403 bot_blocked.
 func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 	roomID, ok := s.roomPeer(w, r)
 	if !ok {
@@ -351,7 +365,7 @@ func (s *Service) handleRoomMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keyID, ok := s.standIn(w, r, p.Author)
-	if !ok {
+	if !ok || s.botBlocked(w, r, p.Author) {
 		return
 	}
 	wire, _, err := fedrooms.SplitMetadata(p.Metadata)
@@ -436,13 +450,14 @@ func (s *Service) answerMessage(w http.ResponseWriter, r *http.Request, roomID s
 // /fed/v1/rooms/{id}/claims for the origin's bot named by ?author=, as
 // its stand-in, with the rights and conflicts of local keys. Each claim
 // and conflict also carries its holder's address, by which the member
-// server finds its own key for the holder.
+// server finds its own key for the holder. A bot the operator blocked is
+// 403 bot_blocked; it may still leave.
 func (s *Service) handleRoomClaims(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.roomPeer(w, r); !ok {
 		return
 	}
 	keyID, ok := s.standIn(w, r, r.URL.Query().Get("author"))
-	if !ok {
+	if !ok || s.botBlocked(w, r, r.URL.Query().Get("author")) {
 		return
 	}
 	body, _ := io.ReadAll(r.Body) // read and capped by Verify
