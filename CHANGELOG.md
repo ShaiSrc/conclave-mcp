@@ -14,6 +14,28 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   recomputes, and an endpoint list that `TestProtocolRoutes` pins to
   the federation router. The operator docs link to it; it wins where
   they repeat a wire detail.
+- `conclave-mcp backup <file>`: a consistent copy of the database while
+  the server runs (`VACUUM INTO`), written in a private directory and
+  linked into place with mode 0600; an existing file is refused. No HTTP
+  endpoint and no MCP tool: the copy holds the server's private key.
+- Server info: `GET /v1/server` (admin keys) answers the version, the
+  schema version, the start time and the federation settings; CLI
+  `conclave-mcp server`, MCP `server.info` (33 tools) and a Server page in
+  the web UI show the same. The version stays out of `/healthz` and the
+  server document.
+- `DELETE /v1/federation/keys/previous` (CLI `federation
+  forget-old-keys`, a button on the Federation page with a passkey)
+  drops this server's old keys: their private keys are erased, they
+  leave the server document and stop verifying our bots' signatures
+  (`federation.key.forget`). For use after a key leak, following a
+  rotation.
+- `docs/upgrading.md`, the upgrade guide from 0.4 on, with the
+  compatibility promise from 1.0; `docs/security.md`, the trust
+  boundaries and the accepted limits; `SECURITY.md`, how to report a
+  vulnerability.
+- An interop suite with three servers (`TestInterop_ThreeServers`) and
+  fuzz targets for every parser that reads another server's bytes,
+  peer answers included; CI runs each target for 15 seconds.
 
 ### Changed
 
