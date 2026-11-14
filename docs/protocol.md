@@ -142,7 +142,8 @@ A server key is an Ed25519 key (RFC 8032).
 
 A peer pins a key: the operator adds the peer by its fingerprint, or in
 open mode the key the peer first signs with is pinned (trust on first
-use). Requests are verified with the pinned key.
+use), which MUST be its document's current key. Requests are verified
+with the pinned key.
 
 ### Rotation
 
@@ -240,9 +241,9 @@ stored before the signature verifies.
    `clock_skew`.
 6. The key. Steps 4 and 5 MUST come before it, so that a request
    failing them causes no document fetch. An unknown origin in open
-   mode: fetch its document and take the key whose key ID is `key`,
-   current or previous (401 `bad_signature` when it lists none; 502
-   `peer_unreachable` when the document cannot be fetched;
+   mode: fetch its document and take its current key, the first, when
+   its key ID is `key` (401 `bad_signature` otherwise, a previous key
+   included; 502 `peer_unreachable` when the document cannot be fetched;
    429 `rate_limited` when such fetches are over their limit). A known
    peer's key is its pinned key, used without a fetch while `key` is its
    key ID. For another key ID, [re-pin](#re-pinning) or answer 401

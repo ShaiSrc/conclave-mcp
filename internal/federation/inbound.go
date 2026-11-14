@@ -81,8 +81,8 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 
 		// 6. A known peer's key is its stored key, used without a fetch,
 		// unless it signs with a new key its pinned one endorsed (repin).
-		// Open mode: an unknown origin's key comes from its document
-		// (TOFU).
+		// Open mode: an unknown origin's key is its document's current
+		// key (TOFU).
 		pub := peer.PublicKey
 		switch {
 		case !known:
@@ -235,7 +235,8 @@ func (s *Service) admits(p Peer) bool {
 }
 
 // keyIn returns the key in doc whose key ID or fingerprint is want, or
-// nil. The Fetcher has checked that each key matches both.
+// nil. The Fetcher has checked that each key matches both. It serves the
+// operator's lookups, which may pin any key the document lists.
 func keyIn(doc Document, want string) ed25519.PublicKey {
 	for _, k := range doc.Keys {
 		if k.KeyID == want || k.Fingerprint == want {
@@ -247,13 +248,15 @@ func keyIn(doc Document, want string) ed25519.PublicKey {
 }
 
 // firstContactKey fetches the document of an unknown origin and returns
-// its key with ID keyID.
+// its current key (the first) when its ID is keyID. A previous key is
+// not taken: it may be the one that was rotated out after a leak.
 func (s *Service) firstContactKey(ctx context.Context, origin, keyID string) (ed25519.PublicKey, error) {
 	doc, err := s.fetch.Document(ctx, origin)
 	if err != nil {
 		return nil, err
 	}
-	if pub := keyIn(doc, keyID); pub != nil && KeyIDFor(pub) == keyID {
+	if k := doc.Keys[0]; k.KeyID == keyID {
+		pub, _ := b64.DecodeString(k.PublicKey) // checked by the Fetcher
 		return pub, nil
 	}
 	return nil, errUnknownKey

@@ -636,3 +636,19 @@ func TestVerify_DestinationAndTimeBeforeFetch(t *testing.T) {
 	wantOK(t, serve(svc, signed(t, stranger.id, local, "{}")))
 	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
 }
+
+// Open mode: a first contact pins only the document's current key; a
+// previous key the document still lists is refused.
+func TestVerify_FirstContactCurrentKeyOnly(t *testing.T) {
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	old, cur, _ := rotatedPeer(t, nil)
+	wantErr(t, serve(svc, signed(t, old, local, "{}")), http.StatusUnauthorized, "bad_signature")
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM federation_peers`); n != 0 {
+		t.Errorf("peers: %d", n)
+	}
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+	if p, err := svc.peers.Get(context.Background(), cur.Domain); err != nil || p.Fingerprint != cur.Fingerprint() {
+		t.Errorf("pinned %s %v, want the current key", p.Fingerprint, err)
+	}
+}

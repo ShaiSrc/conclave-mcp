@@ -114,10 +114,12 @@ bot](#blocking-a-bot), [Key rotation](#key-rotation)). See
 | `open` | fetched, then verified; recorded as `seen` on its first valid request | verified | 403 |
 
 `blocked` always wins. In open mode the key first seen for a domain is
-the key the server keeps for it (trust on first use). A `seen` peer's
-key is stored and pinned like an `allowed` one's. Blocking, removing
-and purging are in the CLI and the admin API ([Blocking, removing and
-purging a peer](#blocking-removing-and-purging-a-peer)).
+the key the server keeps for it (trust on first use). Only the
+document's current key is taken on first contact: a request signed with
+a key the document lists as `previous` is 401 `bad_signature`. A `seen`
+peer's key is stored and pinned like an `allowed` one's. Blocking,
+removing and purging are in the CLI and the admin API ([Blocking,
+removing and purging a peer](#blocking-removing-and-purging-a-peer)).
 
 ## Server document
 
@@ -477,9 +479,9 @@ The server checks in this order and stops at the first failure.
    Both come before the key, so a request that fails them fetches no
    document and spends no fetch budget.
 6. The key. Unknown in open mode: fetch the origin's document (see the
-   limits) and use its key with the header's key ID (401 `bad_signature`
-   when it lists none); an unreachable document is 502
-   `peer_unreachable`, and a fetch over the first-contact budget 429
+   limits) and use its current key, the first; a key the document lists
+   only as `previous` is 401 `bad_signature`, an unreachable document
+   502 `peer_unreachable`, and a fetch over the first-contact budget 429
    `rate_limited`.
    A known peer's key is the public key pinned when it was added or
    first seen; nothing is fetched while the header's key ID is that
