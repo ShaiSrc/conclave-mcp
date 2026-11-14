@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -971,5 +972,87 @@ func TestFollowRemote_LateRefusalKeepsNewRow(t *testing.T) {
 	wantErr(t, e.do(alice, http.MethodPost, "/follows", `{"to":"bob@b.example"}`), http.StatusForbidden, "follow_refused")
 	if n := e.count(`SELECT COUNT(*) FROM follows WHERE follower_key_id = ?`, alice); n != 1 {
 		t.Errorf("%d follows left, want the new one", n)
+	}
+}
+
+// remoteErr is the *fedrooms.Error of err, or fails.
+func remoteErr(t *testing.T, err error, status int, code string) {
+	t.Helper()
+	var fe *fedrooms.Error
+	if !errors.As(err, &fe) || fe.Status != status || fe.Code != code {
+		t.Errorf("got %v; want %d %s", err, status, code)
+	}
+}
+
+// A block that lands after the federation listener checked the follower
+// still holds: the request's write checks it again, and stores neither a
+// follow nor a stand-in.
+func TestRemote_BlockedSinceTheCheck(t *testing.T) {
+	e := newEnv(t, "")
+	svc := e.serve("b.example")
+	e.bot("bob", "approve")
+	e.exec(`INSERT INTO blocked_bots(address, created_at) VALUES ('c1@m.example', '2026-11-14T00:00:00Z')`)
+	_, err := svc.Remote(context.Background(), "c1@m.example", "bob")
+	remoteErr(t, err, http.StatusForbidden, "bot_blocked")
+	if n := e.count(`SELECT COUNT(*) FROM follows`) + e.count(`SELECT COUNT(*) FROM api_keys WHERE remote_domain IS NOT NULL`); n != 0 {
+		t.Errorf("the refused request left %d rows", n)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM audit WHERE action = 'follow.refused' AND detail LIKE '%"reason":"blocked"%'`); n != 1 {
+		t.Errorf("%d blocked refusals audited, want 1", n)
+	}
+}
+
+// Accepting a pending request of a bot of another server that the
+// operator blocked since is refused, and its server is not invited.
+func TestAccept_BlockedFollower(t *testing.T) {
+	e := newEnv(t, "")
+	svc := e.serve("b.example")
+	invited := 0
+	svc.InviteRemote = func(context.Context, string, string, string, []string) (int, error) {
+		invited++
+		return 0, nil
+	}
+	bob := e.bot("bob", "approve")
+	if status, err := svc.Remote(context.Background(), "c1@m.example", "bob"); err != nil || status != "pending" {
+		t.Fatalf("follow: %q %v", status, err)
+	}
+	e.exec(`INSERT INTO blocked_bots(address, created_at) VALUES ('c1@m.example', '2026-11-14T00:00:00Z')`)
+	var id int64
+	if err := e.db.QueryRow(`SELECT id FROM follows`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	wantErr(t, e.do(bob, http.MethodPost, fmt.Sprintf("/follows/requests/%d/accept", id), ""), http.StatusForbidden, "bot_blocked")
+	if invited != 0 {
+		t.Errorf("the blocked bot's server was invited %d times", invited)
+	}
+	if n := e.count(`SELECT COUNT(*) FROM follows WHERE status = 'accepted'`); n != 0 {
+		t.Errorf("%d accepted follows", n)
+	}
+}
+
+// One peer's bots hold at most MaxPendingPerPeer pending requests to a
+// bot: the next one from that peer is 429, while another peer's bot and
+// a rejected request do not count against it.
+func TestRemote_PendingCapPerPeer(t *testing.T) {
+	e := newEnv(t, "")
+	svc := e.serve("b.example")
+	bob := e.bot("bob", "approve")
+	e.exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO api_keys(label, hash, prefix, created_at, trust_origin, remote_domain)
+		SELECT 's' || i || '@m.example', '', '', '2026-01-01T00:00:00Z', 'external', 'm.example' FROM n`, MaxPendingPerPeer)
+	e.exec(`INSERT INTO follows(follower_key_id, target, target_key_id, status, created_at)
+		SELECT id, 'bob@b.example', ?, 'pending', '2026-01-01T00:00:00Z' FROM api_keys WHERE remote_domain = 'm.example'`, bob)
+	ctx := context.Background()
+	_, err := svc.Remote(ctx, "new@m.example", "bob")
+	remoteErr(t, err, http.StatusTooManyRequests, "rate_limited")
+	if n := e.count(`SELECT COUNT(*) FROM audit WHERE action = 'follow.refused' AND detail LIKE '%"reason":"limit"%'`); n != 1 {
+		t.Errorf("%d limit refusals audited, want 1", n)
+	}
+	if status, err := svc.Remote(ctx, "c1@o.example", "bob"); err != nil || status != "pending" {
+		t.Errorf("another peer's bot: %q %v", status, err)
+	}
+	e.exec(`UPDATE follows SET status = 'rejected' WHERE id = (SELECT MIN(id) FROM follows)`)
+	if status, err := svc.Remote(ctx, "new@m.example", "bob"); err != nil || status != "pending" {
+		t.Errorf("after a rejection: %q %v", status, err)
 	}
 }

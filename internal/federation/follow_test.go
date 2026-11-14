@@ -191,6 +191,7 @@ func TestFollowRemote_IncomingLimit(t *testing.T) {
 	g := newRoomRig(t)
 	h := newFakeHost(t, g)
 	g.followBot(t, "b1", "approve")
+	g.followBot(t, "b2", "approve") // b1 then holds as many pending requests of h's bots as it takes
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	g.svc.now = func() time.Time { return now }
 	lims, err := g.svc.limitersOf(context.Background(), h.id.Domain)
@@ -212,7 +213,7 @@ func TestFollowRemote_IncomingLimit(t *testing.T) {
 		t.Errorf("%d limit refusals audited, want 1", n)
 	}
 	now = now.Add(time.Minute)
-	if rec := h.follow(t, g, h.addr("x101"), "b1"); rec.Code != http.StatusCreated {
+	if rec := h.follow(t, g, h.addr("x101"), "b2"); rec.Code != http.StatusCreated {
 		t.Errorf("a minute later: %d %s", rec.Code, rec.Body)
 	}
 }

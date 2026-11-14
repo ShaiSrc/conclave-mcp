@@ -71,12 +71,14 @@ import (
 
 // FollowsPerHour is how many new follow requests a bot may make an
 // hour; PostsPerHour how many posts it may make. MaxPending is how many
-// pending follow requests a bot takes; beyond it a new one is refused
-// with 429, Retry-After an hour.
+// pending follow requests a bot takes, MaxPendingPerPeer how many of
+// them may come from the bots of one other server; beyond either a new
+// one is refused with 429, Retry-After an hour.
 const (
-	FollowsPerHour = 30
-	PostsPerHour   = 60
-	MaxPending     = 1000
+	FollowsPerHour    = 30
+	PostsPerHour      = 60
+	MaxPending        = 1000
+	MaxPendingPerPeer = 100
 )
 
 // Post visibilities.
@@ -362,7 +364,7 @@ func (s *Service) follow(w http.ResponseWriter, r *http.Request) {
 		s.refuse(w, r, caller, toAddr, "policy", http.StatusForbidden, "follow_refused", toAddr+" takes no followers")
 		return
 	}
-	if full, err := s.full(ctx, to); err != nil || full {
+	if full, err := s.full(ctx, to, ""); err != nil || full {
 		if err != nil {
 			writeErr(w, r, http.StatusInternalServerError, "internal_error", "request count")
 			return
@@ -559,7 +561,10 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 // accepted again, and an accepted one invites its server again: that
 // server asks only while its follow is pending, so it lacks the feed. A
 // refusal is a *fedrooms.Error: 404 for no such bot, 403 follow_refused
-// for policy none.
+// for policy none, 403 bot_blocked for a follower the operator blocked
+// (checked again as the request is stored), 429 when the bot has
+// MaxPending pending requests or MaxPendingPerPeer from the follower's
+// server.
 func (s *Service) Remote(ctx context.Context, follower, handle string) (string, error) {
 	var (
 		to, key int64
@@ -593,13 +598,16 @@ func (s *Service) Remote(ctx context.Context, follower, handle string) (string, 
 	case len(existing) == 0:
 		var full bool
 		var created int64
-		if full, err = s.full(ctx, to); err == nil && full {
+		_, domain, _ := strings.Cut(follower, "@")
+		if full, err = s.full(ctx, to, domain); err == nil && full {
 			err = &fedrooms.Error{Status: http.StatusTooManyRequests, Code: "rate_limited", Message: toAddr + " has too many pending follow requests"}
 		} else if err == nil {
 			key, created, err = s.store(ctx, follower, toAddr, to)
 		}
-		if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) && fe.Status == http.StatusTooManyRequests {
-			s.refused(ctx, key, follower, toAddr, "limit", fe.Code)
+		if fe := (*fedrooms.Error)(nil); errors.As(err, &fe) {
+			if reason := map[string]string{"rate_limited": "limit", "bot_blocked": "blocked"}[fe.Code]; reason != "" {
+				s.refused(ctx, key, follower, toAddr, reason, fe.Code)
+			}
 		}
 		if err != nil {
 			return "", err
@@ -634,13 +642,21 @@ func (s *Service) Remote(ctx context.Context, follower, handle string) (string, 
 // store stores a pending follow of follower, a bot of another server,
 // toward to, our bot at toAddr, and returns its stand-in and whether it
 // stored one (1) or found one (0). A follower whose server has all the
-// stand-ins it may have here is 429.
+// stand-ins it may have here is 429; one the operator blocked is 403
+// bot_blocked: checked in the write, a block made since the federation
+// listener checked holds.
 func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) (int64, int64, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer tx.Rollback()
+	switch blocked, err := fedrooms.Blocked(ctx, tx, follower); {
+	case err != nil:
+		return 0, 0, err
+	case blocked:
+		return 0, 0, &fedrooms.Error{Status: http.StatusForbidden, Code: "bot_blocked", Message: follower + " is blocked on this server"}
+	}
 	key, err := fedrooms.StandIn(ctx, tx, follower)
 	switch {
 	case errors.Is(err, fedrooms.ErrStandInLimit): // an ErrAddress too
@@ -664,12 +680,14 @@ func (s *Service) store(ctx context.Context, follower, toAddr string, to int64) 
 }
 
 // full reports whether bot, a bot of ours, has MaxPending pending
-// requests. ponytail: counts by scanning follows; an index on
-// (target_key_id, status) if that shows.
-func (s *Service) full(ctx context.Context, bot int64) (bool, error) {
+// requests, or MaxPendingPerPeer from the bots of domain ("" for a
+// follower of this server). ponytail: counts by scanning follows; an
+// index on (target_key_id, status) if that shows.
+func (s *Service) full(ctx context.Context, bot int64, domain string) (bool, error) {
 	var full bool
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) >= ? FROM follows WHERE target_key_id = ? AND status = 'pending'`,
-		MaxPending, bot).Scan(&full)
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) >= ? OR COALESCE(SUM(k.remote_domain = ?), 0) >= ?
+		FROM follows f JOIN api_keys k ON k.id = f.follower_key_id WHERE f.target_key_id = ? AND f.status = 'pending'`,
+		MaxPending, domain, MaxPendingPerPeer, bot).Scan(&full)
 	return full, err
 }
 
@@ -678,19 +696,29 @@ func (s *Service) full(ctx context.Context, bot int64) (bool, error) {
 // follower of another server is its stand-in: as for an invite by
 // address, its server is invited into the feed first, and the stand-in
 // joins with what that server reads a push up to; a refused invite (a
-// *fedrooms.Error) leaves the follow pending. It is errNotPending when
-// the follow is no longer a pending request.
+// *fedrooms.Error) leaves the follow pending, and so does a follower the
+// operator blocked (403 bot_blocked), whose server is not invited. It
+// is errNotPending when the follow is no longer a pending request.
 func (s *Service) accept(ctx context.Context, id int64) error {
 	var follower, target int64
 	var remote bool
-	err := s.DB.QueryRowContext(ctx, `SELECT f.follower_key_id, f.target_key_id, k.remote_domain IS NOT NULL
+	var label string
+	err := s.DB.QueryRowContext(ctx, `SELECT f.follower_key_id, f.target_key_id, k.remote_domain IS NOT NULL, k.label
 		FROM follows f JOIN api_keys k ON k.id = f.follower_key_id
-		WHERE f.id = ? AND f.status = 'pending' AND f.target_key_id IS NOT NULL`, id).Scan(&follower, &target, &remote)
+		WHERE f.id = ? AND f.status = 'pending' AND f.target_key_id IS NOT NULL`, id).Scan(&follower, &target, &remote, &label)
 	if errors.Is(err, sql.ErrNoRows) {
 		return errNotPending
 	}
 	if err != nil {
 		return err
+	}
+	if remote { // a blocked follower's server is not invited
+		switch blocked, err := fedrooms.Blocked(ctx, s.DB, label); {
+		case err != nil:
+			return err
+		case blocked:
+			return &fedrooms.Error{Status: http.StatusForbidden, Code: "bot_blocked", Message: label + " is blocked on this server"}
+		}
 	}
 	feed, err := s.feed(ctx, target)
 	if err != nil {
