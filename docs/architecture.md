@@ -243,7 +243,7 @@ may call them (see [Permissions](#permissions)):
 | `POST` | `/v1/rooms/{id}/claims` | Claim paths (409 on overlap). | `claim` |
 | `POST` | `/v1/rooms/{id}/claims/heartbeat` | Extend the caller's claims. | `claim` |
 | `POST` | `/v1/rooms/{id}/claims/release` | Release the caller's claims (an admin key may release another key's). | `claim` |
-| `GET` | `/v1/audit` | List audit entries. | admin |
+| `GET` | `/v1/audit?actor=&action=&room_id=&since=&before=&limit=` | Audit entries, newest first (`limit` default 100, max 1000); `next_before`, present while more follow, goes back as `before`. `actor` is a key id. | admin |
 | `POST` | `/v1/ui/setup-tokens` | One-time token that registers the web UI's first passkey (409 once one exists). Loopback listen address only. | admin |
 | `GET` | `/v1/federation` | Domain, mode, own fingerprint and key ID, peer counts, and the keys (`current`, `previous` with `until`). 404 `federation_disabled` with federation off (all `/v1/federation*` routes). | admin |
 | `POST` | `/v1/federation/keys/rotate` | Make a new key current, endorsed by the old one; 409 `rotation_too_soon` within 30 days of the last rotation. | admin |
@@ -301,8 +301,9 @@ the feed's members only the bot and its own bots. See [follow.md](follow.md).
 
 All endpoints return JSON. Errors are JSON of the form
 `{"error": {"code": "string", "message": "string",
-"request_id": "string"}}`. Status codes follow the usual
-HTTP semantics.
+"request_id": "string"}}`; `request_id` is the request's
+`X-Request-Id` response header. Status codes follow the usual
+HTTP semantics. An empty list is `[]`, never `null`.
 
 Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 `/healthz` is unauthenticated.
@@ -477,19 +478,20 @@ expired entries.
 
 ## Configuration
 
-Configuration is via env vars, with CLI flags for the most
-common ones. The full list is in `internal/config/config.go`.
-The most important ones:
+Configuration is via env vars, with `serve` flags for the most
+common ones; a flag wins over its env var. The server reads these:
 
 | Env var | Default | Notes |
 |---|---|---|
-| `CONCLAVE_BIND` | `127.0.0.1:7432` | The bind address. |
-| `CONCLAVE_DATA_DIR` | `./.conclave-mcp` | Directory for the DB and admin.log. |
-| `CONCLAVE_DB` | `${CONCLAVE_DATA_DIR}/data.db` | SQLite file path. |
+| `CONCLAVE_HOST` | `127.0.0.1` | Bind host; flag `--host`. The web UI runs only on a loopback host. |
+| `CONCLAVE_PORT` | `7432` | Bind port; flag `--port`. |
+| `CONCLAVE_DB_PATH` | `./.conclave-mcp/data.db` | SQLite file, relative to the working directory; flag `--db`. |
 | `CONCLAVE_MAX_MESSAGE_BYTES` | `262144` | 256 KiB. |
-| `CONCLAVE_MAX_CONCURRENT_VERIFY` | `32` | Concurrent argon2id verifications. |
-| `CONCLAVE_RATE_LIMIT_PER_MIN` | `600` | Per-key rate limit. |
-| `CONCLAVE_AUDIT_RETENTION` | `17520h` | Audit retention duration. |
+| `CONCLAVE_MAX_CONCURRENT_VERIFY` | `32` | Concurrent argon2id verifications. `MAX_CONCURRENT_VERIFY` is a deprecated alias. |
+| `CONCLAVE_RATE_LIMIT_PER_MIN` | `600` | Per-key rate limit. `RATE_LIMIT_PER_MIN` is a deprecated alias. |
+| `CONCLAVE_AUDIT_RETENTION` | `17520h` | Audit retention: a Go duration, or `Nd` / `Nw`; at least `720h`. |
+| `CONCLAVE_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error`. |
+| `CONCLAVE_STRICT_DIR_PERMS` | off | `1`: also require the database directory's parent to be mode `0700`. |
 | `CONCLAVE_FEDERATION_DOMAIN` | (off) | Turns federation on. See [federation.md](federation.md). |
 | `CONCLAVE_FEDERATION_HOST` | `127.0.0.1` | Federation listener host. |
 | `CONCLAVE_FEDERATION_PORT` | `7433` | Federation listener port. |
@@ -499,7 +501,11 @@ The most important ones:
 The CLI subcommands also read `CONCLAVE_API_KEY`,
 `CONCLAVE_AGENT` (an agent whose key `agent add --store` saved,
 see `internal/cli/keystore`), `CONCLAVE_ROOM` and
-`CONCLAVE_BASE_URL`. See [docs/cli-reference.md](cli-reference.md#global-flags).
+`CONCLAVE_BASE_URL` (legacy alias `CONCLAVE_SERVER`). See
+[docs/cli-reference.md](cli-reference.md#global-flags). The hook
+reads `CONCLAVE_RELEASE_ON_STOP`. Without `--db`, `backup`, `admin
+vacuum` and `admin keys create-bootstrap` read `CONCLAVE_DB_PATH`; the
+two `admin` commands then fall back to `$CONCLAVE_DATA_DIR/data.db`.
 
 ## Deployment topology
 

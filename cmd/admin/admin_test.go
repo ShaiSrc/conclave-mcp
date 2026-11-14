@@ -300,3 +300,22 @@ func TestUIReset_RequiresDB(t *testing.T) {
 		t.Errorf("no --db: %v, want --db is required", err)
 	}
 }
+
+// The offline commands find the database as serve does: --db, then
+// CONCLAVE_DB_PATH, then CONCLAVE_DATA_DIR/data.db, then the default.
+func TestResolveVacuumPaths(t *testing.T) {
+	t.Setenv("CONCLAVE_DB_PATH", "")
+	t.Setenv("CONCLAVE_DATA_DIR", "")
+	for _, tc := range []struct{ flag, dbPath, dataDir, wantDB, wantDir string }{
+		{"", "", "", ".conclave-mcp/data.db", "./.conclave-mcp"},
+		{"", "", "/d", "/d/data.db", "/d"},
+		{"", "/e/x.db", "/d", "/e/x.db", "/e"},
+		{"/f/y.db", "/e/x.db", "/d", "/f/y.db", "/f"},
+	} {
+		t.Setenv("CONCLAVE_DB_PATH", tc.dbPath)
+		t.Setenv("CONCLAVE_DATA_DIR", tc.dataDir)
+		if db, dir := resolveVacuumPaths(tc.flag); db != tc.wantDB || dir != tc.wantDir {
+			t.Errorf("%+v: got %s %s", tc, db, dir)
+		}
+	}
+}

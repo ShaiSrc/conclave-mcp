@@ -20,6 +20,18 @@ func TestNew_RequiresToken(t *testing.T) {
 	}
 }
 
+// CONCLAVE_BASE_URL wins over its legacy alias CONCLAVE_SERVER, as in
+// mcp-serve.
+func TestNew_BaseURLBeatsServerEnv(t *testing.T) {
+	t.Setenv("CONCLAVE_API_KEY", "env-token")
+	t.Setenv("CONCLAVE_SERVER", "http://legacy:1234")
+	t.Setenv("CONCLAVE_BASE_URL", "http://canonical:1234")
+	c, err := New(Options{})
+	if err != nil || c.BaseURL != "http://canonical:1234" {
+		t.Fatalf("BaseURL=%q err=%v", c.BaseURL, err)
+	}
+}
+
 func TestNew_DefaultsFromEnv(t *testing.T) {
 	t.Setenv("CONCLAVE_API_KEY", "env-token")
 	t.Setenv("CONCLAVE_SERVER", "http://from-env:1234")

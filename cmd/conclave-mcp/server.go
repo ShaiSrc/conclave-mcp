@@ -29,13 +29,20 @@ over a read-only connection, while the server keeps running. It refuses
 an existing file and writes the copy with mode 0600: it holds the
 server's private federation key and every key hash.
 
---db names the database as serve --db does, with the same default.`,
+It finds the database as serve does: --db, then CONCLAVE_DB_PATH, then
+./.conclave-mcp/data.db.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagDB == "" {
+				flagDB = os.Getenv("CONCLAVE_DB_PATH")
+			}
+			if flagDB == "" {
+				flagDB = config.Defaults().DBPath
+			}
 			return runBackup(cmd, flagDB, args[0])
 		},
 	}
-	cmd.Flags().StringVar(&flagDB, "db", config.Defaults().DBPath, "SQLite file the server runs on (the value of serve --db)")
+	cmd.Flags().StringVar(&flagDB, "db", "", "SQLite file the server runs on (default CONCLAVE_DB_PATH, else ./.conclave-mcp/data.db)")
 	return cmd
 }
 

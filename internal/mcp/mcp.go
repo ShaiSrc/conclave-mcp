@@ -277,9 +277,10 @@ var tools = []tool{
 		map[string]any{"label": str("Unique label, 1..128 chars."), "trust_origin": trustOriginProp}, []string{"label"}},
 	{"keys.revoke", "Revoke an API key. Admin key only.",
 		map[string]any{"id": keyIDProp}, []string{"id"}},
-	{"audit.list", "List audit log entries with filters. Admin only.",
-		map[string]any{"actor": str("Actor key id."), "action": str("e.g. room.create."), "room_id": roomIDProp,
-			"since": str("ISO-8601 ts."), "limit": num("Max entries.")}, nil},
+	{"audit.list", "List audit log entries with filters, newest first. While more follow, the result has next_before; pass it back as before for the next page. Admin only.",
+		map[string]any{"actor": num("Actor key id."), "action": str("Action prefix, e.g. room.create."), "room_id": roomIDProp,
+			"since": str("Only entries at or after this ISO-8601 ts."), "before": num("Only entries older than this entry id: next_before of the previous page."),
+			"limit": num("Max entries, default 100, max 1000.")}, nil},
 	{"claims.list", "List active file claims in a room: which agent holds which repo-relative path, until when. " + agent.ExternalNote,
 		map[string]any{"room_id": roomIDProp}, []string{"room_id"}},
 	{"claims.claim", "Claim repo-relative paths before working on them (a trailing / claims a directory). All-or-nothing: fails naming the holder if another agent holds an overlapping path. Re-claiming your own paths extends them; your hooks keep them alive while you work.",
@@ -997,7 +998,9 @@ func writeJSONRPCError(w http.ResponseWriter, id json.RawMessage, code int, mess
 // for the supported filter set.
 func rawJSONToQuery(raw json.RawMessage) string {
 	var m map[string]any
-	if err := json.Unmarshal(raw, &m); err != nil {
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber() // ids stay integers, never 1.2e+07
+	if err := d.Decode(&m); err != nil {
 		return ""
 	}
 	q := url.Values{}

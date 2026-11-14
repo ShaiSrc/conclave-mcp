@@ -10,8 +10,11 @@ package serve
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -27,12 +30,6 @@ import (
 // command can wire it in. The run logic is split out into Execute
 // so unit tests can drive it without going through cobra.
 func NewCmd() *cobra.Command {
-	var (
-		flagHost      string
-		flagPort      int
-		flagDB        string
-		flagFedDomain string
-	)
 	cmd := &cobra.Command{
 		Use:   "serve",
 		Short: "Start the Conclave MCP server",
@@ -40,29 +37,49 @@ func NewCmd() *cobra.Command {
 HTTP control plane on the configured host:port.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			args := []string{
-				"--host", flagHost,
-				"--port", fmt.Sprintf("%d", flagPort),
-				"--db", flagDB,
-			}
-			// Passed only when given, so CONCLAVE_FEDERATION_DOMAIN
-			// still applies without the flag.
-			if cmd.Flags().Changed("federation-domain") {
-				args = append(args, "--federation-domain", flagFedDomain)
+			// Flags are passed only when given, so the env vars apply
+			// without them: flag, then env, then default.
+			var args []string
+			for _, name := range []string{"host", "port", "db", "federation-domain"} {
+				if f := cmd.Flags().Lookup(name); f.Changed {
+					args = append(args, "--"+name, f.Value.String())
+				}
 			}
 			cfg, err := config.Load(args)
 			if err != nil {
 				return fmt.Errorf("config: %w", err)
 			}
+			if !cmd.Flags().Changed("db") && os.Getenv("CONCLAVE_DB_PATH") != "" {
+				if err := checkOldDefault(cfg.DBPath); err != nil {
+					return err
+				}
+			}
 			// The root command carries the build's version (main.version).
 			return Execute(cmd.Context(), cfg, cmd.Root().Version, cmd.ErrOrStderr())
 		},
 	}
-	cmd.Flags().StringVar(&flagHost, "host", "127.0.0.1", "bind host (CONCLAVE_HOST)")
-	cmd.Flags().IntVar(&flagPort, "port", 7432, "bind port (CONCLAVE_PORT)")
-	cmd.Flags().StringVar(&flagDB, "db", config.Defaults().DBPath, "SQLite file path (CONCLAVE_DB_PATH)")
-	cmd.Flags().StringVar(&flagFedDomain, "federation-domain", "", "federation domain; empty turns federation off (CONCLAVE_FEDERATION_DOMAIN)")
+	d := config.Defaults()
+	cmd.Flags().String("host", d.Host, "bind host (CONCLAVE_HOST)")
+	cmd.Flags().Int("port", d.Port, "bind port (CONCLAVE_PORT)")
+	cmd.Flags().String("db", d.DBPath, "SQLite file path (CONCLAVE_DB_PATH)")
+	cmd.Flags().String("federation-domain", "", "federation domain; empty turns federation off (CONCLAVE_FEDERATION_DOMAIN)")
 	return cmd
+}
+
+// checkOldDefault refuses a CONCLAVE_DB_PATH that does not exist while
+// the default database does: serve before 0.14 ignored the env var and
+// used the default, so starting would leave the data behind and begin
+// on an empty database (with a new federation key).
+func checkOldDefault(path string) error {
+	old := config.Defaults().DBPath
+	if _, err := os.Stat(path); !errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if _, err := os.Stat(old); err != nil {
+		return nil
+	}
+	return fmt.Errorf("CONCLAVE_DB_PATH names %s, which does not exist, but %s does: serve before 0.14 ignored CONCLAVE_DB_PATH and used %s. "+
+		"Stop, move that database with its -wal and -shm files to %s and start again, or set CONCLAVE_DB_PATH to the old path", path, old, old, path)
 }
 
 // Execute is the testable core of the serve subcommand. It opens
@@ -78,7 +95,9 @@ func Execute(ctx context.Context, cfg *config.Config, version string, stderr int
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	bootLog := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	var level slog.Level                          // info unless set
+	_ = level.UnmarshalText([]byte(cfg.LogLevel)) // validated by config.Load
+	bootLog := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: level}))
 	bootLog.Info("config loaded",
 		"version", version,
 		"host", cfg.Host,
@@ -90,6 +109,9 @@ func Execute(ctx context.Context, cfg *config.Config, version string, stderr int
 		"audit_retention", cfg.AuditRetention.String(),
 		"federation_domain", cfg.FederationDomain,
 	)
+	for _, w := range cfg.Warnings {
+		bootLog.Warn(w)
+	}
 
 	// Use a fresh context for the init phase (storage.Open +
 	// migrations) so that a user-cancel during the boot sequence

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/federation"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
@@ -851,6 +852,96 @@ func TestServer_Info(t *testing.T) {
 			if rec := get(s.fed.Handler, "", "/.well-known/conclave"); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), version) {
 				t.Errorf("server document: %d %s", rec.Code, rec.Body)
 			}
+		}
+	}
+}
+
+// Every /v1 list answers [] when empty, never null, and every /v1 error
+// is the JSON envelope with the request's id, the one in the
+// X-Request-Id response header, also when the client sent none.
+func TestServer_APIConsistency(t *testing.T) {
+	db := uiDB(t)
+	tokens, ids := map[string]string{}, map[string]int64{}
+	for label, admin := range map[string]int{"root": 1, "alice": 0} {
+		token, phc, err := auth.GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin, handle) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', ?, ?)`,
+			label, phc, token[3:11], admin, map[int]any{0: label, 1: nil}[admin])
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens[label] = token
+		ids[label], _ = res.LastInsertId()
+	}
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432, FederationDomain: "conclave.example.org", FederationHost: "127.0.0.1",
+		FederationPort: 7433, FederationMode: "allowlist"}, Deps{DB: db, Broker: events.NewBroker()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(who, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if who != "" {
+			req.Header.Set("Authorization", "Bearer "+tokens[who])
+		}
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	room := func(name string) string {
+		rec := do("root", "POST", "/v1/rooms", `{"name":"`+name+`"}`)
+		var r struct{ ID string }
+		if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &r) != nil {
+			t.Fatalf("create room: %d %s", rec.Code, rec.Body)
+		}
+		return r.ID
+	}
+	open, archived := room("open"), room("archived")
+	if rec := do("root", "POST", "/v1/rooms/"+archived+"/archive", `{}`); rec.Code/100 != 2 {
+		t.Fatalf("archive: %d %s", rec.Code, rec.Body)
+	}
+
+	for _, l := range []struct{ who, path string }{
+		{"root", "/v1/rooms?visibility=public"}, {"root", "/v1/keys"}, {"root", "/v1/audit?action=nothing"},
+		{"root", "/v1/bots"}, {"root", "/v1/directory"}, {"root", "/v1/federation/peers"},
+		{"root", "/v1/federation/blocked-bots"}, {"root", "/v1/rooms/" + open + "/messages"},
+		{"root", "/v1/rooms/" + open + "/claims"}, {"root", "/v1/rooms/" + open + "/members"},
+		{"alice", "/v1/direct"}, {"alice", "/v1/timeline"}, {"alice", "/v1/follows"},
+		{"alice", "/v1/followers"}, {"alice", "/v1/follows/requests"},
+	} {
+		if rec := do(l.who, "GET", l.path, ""); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), ":null") {
+			t.Errorf("%s: %d %s, want 200 without null", l.path, rec.Code, rec.Body)
+		}
+	}
+
+	for _, e := range []struct{ who, method, path, body string }{
+		{"", "GET", "/v1/whoami", ""},
+		{"root", "GET", "/v1/nope", ""},
+		{"root", "GET", "/v1/rooms/nope", ""},
+		{"root", "GET", "/v1/rooms/nope/messages", ""},
+		{"root", "DELETE", "/v1/rooms/" + open + "/messages/999", ""},
+		{"root", "GET", "/v1/rooms/nope/claims", ""},
+		{"root", "GET", "/v1/rooms/" + archived + "/events", ""},
+		{"root", "GET", "/v1/audit?limit=x", ""},
+		{"root", "POST", "/v1/keys", "{"},
+		{"root", "GET", "/v1/bots/nobody", ""},
+		{"root", "GET", "/v1/federation/peers/nope.example", ""},
+		{"alice", "GET", "/v1/timeline?limit=0", ""},
+		{"alice", "POST", "/v1/direct", "{"},
+	} {
+		rec := do(e.who, e.method, e.path, e.body)
+		var env struct {
+			Error struct {
+				Code      string `json:"code"`
+				RequestID string `json:"request_id"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &env)
+		if rec.Code < 400 || env.Error.Code == "" || env.Error.RequestID == "" || env.Error.RequestID != rec.Header().Get("X-Request-Id") ||
+			!strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+			t.Errorf("%s %s: %d %q %s, want the envelope with the X-Request-Id %q", e.method, e.path, rec.Code,
+				rec.Header().Get("Content-Type"), rec.Body, rec.Header().Get("X-Request-Id"))
 		}
 	}
 }

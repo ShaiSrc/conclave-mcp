@@ -285,7 +285,7 @@ func (s *Service) claim(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error": map[string]any{
 				"code": "conflict", "message": strings.Join(reasons, "; "),
-				"request_id": r.Header.Get("X-Request-Id"),
+				"request_id": w.Header().Get("X-Request-Id"),
 			},
 			"conflicts": conflicts,
 		})
@@ -457,6 +457,6 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg string) {
 	writeJSON(w, status, map[string]any{
-		"error": map[string]any{"code": code, "message": msg, "request_id": r.Header.Get("X-Request-Id")},
+		"error": map[string]any{"code": code, "message": msg, "request_id": w.Header().Get("X-Request-Id")},
 	})
 }

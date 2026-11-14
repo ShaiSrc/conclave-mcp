@@ -45,7 +45,7 @@ server).
 
 | Flag | Env var | Default | Notes |
 |---|---|---|---|
-| `--server URL` | `CONCLAVE_BASE_URL` | `http://127.0.0.1:7432` | The Conclave server URL. |
+| `--server URL` | `CONCLAVE_BASE_URL` | `http://127.0.0.1:7432` | The Conclave server URL. `CONCLAVE_SERVER` is a legacy alias that loses to `CONCLAVE_BASE_URL`. |
 | `--token TOKEN` | `CONCLAVE_API_KEY` | (none) | The bearer token. Required for all subcommands except `serve` and `admin` (or use `--as`). |
 | `--as LABEL` | `CONCLAVE_AGENT` | (none) | Act as this agent, with the key `agent add --store` saved (macOS Keychain, else a 0600 file in the user config dir). Order: `--token`, `--as`, `CONCLAVE_API_KEY`, `CONCLAVE_AGENT`. |
 | `--quiet` | — | `false` | Suppress stderr diagnostics. Used by `mcp-serve` to keep STDERR clean for MCP framing. |
@@ -83,18 +83,21 @@ for each subcommand.
 ## `serve`
 
 ```
-conclave-mcp serve --host 127.0.0.1 --port 7432 --db ./conclave.db
+conclave-mcp serve --host 127.0.0.1 --port 7432 --db /var/lib/conclave-mcp/data.db
 ```
 
 Runs the HTTP server. Binds to `--host:--port`, stores data
 in `--db`. Migrations run on first start. The server logs
-to STDERR in JSON format.
+to STDERR in JSON format, at `CONCLAVE_LOG_LEVEL`. A flag wins over
+its env var, the env var over the default. The other settings are env
+vars only (see [architecture.md](architecture.md#configuration)).
 
-| Flag | Default | Notes |
-|---|---|---|
-| `--host` | `127.0.0.1` | Bind address. Use `0.0.0.0` to listen on all interfaces (only behind a reverse proxy with TLS). |
-| `--port` | `7432` | Bind port. |
-| `--db` | `./conclave.db` | SQLite file path. The parent directory is created with mode 0700. |
+| Flag | Env var | Default | Notes |
+|---|---|---|---|
+| `--host` | `CONCLAVE_HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` to listen on all interfaces (only behind a reverse proxy with TLS). |
+| `--port` | `CONCLAVE_PORT` | `7432` | Bind port. |
+| `--db` | `CONCLAVE_DB_PATH` | `./.conclave-mcp/data.db` | SQLite file path. The parent directory is created with mode 0700. |
+| `--federation-domain` | `CONCLAVE_FEDERATION_DOMAIN` | (off) | Turns federation on. See [federation.md](federation.md). |
 
 The server runs until SIGINT or SIGTERM. It writes nothing
 to STDOUT. STDERR is structured JSON.
@@ -111,12 +114,12 @@ file has grown.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--db` | `$CONCLAVE_DATA_DIR/data.db`, else `./.conclave-mcp/data.db` | Path to the SQLite file. |
+| `--db` | `$CONCLAVE_DB_PATH`, else `$CONCLAVE_DATA_DIR/data.db`, else `./.conclave-mcp/data.db` | Path to the SQLite file. |
 | `--force` | `false` | Skip the free-disk-space warning. |
 
 **Stop the server first.** WAL and VACUUM are incompatible
-in the same process. The action is recorded in
-`${CONCLAVE_DATA_DIR}/admin.log`.
+in the same process. The action is recorded in `admin.log`
+next to the database.
 
 ## `admin keys create-bootstrap`
 
@@ -129,14 +132,14 @@ conclave-mcp admin keys create-bootstrap \
 Mints the first API key on a fresh install. This key is the
 admin key: only admin keys can create or revoke keys. The
 plaintext is printed to STDOUT once. The argon2id hash is stored in the
-`api_keys` table. The action is logged to
-`${CONCLAVE_DATA_DIR}/admin.log`.
+`api_keys` table. The action is logged to `admin.log` next to
+the database.
 
 | Flag | Default | Notes |
 |---|---|---|
 | `--label` | (required) | Unique label. |
 | `--trust-origin` | `internal` | `internal` or `external`. `keys create` and `agent add` default to `external`. |
-| `--db` | `$CONCLAVE_DATA_DIR/data.db`, else `./.conclave-mcp/data.db` | Path to the SQLite file. |
+| `--db` | `$CONCLAVE_DB_PATH`, else `$CONCLAVE_DATA_DIR/data.db`, else `./.conclave-mcp/data.db` | Path to the SQLite file. |
 
 **Stop the server first.** A running server's WAL writer can
 clobber the insert.
@@ -162,7 +165,7 @@ exists (the setup link is then used up): revoke it first with
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--db` | required | The SQLite file the server runs on (the value of `serve --db`). No default: `CONCLAVE_DATA_DIR` is not read, so a reset cannot hit another database. |
+| `--db` | required | The SQLite file the server runs on (the value of `serve --db` or `CONCLAVE_DB_PATH`). No default: no env var is read, so a reset cannot hit another database. |
 
 **Stop the server first.**
 
@@ -179,7 +182,7 @@ runs as. Prints the path and size of the copy.
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--db` | `./.conclave-mcp/data.db` | The SQLite file the server runs on, as `serve --db` (same default). A missing file is exit code 1; no file is created. |
+| `--db` | `$CONCLAVE_DB_PATH`, else `./.conclave-mcp/data.db` | The SQLite file the server runs on, found as `serve` finds it. A missing file is exit code 1; no file is created. |
 
 The target must not exist: an existing file is refused with exit code 2
 and left alone. The copy is written with mode `0600`: it holds the
@@ -609,17 +612,22 @@ wire format underneath.
 conclave-mcp audit list [--room-id 01ABC...]
 ```
 
-Lists the audit log. Admin key only; other keys get
+Lists the audit log, newest first. Admin key only; other keys get
 `403 admin key required`.
 
 | Flag | Default | Notes |
 |---|---|---|
+| `--actor` | (all) | Restrict to one actor key id. |
+| `--action` | (all) | Action prefix, e.g. `room.` or `key.create`. |
 | `--room-id` | (all) | Restrict to a single room. |
-| `--limit` | `100` | Max entries to return. |
+| `--limit` | `100` | Max entries to return, at most 1000. |
 | `--since` | (none) | RFC 3339 timestamp, any offset; entries at or after it. |
+| `--before` | (none) | Only entries older than this entry id: the next page. |
 
-Output is a table with columns: `TS`, `ACTOR`, `ACTION`,
-`ROOM`, `MESSAGE`, `METADATA`.
+Output is a table with columns: `ID`, `TS`, `ACTOR` (key id, or
+`system`), `ACTION`, `TARGET`, `ROOM`, `RESULT`. `--format json`
+prints the entries with the API's fields. When more entries follow,
+STDERR says `more entries: --before <id>`.
 
 ## `ui setup`
 
@@ -888,8 +896,11 @@ conclave-mcp messages subscribe "$ROOM_ID" --wait 300
 ### Drain the audit log into a file
 
 ```sh
-conclave-mcp audit list --format=json --limit 10000 > /var/log/conclave/audit.json
+conclave-mcp audit list --format=json --limit 1000 > /var/log/conclave/audit.json
 ```
+
+Up to 1000 entries a call; follow `more entries: --before <id>` on
+STDERR for older ones.
 
 ## See also
 

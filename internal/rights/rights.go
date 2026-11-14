@@ -164,7 +164,7 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]any{"code": code, "message": msg, "request_id": r.Header.Get("X-Request-Id")},
+		"error": map[string]any{"code": code, "message": msg, "request_id": w.Header().Get("X-Request-Id")},
 	})
 }
 

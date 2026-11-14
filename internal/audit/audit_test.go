@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,5 +224,63 @@ func TestAudit_ListFilterByActionWithUnderscore(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || len(resp.Entries) != 1 || resp.Entries[0].Action != "federation.key_rotated" {
 		t.Errorf("filter: %d %s", rec.Code, rec.Body)
+	}
+}
+
+// GET /audit pages newest first: next_before, present while more
+// entries follow, is passed back as before.
+func TestAudit_ListPagesWithBefore(t *testing.T) {
+	r, db, _ := setupAs(t)
+	for i := 0; i < 5; i++ {
+		_ = Write(context.Background(), db, 1, "a", "b", strconv.Itoa(i), "", "ok", "")
+	}
+	type page struct {
+		Entries    []entryView `json:"entries"`
+		NextBefore *int64      `json:"next_before"`
+	}
+	get := func(q string) (page, string) {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/audit?"+q, nil))
+		var p page
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &p) != nil {
+			t.Fatalf("%s: %d %s", q, rec.Code, rec.Body)
+		}
+		return p, rec.Body.String()
+	}
+	var got []string
+	q := "limit=2"
+	for range 4 {
+		p, body := get(q)
+		for _, e := range p.Entries {
+			got = append(got, e.TargetID)
+		}
+		if p.NextBefore == nil {
+			if strings.Contains(body, "next_since") {
+				t.Errorf("next_since is gone: %s", body)
+			}
+			break
+		}
+		q = "limit=2&before=" + strconv.FormatInt(*p.NextBefore, 10)
+	}
+	if strings.Join(got, ",") != "4,3,2,1,0" {
+		t.Errorf("pages: %v, want 4,3,2,1,0", got)
+	}
+	if p, _ := get("limit=5"); p.NextBefore != nil {
+		t.Errorf("a full last page has next_before %d", *p.NextBefore)
+	}
+	if p, _ := get("before=1"); len(p.Entries) != 0 || p.NextBefore != nil {
+		t.Errorf("before the first entry: %+v", p)
+	}
+}
+
+// A malformed before or actor is 400, not ignored.
+func TestAudit_ListRejectsBadCursorAndActor(t *testing.T) {
+	r, _, _ := setupAs(t)
+	for _, q := range []string{"before=x", "before=0", "actor=abcd1234"} {
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/audit?"+q, nil))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), `"bad_request"`) {
+			t.Errorf("%s: %d %s, want 400 bad_request", q, rec.Code, rec.Body)
+		}
 	}
 }

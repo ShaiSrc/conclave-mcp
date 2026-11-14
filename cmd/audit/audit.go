@@ -2,7 +2,7 @@
 //
 // Per SPEC-0004 §5:
 //
-//	conclave-mcp audit list [--actor PREFIX] [--action KIND] [--since ISO] [--limit N] [--format json|table]
+//	conclave-mcp audit list [--actor KEY-ID] [--action KIND] [--room-id R] [--since ISO] [--before ID] [--limit N] [--format json|table]
 //
 // Requires an admin-scoped key on the server. The server returns
 // 403 with a clear error if the caller lacks the scope; the CLI
@@ -36,20 +36,23 @@ func NewCmd() *cobra.Command {
 	return cmd
 }
 
-// entry mirrors the JSON shape of /v1/audit entries.
+// entry mirrors the JSON shape of /v1/audit entries; --format json
+// prints them with the API's field names.
 type entry struct {
-	ID         int64          `json:"id"`
-	TS         string         `json:"ts"`
-	Actor      string         `json:"actor"`
-	Action     string         `json:"action"`
-	TargetType string         `json:"target_type,omitempty"`
-	TargetID   string         `json:"target_id,omitempty"`
-	RequestID  string         `json:"request_id,omitempty"`
-	Meta       map[string]any `json:"meta,omitempty"`
+	ID         int64  `json:"id"`
+	TS         string `json:"ts"`
+	ActorKeyID *int64 `json:"actor_key_id,omitempty"`
+	Action     string `json:"action"`
+	TargetType string `json:"target_type"`
+	TargetID   string `json:"target_id"`
+	RoomID     string `json:"room_id,omitempty"`
+	Result     string `json:"result"`
+	Detail     string `json:"detail,omitempty"`
 }
 
 type listResponse struct {
-	Entries []entry `json:"entries"`
+	Entries    []entry `json:"entries"`
+	NextBefore int64   `json:"next_before"`
 }
 
 // openClient is a seam for tests.
@@ -108,7 +111,8 @@ func makeClientAndDo(ctx context.Context, cmd *cobra.Command, fn func(ctx contex
 
 func newListCmd() *cobra.Command {
 	var (
-		flagActor  string
+		flagActor  int64
+		flagBefore int64
 		flagAction string
 		flagSince  string
 		flagLimit  int
@@ -121,8 +125,11 @@ func newListCmd() *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			q := url.Values{}
-			if flagActor != "" {
-				q.Set("actor", flagActor)
+			if flagActor > 0 {
+				q.Set("actor", strconv.FormatInt(flagActor, 10))
+			}
+			if flagBefore > 0 {
+				q.Set("before", strconv.FormatInt(flagBefore, 10))
 			}
 			if flagAction != "" {
 				q.Set("action", flagAction)
@@ -153,11 +160,18 @@ func newListCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				return renderEntries(flagFormat, resp.Entries, out)
+				if err := renderEntries(flagFormat, resp.Entries, out); err != nil {
+					return err
+				}
+				if resp.NextBefore > 0 {
+					_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "more entries: --before %d\n", resp.NextBefore)
+				}
+				return nil
 			})
 		},
 	}
-	cmd.Flags().StringVar(&flagActor, "actor", "", "filter by actor (api-key prefix, 8 chars)")
+	cmd.Flags().Int64Var(&flagActor, "actor", 0, "filter by actor key id")
+	cmd.Flags().Int64Var(&flagBefore, "before", 0, "only entries older than this entry id (the next page)")
 	cmd.Flags().StringVar(&flagAction, "action", "", "filter by action (e.g. message.send, key.create)")
 	cmd.Flags().StringVar(&flagRoomID, "room-id", "", "filter by room id (SPEC-0001 Q10)")
 	cmd.Flags().StringVar(&flagSince, "since", "", "only entries at or after this ISO-8601 timestamp")
@@ -174,10 +188,14 @@ func renderEntries(format string, entries []entry, out io.Writer) error {
 		return enc.Encode(entries)
 	case "table", "":
 		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "ID\tTS\tACTOR\tACTION\tTARGET\tREQUEST_ID")
+		_, _ = fmt.Fprintln(tw, "ID\tTS\tACTOR\tACTION\tTARGET\tROOM\tRESULT")
 		for _, e := range entries {
-			_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s/%s\t%s\n",
-				e.ID, e.TS, e.Actor, e.Action, e.TargetType, e.TargetID, e.RequestID)
+			actor := "system"
+			if e.ActorKeyID != nil {
+				actor = strconv.FormatInt(*e.ActorKeyID, 10)
+			}
+			_, _ = fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s/%s\t%s\t%s\n",
+				e.ID, e.TS, actor, e.Action, e.TargetType, e.TargetID, e.RoomID, e.Result)
 		}
 		return tw.Flush()
 	default:

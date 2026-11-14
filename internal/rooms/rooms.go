@@ -259,7 +259,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var out []roomView
+	out := []roomView{}
 	for rows.Next() {
 		var (
 			rv         roomView
@@ -882,7 +882,7 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 		"error": map[string]any{
 			"code":       code,
 			"message":    msg,
-			"request_id": r.Header.Get("X-Request-Id"),
+			"request_id": w.Header().Get("X-Request-Id"),
 		},
 	})
 }

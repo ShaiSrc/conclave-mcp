@@ -34,12 +34,12 @@ systemd, with a reverse proxy in front of it for TLS.
    install -d -m 0750 -o root -g root /etc/conclave-mcp
    install -m 0600 -o root -g root /dev/null /etc/conclave-mcp/conclave.env
    ```
-   Fill `conclave.env` with the values from SPEC-0005 §5. The
-   important keys: `CONCLAVE_BIND=127.0.0.1:7432`,
+   Fill `conclave.env` (every setting: [architecture.md](architecture.md#configuration)).
+   The important keys: `CONCLAVE_DB_PATH=/var/lib/conclave-mcp/data.db`,
+   `CONCLAVE_HOST=127.0.0.1`, `CONCLAVE_PORT=7432`,
    `CONCLAVE_MAX_MESSAGE_BYTES=262144`,
-   `RATE_LIMIT_PER_MIN=600`,
-   `AUDIT_RETENTION_DAYS=730`,
-   `CONCLAVE_LOG=info`. Do **not** put `CONCLAVE_API_KEY` here.
+   `CONCLAVE_RATE_LIMIT_PER_MIN=600`, `CONCLAVE_LOG_LEVEL=info`.
+   Do **not** put `CONCLAVE_API_KEY` here.
 6. Install the systemd unit from `packaging/systemd/` and enable
    it:
    ```sh
@@ -55,7 +55,7 @@ systemd, with a reverse proxy in front of it for TLS.
    can create more keys (SPEC-0003 §3.3), so store the returned
    plaintext in a password manager immediately. The command writes
    to the SQLite file directly, so stop the service first, point
-   `--db` (or `CONCLAVE_DATA_DIR`) at the service's database, run it
+   `--db` (or `CONCLAVE_DB_PATH`) at the service's database, run it
    as the service user, and start the service again:
    ```sh
    systemctl stop conclave-mcp
@@ -186,7 +186,7 @@ Mirrors the v0.1 security constraints (SPEC-0001 §4):
 - [ ] Backups run at least daily and the most recent backup
       has been restore-tested within the last 90 days.
 - [ ] The audit retention is set per your compliance regime
-      (`AUDIT_RETENTION_DAYS=730` default; increase to 2555 for
+      (`CONCLAVE_AUDIT_RETENTION=730d` default; `2555d` for
       7-year retention).
 
 ## What this runbook does not cover
