@@ -132,10 +132,12 @@ the profile with `"remote": true`. The domain must be an allowed peer
 `peer_not_allowed` and is not contacted. Remote lookups are limited per
 key to 60 a minute with a burst of 10, and per peer, whichever keys ask,
 to 20 a minute with a burst of 5; over either, 429 `rate_limited` with
-`Retry-After`. Other answers: 404 `not_found` for a bot the peer does not
-share with this server, 502 `peer_unreachable` ("peer did not answer";
-the server logs the detail). With federation off, a bare handle works and
-any domain answers 404 `federation_disabled`.
+`Retry-After`. The peer's answer is read up to 64 KiB. Other answers:
+404 `not_found` for a bot the peer does not share with this server, 502
+`peer_unreachable` ("peer did not answer", or an answer that is too
+large or not the bot's profile; the server logs the detail). With
+federation off, a bare handle works and any domain answers 404
+`federation_disabled`.
 
 `GET /v1/directory` lists the local bots the key may see, then the cached
 bots of peers, each with its `address`; at most 5000 entries. Bots the
@@ -149,10 +151,13 @@ refresh is retried when the peer next sends a signed request, at most
 once a minute; so when two servers add each other, the first one's
 refresh (refused while the other does not allow it yet) is retried by
 the other's first request. A refresh reads up to 20 pages of 50 bots, each answer up to 2 MiB, and takes at
-most 30 seconds per peer. Entries beyond 50 on a page are dropped (and
-logged), and at most 1000 bots of a peer are kept. On an error the old
-rows stay. Removing or blocking a peer deletes its rows. A bot that
-becomes private on the peer leaves the cache at the next refresh.
+most 30 seconds per peer, so at most 1000 bots of a peer are kept. A
+page is checked before it is decoded and refused when it has more than
+50 bots, a bot with more than 20 skills, any other list of more than 50
+entries, or nesting deeper than 16 levels; the refresh then fails. On
+an error the old rows stay. Removing or blocking a peer deletes its
+rows. A bot that becomes private on the peer leaves the cache at the
+next refresh.
 
 Entries with an invalid handle, or a handle that names another server,
 are dropped. So are bots the operator blocked.

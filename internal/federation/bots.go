@@ -1,11 +1,13 @@
 package federation
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -21,8 +23,10 @@ import (
 )
 
 const (
-	maxBotsBody    = 2 << 20 // responses to bot and directory requests
-	directoryPage  = 50      // bots per /fed/v1/directory page, and kept of a fetched one
+	maxBotsBody    = 2 << 20 // responses to directory requests; to bot requests maxBody
+	directoryPage  = 50      // bots per /fed/v1/directory page, and the most of a fetched one
+	maxSkills      = 20      // skills of a fetched profile, as bots allows
+	maxDepth       = 16      // nesting of a fetched directory page
 	directoryPages = 20      // pages read per peer and refresh
 	maxPeerBots    = 1000    // cached bots per peer
 	maxDirectory   = 5000    // entries of /v1/directory
@@ -252,7 +256,7 @@ func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int
 		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "too many lookups on "+domain+", try again later")
 		return
 	}
-	status, body, err := s.getSigned(r.Context(), domain, "/fed/v1/bots/"+name)
+	status, body, err := s.signed(r.Context(), s.fetch.client, http.MethodGet, domain, "/fed/v1/bots/"+name, nil, maxBody)
 	switch {
 	case err != nil:
 		s.logger.Warn("federation bot lookup failed", "domain", domain, "err", err)
@@ -273,12 +277,6 @@ func (s *Service) lookupRemote(w http.ResponseWriter, r *http.Request, keyID int
 		return
 	}
 	writeJSON(w, http.StatusOK, entry{Profile: p, Address: name + "@" + domain, Remote: true})
-}
-
-// getSigned sends a signed GET of path to domain and returns the
-// status and the body, read up to 2 MiB.
-func (s *Service) getSigned(ctx context.Context, domain, path string) (int, []byte, error) {
-	return s.signed(ctx, s.fetch.client, http.MethodGet, domain, path, nil, maxBotsBody)
 }
 
 // lookupLimiter returns the remote-lookup limiter of k in m, made with
@@ -393,16 +391,15 @@ func (s *Service) retryDirectory(domain string) {
 }
 
 // refreshDirectory reads up to 20 pages of domain's directory and
-// replaces its cached bots with them, cleaned: at most 50 of a page and
-// 1000 in all. Entries with an invalid handle, one naming a server
-// included, are dropped, and so are bots the operator blocked. On an
-// error the old rows stay. A peer no longer
-// allowed when the rows are written gets none.
+// replaces its cached bots with them, cleaned: at most 1000. A page
+// with an array over its bound (checkArrays) is refused. Entries with
+// an invalid handle, one naming a server included, are dropped, and so
+// are bots the operator blocked. On an error the old rows stay. A peer
+// no longer allowed when the rows are written gets none.
 func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 	var got []bots.Profile
-	cut := false
 	for page := 1; page <= directoryPages && len(got) < maxPeerBots; page++ {
-		status, body, err := s.getSigned(ctx, domain, "/fed/v1/directory?page="+strconv.Itoa(page))
+		status, body, err := s.signed(ctx, s.fetch.client, http.MethodGet, domain, "/fed/v1/directory?page="+strconv.Itoa(page), nil, maxBotsBody)
 		if err != nil {
 			return err
 		}
@@ -413,11 +410,11 @@ func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 			Bots []bots.Profile `json:"bots"`
 			Next *int           `json:"next"`
 		}
-		if err := json.Unmarshal(body, &out); err != nil {
+		if err := checkArrays(body); err != nil {
 			return fmt.Errorf("directory of %s: %w", domain, err)
 		}
-		if len(out.Bots) > directoryPage {
-			out.Bots, cut = out.Bots[:directoryPage], true
+		if err := json.Unmarshal(body, &out); err != nil {
+			return fmt.Errorf("directory of %s: %w", domain, err)
 		}
 		for _, p := range out.Bots {
 			if p, ok := bots.CleanRemote(p); ok && len(got) < maxPeerBots {
@@ -427,9 +424,6 @@ func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 		if out.Next == nil {
 			break
 		}
-	}
-	if cut {
-		s.logger.Warn("federation directory page over 50 bots, the rest dropped", "domain", domain)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -459,4 +453,57 @@ func (s *Service) refreshDirectory(ctx context.Context, domain string) error {
 		}
 	}
 	return tx.Commit()
+}
+
+// checkArrays refuses a directory page holding an array over its bound
+// before it is decoded, which would allocate a whole profile for each
+// element, even of [1,1,…]: a "skills" array (the key in any case, as
+// encoding/json matches it) over 20 elements, any other over 50, or
+// nesting deeper than 16.
+func checkArrays(body []byte) error {
+	type level struct {
+		array     bool
+		n, max    int    // array: elements so far, and the bound
+		key       string // object: the last key
+		valueNext bool   // object: a value comes next, not a key
+	}
+	dec := json.NewDecoder(bytes.NewReader(body))
+	var stack []level
+	for {
+		tok, err := dec.Token()
+		switch {
+		case errors.Is(err, io.EOF):
+			return nil
+		case err != nil:
+			return err
+		case tok == json.Delim(']') || tok == json.Delim('}'):
+			stack = stack[:len(stack)-1]
+			continue
+		}
+		key := ""
+		if len(stack) > 0 {
+			switch top := &stack[len(stack)-1]; {
+			case top.array:
+				if top.n++; top.n > top.max {
+					return fmt.Errorf("an array of more than %d elements", top.max)
+				}
+			case !top.valueNext:
+				top.key, _ = tok.(string)
+				top.valueNext = true
+				continue
+			default:
+				key, top.valueNext = top.key, false
+			}
+		}
+		if d, ok := tok.(json.Delim); ok { // [ or {
+			if len(stack) == maxDepth {
+				return fmt.Errorf("nested deeper than %d", maxDepth)
+			}
+			l := level{array: d == '[', max: directoryPage}
+			if strings.EqualFold(key, "skills") {
+				l.max = maxSkills
+			}
+			stack = append(stack, l)
+		}
+	}
 }
