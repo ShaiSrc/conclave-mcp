@@ -37,6 +37,7 @@ const (
 	catchupEvery  = 5 * time.Minute
 	pullTimeout   = roomTimeout // per replica and pull
 	maxPullPages  = 50          // pages of events read per pull
+	pushPages     = 2           // pages a push's gap pulls
 	maxReplicas   = 200         // replica rooms per host, archived ones included
 	maxRefusalLog = 5           // reasons kept in a federation.room.event_refused row
 )
@@ -475,16 +476,24 @@ func nameReplica(ctx context.Context, tx *sql.Tx, roomID, name, host string, act
 
 // handleRoomPush answers POST /fed/v1/rooms/{id}/events from the host of
 // replica {id}: up to 100 events of its log, applied in seq order. A gap
-// is filled by pulling. It answers {"applied": seq}, the last seq
-// applied, which the host keeps as its cursor.
+// is filled by pulling, at most pushPages pages: the host's next push,
+// from the seq answered, brings the rest. It answers {"applied": seq},
+// the last seq applied, which the host keeps as its cursor.
+//
+// An archived replica takes no events: its host cannot write into a room
+// our bots left, nor bring them back without an invite. They count as
+// applied, so the host's cursor moves on (past the removal of our last
+// bot, which ends its delivery), and nothing is pulled.
 func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	if !s.allowedOrigin(w, r) {
 		return
 	}
 	var home sql.NullString
-	if err := s.db.QueryRowContext(ctx, `SELECT home_domain FROM rooms WHERE id = ?`, roomID).Scan(&home); err != nil &&
-		!errors.Is(err, sql.ErrNoRows) {
+	var archived bool
+	var applied int64
+	if err := s.db.QueryRowContext(ctx, `SELECT home_domain, archived_at IS NOT NULL, applied_seq FROM rooms WHERE id = ?`, roomID).
+		Scan(&home, &archived, &applied); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.fail(w, r, err)
 		return
 	}
@@ -499,6 +508,17 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusBadRequest, "bad_request", `body must be {"events": [...]}, at most 100`)
 		return
 	}
+	if archived {
+		for _, ev := range in.Events {
+			applied = max(applied, ev.Seq)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE rooms SET applied_seq = MAX(applied_seq, ?) WHERE id = ?`, applied, roomID); err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]int64{"applied": applied})
+		return
+	}
 	rf := &refusals{}
 	defer s.auditRefused(ctx, roomID, origin, rf)
 	applied, gap, err := s.applyBatch(ctx, roomID, origin, in.Events, rf)
@@ -509,7 +529,7 @@ func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
 	if gap {
 		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
 		defer cancel()
-		if applied, err = s.pull(pctx, roomID, origin, rf); err != nil {
+		if applied, err = s.pull(pctx, roomID, origin, pushPages, rf); err != nil {
 			s.logger.Warn("federation room pull failed", "room", roomID, "host", origin, "err", err)
 		}
 	}
@@ -980,15 +1000,21 @@ func localMetadata(wire json.RawMessage, reply *int64) ([]byte, error) {
 }
 
 // pull fetches and applies the events of replica roomID after the last
-// it applied from its host, page by page, until a page brings nothing
-// new. Each asks for pages within what this server reads (max). Refused
-// events go to rf. It returns the last seq applied.
-func (s *Service) pull(ctx context.Context, roomID, host string, rf *refusals) (int64, error) {
+// it applied from its host, page by page, at most pages of them, until a
+// page brings nothing new. Each asks for pages within what this server
+// reads (max). One pull of a replica runs at a time: while one runs,
+// another returns at once. Refused events go to rf. It returns the last
+// seq applied.
+func (s *Service) pull(ctx context.Context, roomID, host string, pages int, rf *refusals) (int64, error) {
 	var applied int64
 	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&applied); err != nil {
 		return 0, err
 	}
-	for range maxPullPages {
+	if _, busy := s.pulling.LoadOrStore(roomID, struct{}{}); busy {
+		return applied, nil
+	}
+	defer s.pulling.Delete(roomID)
+	for range pages {
 		status, body, err := s.sendSigned(ctx, http.MethodGet, host,
 			fmt.Sprintf("/fed/v1/rooms/%s/events?since=%d&max=%d", roomID, applied, s.eventsLimit()), nil, s.eventsLimit())
 		if err != nil {
@@ -1065,7 +1091,7 @@ func (s *Service) catchUp(ctx context.Context) {
 				}
 				pctx, cancel := context.WithTimeout(hctx, pullTimeout)
 				rf := &refusals{}
-				if _, err := s.pull(pctx, room, host, rf); err != nil && ctx.Err() == nil {
+				if _, err := s.pull(pctx, room, host, maxPullPages, rf); err != nil && ctx.Err() == nil {
 					s.logger.Warn("federation catch-up failed", "room", room, "host", host, "err", err)
 				}
 				cancel()
@@ -1536,7 +1562,7 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 	}
 	if gap {
 		pctx, cancel := context.WithTimeout(ctx, pullTimeout)
-		if _, err := s.pull(pctx, roomID, host, rf); err != nil {
+		if _, err := s.pull(pctx, roomID, host, maxPullPages, rf); err != nil {
 			s.logger.Warn("federation room pull failed", "room", roomID, "host", host, "err", err)
 		}
 		cancel()

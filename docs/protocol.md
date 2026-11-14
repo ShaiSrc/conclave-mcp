@@ -484,8 +484,12 @@ for the replica of `{id}`.
   `peer_not_allowed`: the origin is not allowed.
 
 The receiver applies the events in seq order, as in [Applying
-events](#applying-events). After a gap it pulls the rest before it
-answers.
+events](#applying-events). After a gap it pulls before it answers. It
+MAY pull only part of the rest (this server pulls two pages at most):
+its answer says where it stopped, and the host's next push continues
+from there. A replica the receiver archived applies no events: the
+receiver answers 200 with the last seq of the push, so that the host's
+cursor moves on, and does not pull.
 
 ### Pull
 

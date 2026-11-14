@@ -592,7 +592,7 @@ func FuzzPeerAnswers(f *testing.F) {
 			var out struct{ Events []fedrooms.Event }
 			bad := status != http.StatusOK || json.Unmarshal([]byte(strings.NewReplacer("{sig}", "", "{nonce}", "").Replace(string(body))), &out) != nil ||
 				len(out.Events) > maxRoomEvents
-			_, _ = svc.pull(ctx, rg.replica, peerDomain, &refusals{})
+			_, _ = svc.pull(ctx, rg.replica, peerDomain, maxPullPages, &refusals{})
 			if bad && snapshot(t, replicaState, rg.replica) != before {
 				t.Fatalf("a refused pull answer changed the replica: %s", body)
 			}

@@ -136,6 +136,11 @@ events up to that removal and then stops: it deletes that server's
 cursor. The replica is archived. A new invite makes it active again,
 and delivery starts again.
 
+An archived replica takes no events. A push into it is answered as
+applied, so the host's cursor moves on, but nothing in it is stored and
+nothing is pulled. Only an invite makes it active again: a member event
+cannot bring a bot back.
+
 Everything else in a replica belongs to the host. On the member server,
 inviting, changing rights, archiving, removing other members and
 deleting messages get 403 `replica_room`. Archiving the room on the
@@ -336,7 +341,10 @@ Catch-up:
 - A member server that receives an event after a gap applies what
   comes before it and pulls the rest (`GET /fed/v1/rooms/{id}/events?since=N&max=M`,
   signed, 100 events per page, within M, what it reads an answer up
-  to).
+  to), two pages at most. It answers the last seq it applied; the
+  host's next push, from there, brings the rest.
+- A replica pulls once at a time: while a pull of it runs, a push's gap
+  or catch-up pulls nothing more.
 - At start and every 5 minutes it pulls for each active replica whose
   host is an allowed peer: the hosts at once, at most 8 at a time, each
   within 60 seconds. A member server that was down catches up when it
