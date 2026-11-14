@@ -32,7 +32,7 @@ header {
   display: flex;
   flex-wrap: wrap;
   gap: 1rem;
-  align-items: center;
+  align-items: baseline; /* the name stays on the first nav line when the nav wraps */
   padding: 0.6rem 1rem;
   border-bottom: 1px solid var(--line);
 }

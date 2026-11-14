@@ -147,7 +147,7 @@ export async function roomPage(view, id) {
         m.unverified ? h('span', { class: 'ext' }, 'unverified') : '', extMark(m.trust_origin), m.operator ? h('span', { class: 'operator' }, 'operator ✓') : '',
         m.message_type && m.message_type !== 'system' ? h('span', {}, `<${m.message_type}>`) : '',
         replyTo(m) ? h('span', {}, `re #${replyTo(m)}`) : '',
-        room.archived_at || home ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
+        room.archived_at || home || feed ? '' : h('button', { onclick: () => reply(m.id) }, 'Reply'),
         home ? '' : confirmButton('Delete', 'Delete this message?', async () => {
           await confirmed('DELETE', `${base}/messages/${m.id}`);
           msgs.delete(m.id);
