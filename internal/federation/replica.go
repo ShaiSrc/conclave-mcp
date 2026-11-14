@@ -625,7 +625,11 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 }
 
 // applyRoom renames the replica, and archives it when the host did. Its
-// kind is the invite's: a room event of another kind is refused. An
+// kind is the invite's: a room event of another kind is refused. A room
+// takes no name reserved for direct conversations and feeds. A direct
+// conversation or a feed keeps the name of its invite: the event's name
+// must be the pair's, or the feed's (feed:<address>), or that cut with
+// #<room id> as its host may have named it; any other is refused. An
 // archived feed ends the accepted follows of our bots in it, but not of
 // those in a newer active replica of the same feed from that host.
 func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
@@ -633,15 +637,24 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 	if err := json.Unmarshal(payload, &p); err != nil || p.Name == "" || len(p.Name) > 128 {
 		return refused("room event: bad payload")
 	}
-	var kind string
-	if err := tx.QueryRowContext(ctx, `SELECT kind FROM rooms WHERE id = ?`, roomID).Scan(&kind); err != nil {
+	var kind, fixed string // fixed: a direct conversation's or a feed's name
+	if err := tx.QueryRowContext(ctx, `SELECT kind, COALESCE(pair, ?2 || feed, '') FROM rooms WHERE id = ?1`, roomID, fedrooms.FeedPrefix).
+		Scan(&kind, &fixed); err != nil {
 		return err
 	}
-	if cmp.Or(p.Kind, "room") != kind {
+	switch {
+	case cmp.Or(p.Kind, "room") != kind:
 		return refused("room event: kind %q, the replica is %s", p.Kind, kind)
+	case fixed != "" && p.Name != fixed && p.Name != fedrooms.Suffixed(fixed, roomID):
+		return refused("room event: %s is not renamed", fixed)
+	case fixed == "" && (strings.HasPrefix(p.Name, fedrooms.DirectPrefix) || strings.HasPrefix(p.Name, fedrooms.FeedPrefix)):
+		return refused("room event: names starting with %s or %s are reserved", fedrooms.DirectPrefix, fedrooms.FeedPrefix)
+	}
+	if fixed != "" {
+		p.Name = "" // kept
 	}
 	if p.Archived {
-		_, err := tx.ExecContext(ctx, `UPDATE rooms SET name = ?, archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
+		_, err := tx.ExecContext(ctx, `UPDATE rooms SET name = COALESCE(NULLIF(?, ''), name), archived_at = COALESCE(archived_at, ?) WHERE id = ?`,
 			p.Name, storage.FormatTS(time.Now()), roomID)
 		if err == nil { // as on its host, an archived feed ends its accepted follows
 			_, err = tx.ExecContext(ctx, `DELETE FROM follows WHERE status = 'accepted' AND target_key_id IS NULL
@@ -650,6 +663,9 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 					WHERE o.feed = follows.target AND o.home_domain = ?2 AND o.id != ?1 AND o.archived_at IS NULL)`, roomID, host)
 		}
 		return err
+	}
+	if fixed != "" {
+		return nil
 	}
 	err := nameReplica(ctx, tx, roomID, p.Name, host, false)
 	if errors.Is(err, errNameTaken) {
@@ -661,11 +677,12 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 // applyMember adds a member to the replica or sets its rights. A member
 // of this server must be one of its bots; a direct conversation takes
 // ours by invite only, which checks their DM policy, so here it only
-// sets the rights of one it has, and it has one bot of the host, which
-// joined with the invite: another is refused. A feed takes ours by
-// invite only too, which checks their follow, and gives them read. When
-// it is the first bot of ours in an archived replica (invited again),
-// the replica is active again.
+// sets the rights of one it has. A feed takes ours by invite only too,
+// which checks their follow, and gives them read. A member of another
+// server must fit the replica (fits): a direct conversation's is the
+// other bot of its pair, a feed's its bot. When it is the first bot of
+// ours in an archived replica (invited again), the replica is active
+// again.
 func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MemberPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -675,20 +692,14 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 	if err != nil {
 		return refused("member event: %v", err)
 	}
+	if _, domain, _ := strings.Cut(p.Address, "@"); domain != s.id().Domain {
+		if err := fits(ctx, tx, roomID, p.Address); err != nil {
+			return err
+		}
+	}
 	key, local, err := s.memberKey(ctx, tx, p.Address, host)
 	if err != nil {
 		return err
-	}
-	if !local {
-		var second bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = ? AND kind = 'direct')
-			AND EXISTS (SELECT 1 FROM room_members m JOIN api_keys k ON k.id = m.key_id
-			WHERE m.room_id = ? AND k.remote_domain IS NOT NULL AND m.key_id != ?)`, roomID, roomID, key).Scan(&second); err != nil {
-			return err
-		}
-		if second {
-			return refused("member event: a direct conversation has one bot of the host, not %s too", p.Address)
-		}
 	}
 	var bot, ours, invited bool
 	var kind string
@@ -727,6 +738,26 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 		return refused("member event: %v", err)
 	}
 	return err
+}
+
+// fits refuses address, a member or author of replica roomID, unless
+// the replica takes it: a direct conversation takes the two bots of its
+// pair, a feed its bot, a room anyone. Our bots join a feed by invite,
+// so its members of this server are not asked here.
+func fits(ctx context.Context, q fedrooms.DB, roomID, address string) error {
+	var pair, feed string
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(pair, ''), COALESCE(feed, '') FROM rooms WHERE id = ?`, roomID).
+		Scan(&pair, &feed); err != nil {
+		return err
+	}
+	a, b, _ := strings.Cut(strings.TrimPrefix(pair, fedrooms.DirectPrefix), "~")
+	switch {
+	case pair != "" && address != a && address != b:
+		return refused("%s is not of the pair %s", address, pair)
+	case feed != "" && address != feed:
+		return refused("%s is not the bot of the feed of %s", address, feed)
+	}
+	return nil
 }
 
 // localMember is whether replica ? has a member of this server.
@@ -851,11 +882,12 @@ func refusedBot(ctx context.Context, db fedrooms.DB, address string) error {
 	return err
 }
 
-// applyMessage stores a message of the replica. Its author signature is
-// checked first; then its author key is found or created, and reply_to
-// translated to our id. A reply_to we do not have is dropped. A
-// signature stored here with another host id is a replay: refused. A
-// blanked event (applyEvent applies it as a delete) stores nothing.
+// applyMessage stores a message of the replica. Its author must fit the
+// replica (fits) and its author signature is checked; then its author
+// key is found or created, and reply_to translated to our id. A reply_to
+// we do not have is dropped. A signature stored here with another host
+// id is a replay: refused. A blanked event (applyEvent applies it as a
+// delete) stores nothing.
 func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.MessagePayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.ID <= 0 {
@@ -863,6 +895,9 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 	}
 	if p.Deleted {
 		return nil
+	}
+	if err := fits(ctx, s.db, roomID, p.Author); err != nil {
+		return err
 	}
 	unverified, err := s.checkAuthor(ctx, roomID, host, p)
 	if err != nil {

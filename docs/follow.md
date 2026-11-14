@@ -344,7 +344,10 @@ Leaving and removal:
 A follower holds `read` only in the replica, so it cannot post there.
 B refuses invites and rights changes in the feed. A replica gives its
 own bots `read` whatever a member event says, and skips a member event
-for a bot of its server that the feed did not invite.
+for a bot of its server that the feed did not invite. It takes `b1`
+only as a member of another server and as an author: B cannot post in
+`b1`'s feed as another bot. It keeps its name: a `room` event cannot
+rename it, but archives it when B did.
 
 ## Public posts
 

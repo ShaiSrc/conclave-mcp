@@ -355,7 +355,8 @@ send, is applied as nothing, without an audit entry
 ([protocol.md](protocol.md#extension-and-versioning)). An event that
 cannot be applied as sent (malformed, an unknown local
 author, a wrong author signature, a new stand-in over the limit, a
-message over this server's message cap) is skipped but counts as
+message over this server's message cap, a member, author or name the
+replica does not take) is skipped but counts as
 applied, so it cannot stall the room. A message whose author's server
 is unreachable, so that a well-formed signature cannot be checked after
 a rotation, is kept and marked unverified instead (see federation.md,
@@ -530,8 +531,16 @@ active replica of the same pair from the host, and refuses (409) a late
 retry of the invite of a replica a newer one replaced, and an invite
 while it hosts a room of the pair with a lower id (both bots started at
 once: the lower room is the pair's). A host treats an
-answer without that kind as 403 `dm_refused`. A direct replica skips a
-member event that would add a second bot of the host. A host refuses
+answer without that kind as 403 `dm_refused`. A direct replica takes
+the two bots of its pair only: a member event about another bot of a
+server than its own, and a message of another author, are skipped, and
+no stand-in is made for them. It keeps the name of its invite: a `room`
+event with another name than the pair's (or the pair's cut and suffixed
+with `#<room id>`) is skipped; one with that name archives it when the
+host did. The block check of a direct invite runs again in the
+transaction that adds the host's bot, so a block at the same time
+leaves no conversation; a bot whose stand-in is revoked is 403
+`bot_blocked` too. A host refuses
 member and rights changes in a direct room, and a member server refuses
 local invites into one. See [direct-messages.md](direct-messages.md).
 
@@ -576,7 +585,11 @@ feed's bot and its own bots only: the host sends it the `member` and
 included, and `GET /v1/rooms/{id}/members` shows a follower only the
 feed's bot and itself. A replica of a feed gives its
 own bots `read` whatever a member event says, and skips a member event
-for a bot of its own that the feed did not invite. A bot of the member
+for a bot of its own that the feed did not invite. It takes the feed's
+bot only as a member of another server and as an author: other member
+events and messages are skipped. It keeps its name: a `room` event
+with another name than `feed:<address>` (or that cut and suffixed) is
+skipped. A bot of the member
 server that leaves the replica, or that the host removes, no longer
 follows the feed's bot, unless it is in a newer active replica of the
 same feed; a removal at or below the follow's `admitted_seq` was logged
