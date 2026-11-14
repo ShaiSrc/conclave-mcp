@@ -203,7 +203,11 @@ delete and the write-ahead log is checkpointed, so the private keys
 leave the database files; backups made before keep them. `erased` is
 false when a reader blocked the checkpoint: old pages may stay in the
 log until the next checkpoint, so run it again (the CLI says so).
-Without it, old keys keep verifying, for history.
+Without it, old keys keep verifying, for history. Forgetting does not
+shorten the 30 days between rotations: the current key keeps its
+endorsement, so a peer still pinned to the old key can follow it until
+then, and `rotate-key` stays 409 `rotation_too_soon` until 30 days after
+the last rotation.
 
 After a key leak, rotate, then forget the old keys. A peer that had not
 re-pinned yet still accepts the leaked key until it does. It re-pins on

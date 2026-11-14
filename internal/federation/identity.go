@@ -110,7 +110,9 @@ func LoadOrCreateIdentity(ctx context.Context, db *sql.DB, domain string) (*Iden
 // it. id's key, the current one, signs an endorsement of the new key
 // and stays in the document until keyOverlap after now. While a key
 // rotated out earlier is still in its overlap, it returns
-// ErrRotationTooSoon, so a peer never needs more than one step.
+// ErrRotationTooSoon, so a peer never needs more than one step; so it
+// does while the current key, made by a rotation, is younger than the
+// overlap, even after ForgetOldKeys.
 func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Identity, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -136,9 +138,13 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Too soon while a key rotated out is in its overlap, or, once the
+	// old keys are forgotten, while the current key is younger than the
+	// overlap and was made by a rotation (it carries an endorsement).
 	res, err := tx.ExecContext(ctx, `UPDATE federation_keys SET retired_at = ? WHERE key_id = ? AND retired_at IS NULL
-		AND NOT EXISTS (SELECT 1 FROM federation_keys WHERE retired_at > ?)`,
-		until, id.KeyID, storage.FormatTS(now))
+		AND NOT EXISTS (SELECT 1 FROM federation_keys WHERE retired_at > ?)
+		AND NOT (COALESCE(endorsement, '') != '' AND created_at > ?)`,
+		until, id.KeyID, storage.FormatTS(now), storage.FormatTS(now.Add(-keyOverlap)))
 	if err != nil {
 		return nil, err
 	}

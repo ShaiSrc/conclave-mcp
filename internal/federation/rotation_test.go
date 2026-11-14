@@ -932,3 +932,25 @@ func TestForgetOldKeys_BlockedCheckpoint(t *testing.T) {
 		t.Errorf("without: dropped %v, erased %v, %v; want erased", dropped, erased, err)
 	}
 }
+
+// Forgetting the old keys keeps the 30 days between rotations: the
+// current key's endorsement still lets a peer pinned to the old key
+// follow it, and a second rotation would cut that peer off.
+func TestRotate_TooSoonAfterForget(t *testing.T) {
+	g := newRoomRig(t)
+	ctx := context.Background()
+	t0 := time.Now()
+	id, err := Rotate(ctx, g.db, g.svc.id(), t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id, _, _, err = ForgetOldKeys(ctx, g.db, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Rotate(ctx, g.db, id, t0.Add(24*time.Hour)); !errors.Is(err, ErrRotationTooSoon) {
+		t.Fatalf("a rotation a day after a rotation and a forget: %v, want ErrRotationTooSoon", err)
+	}
+	if _, err := Rotate(ctx, g.db, id, t0.Add(keyOverlap+time.Hour)); err != nil {
+		t.Fatalf("a rotation after the overlap: %v", err)
+	}
+}
