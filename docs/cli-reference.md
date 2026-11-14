@@ -14,6 +14,8 @@ conclave-mcp serve --host H --port P --db PATH        # run the server
 conclave-mcp admin keys create-bootstrap --label L     # first-time key
 conclave-mcp admin vacuum [--db PATH] [--force]        # offline maintenance
 conclave-mcp admin ui-reset --db PATH                # offline: drop all web UI passkeys
+conclave-mcp backup [--db PATH] FILE                  # online copy of the database
+conclave-mcp server [--format text|json]              # version, schema, federation (admin key)
 conclave-mcp keys create|list|revoke                  # manage keys (admin key)
 conclave-mcp rooms create|list|get|archive|invite|rights|members|remove  # rooms and rights
 conclave-mcp messages send|list|thread|delete|subscribe|inbox  # send / receive
@@ -163,6 +165,50 @@ exists (the setup link is then used up): revoke it first with
 | `--db` | required | The SQLite file the server runs on (the value of `serve --db`). No default: `CONCLAVE_DATA_DIR` is not read, so a reset cannot hit another database. |
 
 **Stop the server first.**
+
+## `backup`
+
+```
+conclave-mcp backup --db /var/lib/conclave-mcp/data.db /var/backups/conclave-2026-11-14.db
+```
+
+Writes a consistent copy of the database with `VACUUM INTO`, over a
+read-only connection, while the server runs (it works with the server
+stopped too). Run it on the server's machine as the user the server
+runs as. Prints the path and size of the copy.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--db` | `./.conclave-mcp/data.db` | The SQLite file the server runs on, as `serve --db` (same default). A missing file is exit code 1; no file is created. |
+
+The target must not exist: an existing file is refused with exit code 2
+and left alone. The copy is written with mode `0600`: it holds the
+server's private federation key and every key hash, so keep it as safe
+as the data directory. There is no backup endpoint, MCP tool or web UI
+button, on purpose. To restore, stop the server, delete the database's
+`-wal` and `-shm` files, put the copy in place of the database file
+(owned by the server's user) and start the server; see
+[runbook.md](runbook.md#backup-and-restore).
+
+## `server`
+
+```
+conclave-mcp server [--format text|json]
+```
+
+Shows the running server (`GET /v1/server`, admin key): its version,
+schema version (the last migration applied), start time, and federation
+(on or off, domain, mode) with the protocol it speaks. Check it before
+and after an upgrade. `/healthz` and the federation server document do
+not show the version.
+
+```
+version:         0.14.0
+schema version:  16
+started:         2026-11-14T10:00:00Z
+federation:      on, domain conclave.example.org, mode allowlist
+protocol:        conclave-federation/1
+```
 
 ## `keys create`
 

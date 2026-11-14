@@ -54,12 +54,13 @@ HTTP control plane on the configured host:port.`,
 			if err != nil {
 				return fmt.Errorf("config: %w", err)
 			}
-			return Execute(cmd.Context(), cfg, cmd.ErrOrStderr())
+			// The root command carries the build's version (main.version).
+			return Execute(cmd.Context(), cfg, cmd.Root().Version, cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().StringVar(&flagHost, "host", "127.0.0.1", "bind host (CONCLAVE_HOST)")
 	cmd.Flags().IntVar(&flagPort, "port", 7432, "bind port (CONCLAVE_PORT)")
-	cmd.Flags().StringVar(&flagDB, "db", "./.conclave-mcp/data.db", "SQLite file path (CONCLAVE_DB_PATH)")
+	cmd.Flags().StringVar(&flagDB, "db", config.Defaults().DBPath, "SQLite file path (CONCLAVE_DB_PATH)")
 	cmd.Flags().StringVar(&flagFedDomain, "federation-domain", "", "federation domain; empty turns federation off (CONCLAVE_FEDERATION_DOMAIN)")
 	return cmd
 }
@@ -68,9 +69,10 @@ HTTP control plane on the configured host:port.`,
 // the SQLite database, runs migrations, builds the HTTP server,
 // and blocks until ctx is cancelled or the listener fails.
 //
-// stderr is the destination for the boot-time logger. After Start,
-// request logging goes through the server's own slog.Logger.
-func Execute(ctx context.Context, cfg *config.Config, stderr interface {
+// version is the build's version, for GET /v1/server. stderr is the
+// destination for the boot-time logger. After Start, request logging
+// goes through the server's own slog.Logger.
+func Execute(ctx context.Context, cfg *config.Config, version string, stderr interface {
 	Write(p []byte) (int, error)
 }) error {
 	if ctx == nil {
@@ -78,6 +80,7 @@ func Execute(ctx context.Context, cfg *config.Config, stderr interface {
 	}
 	bootLog := slog.New(slog.NewJSONHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	bootLog.Info("config loaded",
+		"version", version,
 		"host", cfg.Host,
 		"port", cfg.Port,
 		"db_path", cfg.DBPath,
@@ -130,6 +133,7 @@ func Execute(ctx context.Context, cfg *config.Config, stderr interface {
 		ReadHeader:  5 * 1e9,   // 5s
 		IdleTimeout: 120 * 1e9, // 120s
 		Logger:      bootLog,
+		Version:     version,
 
 		FederationDomain:       cfg.FederationDomain,
 		FederationHost:         cfg.FederationHost,

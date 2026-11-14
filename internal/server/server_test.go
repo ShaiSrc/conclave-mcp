@@ -774,3 +774,83 @@ func TestServer_Follows(t *testing.T) {
 		}
 	}
 }
+
+// GET /v1/server answers admin keys only: the build's version, the schema
+// version from meta, the start time and the federation settings. The
+// version stays out of /healthz and the server document.
+func TestServer_Info(t *testing.T) {
+	db := uiDB(t)
+	tokens := map[string]string{}
+	for label, admin := range map[string]int{"root": 1, "agent": 0} {
+		token, phc, err := auth.GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', ?)`,
+			label, phc, token[3:11], admin); err != nil {
+			t.Fatal(err)
+		}
+		tokens[label] = token
+	}
+	var schema int
+	if err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'`).Scan(&schema); err != nil || schema == 0 {
+		t.Fatalf("schema_version: %d %v", schema, err)
+	}
+	const version = "0.14.0-test"
+	for _, domain := range []string{"", "conclave.example.org"} {
+		before := time.Now().Add(-time.Second)
+		s, err := New(Config{Host: "127.0.0.1", Port: 7432, Version: version, FederationDomain: domain, FederationHost: "127.0.0.1",
+			FederationPort: 7433, FederationMode: "allowlist"}, Deps{DB: db})
+		if err != nil {
+			t.Fatal(err)
+		}
+		get := func(h http.Handler, who, path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			if who != "" {
+				req.Header.Set("Authorization", "Bearer "+tokens[who])
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			return rec
+		}
+		rec := get(s.Handler(), "root", "/v1/server")
+		var info struct {
+			Version       string    `json:"version"`
+			SchemaVersion int       `json:"schema_version"`
+			StartedAt     time.Time `json:"started_at"`
+			Federation    struct {
+				Enabled                bool
+				Domain, Mode, Protocol string
+			} `json:"federation"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &info) != nil {
+			t.Fatalf("%q: /v1/server: %d %s", domain, rec.Code, rec.Body)
+		}
+		wantMode := ""
+		if domain != "" {
+			wantMode = "allowlist"
+		}
+		f := info.Federation
+		if info.Version != version || info.SchemaVersion != schema || info.StartedAt.Before(before) || info.StartedAt.After(time.Now()) ||
+			f.Enabled != (domain != "") || f.Domain != domain || f.Mode != wantMode || f.Protocol != federation.Protocol {
+			t.Errorf("%q: /v1/server: %s", domain, rec.Body)
+		}
+		// The web UI's Server page reads it with the session.
+		rec = httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, uiRequest("GET", "/v1/server", "localhost:7432"))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), version) {
+			t.Errorf("%q: /v1/server with the UI session: %d %s", domain, rec.Code, rec.Body)
+		}
+		if rec := get(s.Handler(), "agent", "/v1/server"); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"forbidden"`) {
+			t.Errorf("%q: /v1/server with a key that is not an admin: %d %s", domain, rec.Code, rec.Body)
+		}
+		if rec := get(s.Handler(), "", "/healthz"); strings.Contains(rec.Body.String(), version) {
+			t.Errorf("/healthz shows the version: %s", rec.Body)
+		}
+		if s.fed != nil {
+			if rec := get(s.fed.Handler, "", "/.well-known/conclave"); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), version) {
+				t.Errorf("server document: %d %s", rec.Code, rec.Body)
+			}
+		}
+	}
+}

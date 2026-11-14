@@ -13,7 +13,7 @@ import (
 func TestPages_ServedWithSecurityHeaders(t *testing.T) {
 	_, _, base := newTestUI(t)
 	b := newBrowser(t, base)
-	for path, ctype := range map[string]string{"/ui/": "text/html", "/ui/app.css": "text/css"} {
+	for path, ctype := range map[string]string{"/ui/": "text/html", "/ui/app.css": "text/css", "/ui/server.js": "text/javascript"} {
 		resp := b.send("GET", path, nil, nil)
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()

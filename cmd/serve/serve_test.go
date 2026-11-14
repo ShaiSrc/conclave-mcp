@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
+
 	"github.com/hermes/conclave-mcp/internal/config"
 )
 
@@ -33,7 +35,7 @@ func TestExecute_LogsConfigAndBind(t *testing.T) {
 	// immediately; the production code blocks on srv.Start until
 	// ctx is cancelled.
 	doneCh := make(chan error, 1)
-	go func() { doneCh <- Execute(ctx, cfg, &buf) }()
+	go func() { doneCh <- Execute(ctx, cfg, "", &buf) }()
 
 	// Wait briefly for boot logs to flush, then cancel.
 	time.Sleep(50 * time.Millisecond)
@@ -105,7 +107,7 @@ func TestExecute_NilContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	doneCh := make(chan error, 1)
-	go func() { doneCh <- Execute(ctx, cfg, &buf) }()
+	go func() { doneCh <- Execute(ctx, cfg, "", &buf) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	<-doneCh
@@ -123,7 +125,7 @@ func TestExecute_DefaultsAreLogged(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	doneCh := make(chan error, 1)
-	go func() { doneCh <- Execute(ctx, cfg, &buf) }()
+	go func() { doneCh <- Execute(ctx, cfg, "", &buf) }()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	if err := <-doneCh; err != nil {
@@ -203,5 +205,24 @@ func TestNewCmd_FederationDomain(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// serve takes the build's version from the root command and logs it at
+// boot; it is the version GET /v1/server answers.
+func TestNewCmd_Version(t *testing.T) {
+	var out bytes.Buffer
+	root := &cobra.Command{Use: "conclave-mcp", Version: "9.9.9-test"}
+	root.AddCommand(NewCmd())
+	root.SetArgs([]string{"serve", "--port", fmt.Sprint(freePort(t)), "--db", t.TempDir() + "/data.db"})
+	root.SetOut(&out)
+	root.SetErr(&out)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // boot, then shut down at once
+	if err := root.ExecuteContext(ctx); err != nil {
+		t.Fatalf("serve: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), `"version":"9.9.9-test"`) {
+		t.Errorf("boot log lacks the version:\n%s", out.String())
 	}
 }

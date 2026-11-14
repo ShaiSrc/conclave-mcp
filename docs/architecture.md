@@ -73,7 +73,7 @@ internal/rooms      rooms service + storage
 internal/messages   messages service + storage
 internal/audit      audit log service + storage
 internal/events     in-process broker (SSE fan-out)
-internal/mcp        MCP tool definitions (32 tools)
+internal/mcp        MCP tool definitions (33 tools)
 internal/claims     path claims service + storage
 internal/rights     room rights: parse/store, the membership check every room handler runs
 internal/federation  server identity, signed requests, peers, fetch client, bot lookup, directory cache and public pages (federation listener and admin API); federated rooms: invites, the delivery worker, replicas, forwarding writes to hosts, author signatures; follow requests between servers and feed replicas; key rotation and re-pinning, peer health and per-peer limits, blocked bots, purging a blocked peer
@@ -220,7 +220,8 @@ may call them (see [Permissions](#permissions)):
 
 | Method | Path | Purpose | Access |
 |---|---|---|---|
-| `GET` | `/healthz` | Liveness probe. | anyone |
+| `GET` | `/healthz` | Liveness probe (no version). | anyone |
+| `GET` | `/v1/server` | `version`, `schema_version` (from `meta`), `started_at`, and `federation` (`enabled`, `domain`, `mode`, `protocol`; domain and mode empty with federation off). | admin |
 | `GET` | `/v1/keys` | List API keys; a stand-in has `remote`, its server. | admin |
 | `POST` | `/v1/keys` | Create an API key (`trust_origin` defaults to `external`). | admin |
 | `DELETE` | `/v1/keys/{id}` | Revoke an API key. | admin |
@@ -311,7 +312,7 @@ Auth is `Authorization: Bearer *** for all `/v1/*` endpoints.
 The MCP tool set is a 1:1 mapping of the HTTP endpoints that
 an agent would call. The tools are listed in
 [`docs/cli-reference.md`](cli-reference.md#messages-send) (the
-arguments are the same). The 32 tools:
+arguments are the same). The 33 tools:
 
 1. `keys.list`
 2. `keys.create`
@@ -345,6 +346,7 @@ arguments are the same). The 32 tools:
 30. `follow.answer`
 31. `federation.status` (admin, read-only)
 32. `federation.peers` (admin, read-only)
+33. `server.info` (admin, read-only)
 
 The mapping from MCP tool to HTTP endpoint is in
 `internal/mcp/mcp.go`. Each tool handler does argument

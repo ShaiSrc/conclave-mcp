@@ -331,6 +331,8 @@ var tools = []tool{
 		map[string]any{}, nil},
 	{"federation.peers", "The federation peers: domain, status, fingerprint, note, last_seen_at (last request in), last_out_at (last request out), health (ok, failing, unreachable), delivery (rooms, pending, failing_since, paused, last_error) and limits (value, and whether the operator set it). Read-only. Admin only (403 for other keys). " + peerDataNote,
 		map[string]any{}, nil},
+	{"server.info", "This server: version, schema_version, started_at and federation (enabled, domain, mode, protocol). Read-only. Admin only (403 for other keys).",
+		map[string]any{}, nil},
 }
 
 func (s *Server) toolList() []map[string]any {
@@ -500,6 +502,8 @@ func (s *Server) callTool(ctx context.Context, name string, args json.RawMessage
 		return s.httpGet(ctx, "/v1/federation")
 	case "federation.peers":
 		return s.httpGet(ctx, "/v1/federation/peers")
+	case "server.info":
+		return s.httpGet(ctx, "/v1/server")
 	case "audit.list":
 		// We forward raw args as query params, which is a hack
 		// but works for the small set of filters we support.
