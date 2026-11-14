@@ -64,14 +64,73 @@ func TestRotateKey(t *testing.T) {
 }
 
 func TestPeersList(t *testing.T) {
-	body := `{"peers":[{"domain":"b.example","status":"allowed","fingerprint":"SHA256:x","note":"n","added_at":"t","last_seen_at":null}]}`
+	body := `{"peers":[{"domain":"b.example","status":"allowed","fingerprint":"SHA256:x","note":"n","added_at":"t","last_seen_at":null,
+		"last_out_at":"2026-11-14T10:00:00Z","health":"failing"}]}`
 	out, _, err := runCmd(t, 200, body, "peers", "list")
-	if err != nil || !strings.Contains(out, "DOMAIN") || !strings.Contains(out, "b.example") {
+	if err != nil || !strings.Contains(out, "DOMAIN") || !strings.Contains(out, "HEALTH") || !strings.Contains(out, "LAST_OUT") ||
+		!strings.Contains(out, "b.example") || !strings.Contains(out, "failing") || !strings.Contains(out, "2026-11-14T10:00:00Z") {
 		t.Errorf("table: err=%v out=%q", err, out)
 	}
 	out, _, err = runCmd(t, 200, body, "peers", "list", "--format", "json")
-	if err != nil || !strings.Contains(out, `"domain": "b.example"`) {
+	if err != nil || !strings.Contains(out, `"domain": "b.example"`) || !strings.Contains(out, `"health": "failing"`) {
 		t.Errorf("json: err=%v out=%q", err, out)
+	}
+}
+
+const peerJSON = `{"domain":"b.example","status":"allowed","fingerprint":"SHA256:x","key_id":"ed25519:k","note":"n","added_at":"2026-11-01T00:00:00Z",
+	"last_seen_at":"2026-11-14T09:00:00Z","last_out_at":null,"health":"unreachable",
+	"delivery":{"rooms":2,"pending":5,"failing_since":"2026-11-02T00:00:00Z","paused":1,"last_error":"boom"},
+	"limits":{"requests_per_minute":{"value":120,"override":false},"dm_invites_per_hour":{"value":0,"override":true},
+	"follow_requests_per_hour":{"value":100,"override":false}}}`
+
+// wantPeer checks the output of a peer view.
+func wantPeer(t *testing.T, what, out string) {
+	t.Helper()
+	for _, want := range []string{"domain:         b.example\n", "health:         unreachable\n", "last seen:      2026-11-14T09:00:00Z\n",
+		"last out:       never\n", "delivery:       2 rooms, 5 events pending, 1 paused\n", "failing since:  2026-11-02T00:00:00Z\n",
+		"last error:     boom\n", "  requests_per_minute       120\n", "  dm_invites_per_hour       0 (override)\n",
+		"  follow_requests_per_hour  100\n"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("%s: no %q in %q", what, want, out)
+		}
+	}
+}
+
+func TestPeersShowRetry(t *testing.T) {
+	out, req, err := runCmd(t, 200, peerJSON, "peers", "show", "b.example")
+	if err != nil || !strings.HasPrefix(req, "GET /v1/federation/peers/b.example ") {
+		t.Errorf("show: err=%v req=%q", err, req)
+	}
+	wantPeer(t, "show", out)
+	out, req, err = runCmd(t, 200, peerJSON, "peers", "retry", "b.example")
+	if err != nil || !strings.HasPrefix(req, "POST /v1/federation/peers/b.example/retry ") || !strings.HasPrefix(out, "delivery to b.example is due now\n") {
+		t.Errorf("retry: err=%v req=%q out=%q", err, req, out)
+	}
+	wantPeer(t, "retry", out)
+}
+
+func TestPeersLimits(t *testing.T) {
+	out, req, err := runCmd(t, 200, peerJSON, "peers", "limits", "b.example", "--requests", "5", "--follow-requests", "0")
+	if err != nil || req != `PATCH /v1/federation/peers/b.example {"limits":{"follow_requests_per_hour":0,"requests_per_minute":5}}` {
+		t.Errorf("limits: err=%v req=%q", err, req)
+	}
+	wantPeer(t, "limits", out)
+	_, req, err = runCmd(t, 200, peerJSON, "peers", "limits", "b.example", "--dm-invites", "7")
+	if err != nil || !strings.Contains(req, `{"limits":{"dm_invites_per_hour":7}}`) {
+		t.Errorf("dm: err=%v req=%q", err, req)
+	}
+	_, req, err = runCmd(t, 200, peerJSON, "peers", "limits", "b.example", "--reset")
+	if err != nil || !strings.Contains(req, `{"limits":{"dm_invites_per_hour":null,"follow_requests_per_hour":null,"requests_per_minute":null}}`) {
+		t.Errorf("reset: err=%v req=%q", err, req)
+	}
+	for _, args := range [][]string{{"b.example"}, {"b.example", "--reset", "--requests", "1"}} {
+		if _, req, err := runCmd(t, 200, peerJSON, append([]string{"peers", "limits"}, args...)...); ExitCode(err) != 2 || req != "" {
+			t.Errorf("%v: err=%v req=%q", args, err, req)
+		}
+	}
+	_, _, err = runCmd(t, 400, `{"error":{"code":"invalid_limit","message":"m"}}`, "peers", "limits", "b.example", "--requests", "-1")
+	if ExitCode(err) != 1 || !strings.Contains(err.Error(), "invalid_limit") {
+		t.Errorf("400: err=%v", err)
 	}
 }
 

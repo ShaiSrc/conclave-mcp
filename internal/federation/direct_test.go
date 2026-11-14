@@ -200,7 +200,11 @@ func TestDirectRemote_IncomingLimit(t *testing.T) {
 	g.dmBot(t, "b1", "peers")
 	now := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
 	g.svc.now = func() time.Time { return now }
-	g.svc.limiters[h.id.Domain] = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
+	lims, err := g.svc.limitersOf(context.Background(), h.id.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lims.requests = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
 	for i := range 100 {
 		if rec := h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr(fmt.Sprintf("x%d", i))), "b1"); rec.Code != http.StatusCreated {
 			t.Fatalf("invite %d: %d %s", i, rec.Code, rec.Body)
@@ -217,6 +221,12 @@ func TestDirectRemote_IncomingLimit(t *testing.T) {
 	now = now.Add(time.Minute)
 	if rec := h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr("x101")), "b1"); rec.Code != http.StatusCreated {
 		t.Errorf("a minute later: %d %s", rec.Code, rec.Body)
+	}
+	// The operator's override replaces the limiter at once.
+	wantErr(t, h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr("x102")), "b1"), http.StatusTooManyRequests, "rate_limited")
+	wantStatus(t, adminDo(g.svc, admin, http.MethodPatch, "/v1/federation/peers/"+h.id.Domain, `{"limits":{"dm_invites_per_hour":200}}`), http.StatusOK)
+	if rec := h.directInvite(t, g, ulid.Make().String(), dmName("b1@"+local, h.addr("x102")), "b1"); rec.Code != http.StatusCreated {
+		t.Errorf("after the override: %d %s", rec.Code, rec.Body)
 	}
 }
 

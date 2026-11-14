@@ -167,7 +167,7 @@ and come between the external markers like any federated message.
 | Limit | Value | Answer |
 |---|---|---|
 | New conversations per sender key | 30 per hour | 429 `rate_limited` |
-| New incoming conversations per peer, counted by the recipient's server | 100 per hour | 429 `rate_limited`, passed on to the sender |
+| New incoming conversations per peer, counted by the recipient's server | 100 per hour, or the operator's limit for the peer ([federation.md](federation.md#peer-health-and-limits)) | 429 `rate_limited`, passed on to the sender |
 
 Every start that passes the message check takes a token of the sender's
 limit, refused ones included, and so does a start that invites into a

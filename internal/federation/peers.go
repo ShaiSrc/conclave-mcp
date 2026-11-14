@@ -21,36 +21,43 @@ const (
 var ErrPeerNotFound = errors.New("federation peer not found")
 
 // Peer is one row of federation_peers. PublicKey is the pinned key,
-// nil for a domain blocked before it was seen.
+// nil for a domain blocked before it was seen. LastSeenAt is its last
+// verified request, LastOutAt our last successful request to it.
 type Peer struct {
 	Domain, Status, Fingerprint, Note string
 	PublicKey                         ed25519.PublicKey
 	AddedAt                           time.Time
-	LastSeenAt                        *time.Time
+	LastSeenAt, LastOutAt             *time.Time
 }
 
 // Peers is the peer store: one row per domain, the status is the policy.
 type Peers struct{ db *sql.DB }
 
-const peerCols = `domain, status, fingerprint, public_key, note, added_at, last_seen_at`
+const peerCols = `domain, status, fingerprint, public_key, note, added_at, last_seen_at, last_out_at`
 
 func scanPeer(row interface{ Scan(...any) error }) (Peer, error) {
 	var (
-		p     Peer
-		pub   []byte
-		added string
-		seen  sql.NullString
+		p         Peer
+		pub       []byte
+		added     string
+		seen, out sql.NullString
 	)
-	if err := row.Scan(&p.Domain, &p.Status, &p.Fingerprint, &pub, &p.Note, &added, &seen); err != nil {
+	if err := row.Scan(&p.Domain, &p.Status, &p.Fingerprint, &pub, &p.Note, &added, &seen, &out); err != nil {
 		return Peer{}, err
 	}
 	p.PublicKey = pub
 	p.AddedAt, _ = time.Parse(time.RFC3339Nano, added)
-	if seen.Valid {
-		t, _ := time.Parse(time.RFC3339Nano, seen.String)
-		p.LastSeenAt = &t
-	}
+	p.LastSeenAt, p.LastOutAt = parseTS(seen), parseTS(out)
 	return p, nil
+}
+
+// parseTS is a nullable stored timestamp, nil for NULL.
+func parseTS(s sql.NullString) *time.Time {
+	if !s.Valid {
+		return nil
+	}
+	t, _ := time.Parse(time.RFC3339Nano, s.String)
+	return &t
 }
 
 // Get returns the peer for domain, or ErrPeerNotFound.
@@ -174,8 +181,8 @@ func (ps *Peers) Block(ctx context.Context, domain string) error {
 	return ps.dropBots(ctx, domain)
 }
 
-// Remove deletes domain's row and its cached bots, or returns
-// ErrPeerNotFound.
+// Remove deletes domain's row, its overrides and its cached bots, or
+// returns ErrPeerNotFound.
 func (ps *Peers) Remove(ctx context.Context, domain string) error {
 	res, err := ps.db.ExecContext(ctx, `DELETE FROM federation_peers WHERE domain = ?`, domain)
 	if err != nil {
@@ -185,6 +192,9 @@ func (ps *Peers) Remove(ctx context.Context, domain string) error {
 		return err
 	} else if n == 0 {
 		return ErrPeerNotFound
+	}
+	if _, err := ps.db.ExecContext(ctx, `DELETE FROM federation_peer_limits WHERE domain = ?`, domain); err != nil {
+		return err
 	}
 	return ps.dropBots(ctx, domain)
 }
@@ -213,6 +223,13 @@ func (ps *Peers) RecordSeen(ctx context.Context, domain string, pub ed25519.Publ
 // Touch sets domain's last_seen_at to now.
 func (ps *Peers) Touch(ctx context.Context, domain string) error {
 	_, err := ps.db.ExecContext(ctx, `UPDATE federation_peers SET last_seen_at = ? WHERE domain = ?`,
+		storage.FormatTS(time.Now()), domain)
+	return err
+}
+
+// TouchOut sets domain's last_out_at to now.
+func (ps *Peers) TouchOut(ctx context.Context, domain string) error {
+	_, err := ps.db.ExecContext(ctx, `UPDATE federation_peers SET last_out_at = ? WHERE domain = ?`,
 		storage.FormatTS(time.Now()), domain)
 	return err
 }

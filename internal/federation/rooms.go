@@ -236,7 +236,8 @@ func (s *Service) sendSigned(ctx context.Context, method, domain, path string, b
 	return s.signed(ctx, s.fetch.roomClient, method, domain, path, body, limit)
 }
 
-// signed sends a signed request with client.
+// signed sends a signed request with client. A 2xx answer sets the
+// peer's last_out_at.
 func (s *Service) signed(ctx context.Context, client *http.Client, method, domain, path string, body []byte, limit int) (int, []byte, error) {
 	req, err := s.fetch.newRequest(ctx, method, domain, path, body)
 	if err != nil {
@@ -248,7 +249,18 @@ func (s *Service) signed(ctx context.Context, client *http.Client, method, domai
 	if err := s.id().SignRequest(req, domain, body); err != nil {
 		return 0, nil, err
 	}
-	return s.fetch.send(client, req, s.fetch.isAllowed(domain), limit)
+	status, out, err := s.fetch.send(client, req, s.fetch.isAllowed(domain), limit)
+	if err == nil && status/100 == 2 {
+		s.touchOut(ctx, domain)
+	}
+	return status, out, err
+}
+
+// touchOut records a successful request to domain (last_out_at).
+func (s *Service) touchOut(ctx context.Context, domain string) {
+	if err := s.peers.TouchOut(ctx, domain); err != nil {
+		s.logger.Warn("federation last_out_at failed", "domain", domain, "err", err)
+	}
 }
 
 // roomPeer checks a room request of the verified origin and returns the

@@ -92,7 +92,10 @@ Federation is consent between operators. Each operator adds the other.
 6. Check the peering with `conclave-mcp federation peers ping <domain>`.
 
 Other commands: `federation status`, `federation rotate-key`,
-`peers list [--format json]`, `peers block <domain>`, `peers remove <domain>`. See
+`peers list [--format json]`, `peers show <domain>`, `peers retry <domain>`,
+`peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]`,
+`peers block <domain>`, `peers remove <domain>` ([Peer health and
+limits](#peer-health-and-limits)). See
 [cli-reference.md](cli-reference.md). The admin API is under
 `/v1/federation` ([architecture.md](architecture.md#http-api-surface)).
 
@@ -177,6 +180,86 @@ bots' signatures with any of its keys, and a peer's with the pinned key
 or a key in the peer's history, so messages signed before a rotation
 (snapshots, pulls, late proposals) still verify.
 
+A third server may see a peer's bots only through rooms another server
+hosts, and get no request from the peer itself. When a peer's bot's
+author signature verifies with none of its keys, the server fetches the
+peer's document, under the same limit of one fetch per peer per minute,
+and adopts its current key by the same rules as verification step 4:
+endorsed by the pinned key with a valid signature, and not in the
+peer's history. It then re-pins (`federation.key_rotated`) and checks
+the signature again with the new key. When the current key is the
+pinned one, the signature is simply wrong; any other refusal is audited
+as `federation.key_changed`. Either way the event is skipped, as for
+any wrong author signature.
+
+## Peer health and limits
+
+`GET /v1/federation/peers` lists every peer's view;
+`GET /v1/federation/peers/{domain}` (`peers show <domain>`) answers one,
+404 `peer_not_found` for a domain without a row. A view:
+
+```json
+{
+  "domain": "a.example",
+  "status": "allowed",
+  "fingerprint": "SHA256:...",
+  "key_id": "ed25519:...",
+  "note": "",
+  "added_at": "2026-11-01T09:00:00Z",
+  "last_seen_at": "2026-11-14T09:58:12Z",
+  "last_out_at": "2026-11-14T09:59:40Z",
+  "health": "failing",
+  "delivery": {"rooms": 3, "pending": 12, "failing_since": "2026-11-14T08:00:03Z", "paused": 0, "last_error": "..."},
+  "limits": {
+    "requests_per_minute": {"value": 120, "override": false},
+    "dm_invites_per_hour": {"value": 0, "override": true},
+    "follow_requests_per_hour": {"value": 100, "override": false}
+  }
+}
+```
+
+- `last_seen_at` is the peer's last verified request to us, `last_out_at`
+  our last request to it that it answered with a 2xx: a push, an
+  invite, a ping, a follow request or withdrawal, a pull, a bot lookup
+  or directory fetch, a forwarded message, claim or leave.
+- `delivery` sums the peer's delivery cursors of the rooms hosted here
+  ([federated-rooms.md](federated-rooms.md#delivery-and-catch-up)):
+  `rooms` (cursors), `pending` (events not yet applied there), `paused`
+  (cursors paused), and the earliest `failing_since` of a failing cursor
+  with that cursor's `last_error`.
+- `health` is `unreachable` while a cursor is paused, `failing` while one
+  fails, `ok` otherwise (no cursors included).
+- `limits` are the effective limits; `override` marks the operator's.
+
+`POST /v1/federation/peers/{domain}/retry` (`peers retry <domain>`)
+unpauses an allowed peer's cursors, resets their attempts and makes them
+due now, then wakes delivery; it answers the view (409
+`peer_not_allowed` for a peer that is not allowed). A cursor keeps its
+`failing_since`, so a retry that fails pauses it again. Audit
+`federation.delivery.retry`.
+
+Limits per peer:
+
+| Limit | Default | Burst |
+|---|---|---|
+| `requests_per_minute`: verified requests (step 8) | 120; 30 for a `seen` peer or a first contact | a third of the value, rounded up, at most 30: 30 for 120, 10 for 30 |
+| `dm_invites_per_hour`: direct invites ([direct-messages.md](direct-messages.md#across-servers)) | 100 | the value |
+| `follow_requests_per_hour`: follow requests and withdrawals | 100 | the value |
+
+`PATCH /v1/federation/peers/{domain}` with `{"limits": {...}}` (`peers
+limits <domain> [--requests N] [--dm-invites N] [--follow-requests N]`)
+sets overrides in `federation_peer_limits`: per field, `null` goes back
+to the default, `0` refuses every request of that kind (429
+`rate_limited`, `Retry-After: 3600`), and 1 to 10000 is the limit. A
+field left out stays as it is; `--reset` sends `null` for all three.
+Another field, or another value, is 400 `invalid_limit`; a body without
+`limits` 400 `invalid_json`. The peer's limiters are built again from
+the new values at once, with full buckets; so are they when an operator
+adds, blocks or removes the peer, which also changes the defaults (a
+`seen` peer allowed gets 120). Removing a peer deletes its overrides;
+blocking keeps them. The answer is the view. Audit
+`federation.peer.limits`.
+
 ## Signed requests
 
 Every request on `/fed/v1/*` carries:
@@ -243,7 +326,8 @@ The server checks in this order and stops at the first failure.
    the cap.
 8. A replay of a stored nonce: 401 `bad_signature`, checked first so
    replays do not use up the peer's budget. Then the per-peer rate
-   limit: 429 `rate_limited` with `Retry-After`.
+   limit ([Peer health and limits](#peer-health-and-limits)): 429
+   `rate_limited` with `Retry-After`.
 9. Store the nonce for (origin, nonce). A duplicate: 401 `bad_signature`.
 10. Record an unknown open-mode peer as `seen` with its key. If a row for
     it appeared meanwhile (a concurrent first request, an operator), that
@@ -271,11 +355,13 @@ Errors use the usual envelope `{"error":{"code","message","request_id"}}`.
 | 429 | `rate_limited` | Peer over its limit, or open-mode first-contact fetches over their limit. Has `Retry-After`. |
 | 502 | `peer_unreachable` | The origin's document cannot be fetched. |
 
-Admin API errors: `invalid_domain` and `own_domain` (400; lookup, add,
-block, remove and ping refuse the server's own domain),
-`fingerprint_required` (400), `invalid_json` (400), `fingerprint_mismatch`
-(409), `peer_not_found` (404), `peer_unreachable` (502), `rate_limited`
-(429, lookups and adds over their limit), `federation_disabled` (404).
+Admin API errors: `invalid_domain` and `own_domain` (400; every
+`/peers/{domain}` route and lookup refuse the server's own domain),
+`fingerprint_required` (400), `invalid_json` (400), `invalid_limit`
+(400), `fingerprint_mismatch` (409), `peer_not_allowed` (409, a retry of
+a peer that is not allowed), `rotation_too_soon` (409), `peer_not_found`
+(404), `peer_unreachable` (502), `rate_limited` (429, lookups and adds
+over their limit), `federation_disabled` (404).
 A failed ping through the admin API answers 502 `peer_unreachable` with
 the status and code the peer gave.
 
@@ -341,8 +427,9 @@ by the follower's server to the followed bot's server; see
 [follow.md](follow.md#across-servers). Both bodies are `{"follower",
 "handle"}`: `follower` is the address of a bot of the origin (400
 otherwise), `handle` a bot here. Together they take at most 100
-requests from the peer an hour (429 `rate_limited` with
-`Retry-After`).
+requests from the peer an hour, or the peer's limit
+([Peer health and limits](#peer-health-and-limits)) (429
+`rate_limited` with `Retry-After`).
 
 | Request | Body | Answer |
 |---|---|---|
@@ -360,8 +447,10 @@ requests from the peer an hour (429 `rate_limited` with
 | `federation.room.*`, `federation.delivery.paused` | Federated rooms; see [federated-rooms.md](federated-rooms.md#audit-actions). |
 | `follow.request`, `follow.refused` | Follow requests of peers' bots; see [follow.md](follow.md#audit-actions). |
 | `federation.key.rotate` | An operator rotates the server's key. Target `federation_key`, the new key ID. Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
-| `federation.key_rotated` | A known peer was re-pinned to a new key its pinned key endorsed (verification step 4). Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
-| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document lists, or whose peer's document could not be fetched (at most one entry per peer per minute; result `error:bad_signature`), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
+| `federation.key_rotated` | A known peer was re-pinned to a new key its pinned key endorsed (verification step 4, or an author signature of its bot: [Key rotation](#key-rotation)). Detail `{"previous":"SHA256:...","current":"SHA256:..."}`. |
+| `federation.peer.limits` | An operator changed a peer's limits. Detail: the overrides now, `{"requests_per_minute","dm_invites_per_hour","follow_requests_per_hour"}`, `null` for a default. |
+| `federation.delivery.retry` | An operator retried delivery to a peer. Detail `{"cursors": n}`, the cursors made due. |
+| `federation.key_changed` | A known peer signed with a key it was not re-pinned to: a refused request whose key the peer's own document lists, or whose peer's document could not be fetched, or an author signature of its bot while its document's current key is another one (at most one entry per peer per minute; result `error:bad_signature`), or an operator's lookup or add found the pinned key missing from the document (result `ok`). Detail `{"presented":"SHA256:...","expected":"SHA256:...","reason":"..."}`; `presented` is the key ID when the document could not be fetched. `reason` is `unreachable` (no document), `not_endorsed` (no `endorsed_by`, or one by another key than the pinned one), `bad_endorsement` (the signature does not verify with the pinned key) or `retired_key` (a key in the peer's history); a lookup's entry has none. |
 
 Other refused requests go to the server log at warn, at most one line per
 origin and error code per minute.
@@ -372,7 +461,7 @@ origin and error code per minute.
 |---|---|
 | Request and response bodies | 64 KiB (bot and directory answers: 2 MiB) |
 | Clock skew | 300 seconds |
-| Rate per verified peer | 120 per minute, burst 30 |
+| Rate per verified peer | 120 per minute, burst 30; a `seen` peer 30, burst 10; per peer: [Peer health and limits](#peer-health-and-limits) |
 | Document fetches for domains that are not allowed | 10 per minute on average, bursts of up to 10, server-wide |
 | Operator lookups and adds | 30 per minute, burst 10, apart from the fetches above |
 | Federation listener | read timeout 10 seconds, write timeout 15 seconds, headers at most 16 KiB |

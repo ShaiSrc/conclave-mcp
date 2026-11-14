@@ -60,11 +60,9 @@ type Service struct {
 	// Rooms connects federated rooms to the local services.
 	Rooms RoomHooks
 
-	mu           sync.Mutex
-	limiters     map[string]*rate.Limiter // per verified peer
-	dmLimits     map[string]*rate.Limiter // direct invites, per peer
-	followLimits map[string]*rate.Limiter // follow requests, per peer
-	keyLimiters  map[int64]*rate.Limiter  // remote lookups, per key
+	mu          sync.Mutex
+	limiters    map[string]*peerLimiters // per verified peer (limitersOf)
+	keyLimiters map[int64]*rate.Limiter  // remote lookups, per key
 
 	warnLog, keyChecks minuteGate
 }
@@ -88,7 +86,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 		logger = slog.Default()
 	}
 	s := &Service{db: db, mode: opts.Mode, insecureHTTP: opts.InsecureHTTP, logger: logger,
-		peers: &Peers{db: db}, limiters: map[string]*rate.Limiter{}, keyLimiters: map[int64]*rate.Limiter{},
+		peers: &Peers{db: db}, limiters: map[string]*peerLimiters{}, keyLimiters: map[int64]*rate.Limiter{},
 		botStore: bots.NewStore(db), refresh: make(chan string, 16), deliver: make(chan struct{}, 1),
 		running: map[string]bool{}, rotation: map[string]string{}, slots: make(chan struct{}, maxPeerRuns),
 		now: time.Now, jitter: rand.Float64, budget: peerBudget,

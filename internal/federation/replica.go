@@ -20,7 +20,6 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/oklog/ulid/v2"
-	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/agent"
 	"github.com/hermes/conclave-mcp/internal/bots"
@@ -253,9 +252,13 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 			dmRefuse(http.StatusForbidden, "dm_refused", "policy", h+" does not take direct conversations from other servers")
 			return
 		}
-		now := s.now()
-		if lim := s.dmLimiter(origin); !lim.AllowN(now, 1) {
-			w.Header().Set("Retry-After", retryAfterAt(lim, now))
+		lims, err := s.limitersOf(ctx, origin)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if now := s.now(); !lims.dmInvites.AllowN(now, 1) {
+			w.Header().Set("Retry-After", retryAfterAt(lims.dmInvites, now))
 			dmRefuse(http.StatusTooManyRequests, "rate_limited", "limit", "too many new direct conversations, try again later")
 			return
 		}
@@ -426,33 +429,11 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 }
 
 // DMInvitesPerHour is how many direct invites a server takes from one
-// peer an hour.
+// peer an hour, unless the operator set another limit.
 const DMInvitesPerHour = 100
 
 // kindDirect is the kind of a direct conversation's room.
 const kindDirect = "direct"
-
-// dmLimiter returns origin's limiter of direct invites.
-func (s *Service) dmLimiter(origin string) *rate.Limiter {
-	return s.hourly(&s.dmLimits, origin, DMInvitesPerHour)
-}
-
-// hourly returns origin's limiter of n an hour in *m, which takes the
-// time from s.now. ponytail: one per peer, never evicted; peers are
-// bounded by the table.
-func (s *Service) hourly(m *map[string]*rate.Limiter, origin string, n int) *rate.Limiter {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if *m == nil {
-		*m = map[string]*rate.Limiter{}
-	}
-	lim := (*m)[origin]
-	if lim == nil {
-		lim = rate.NewLimiter(rate.Every(time.Hour/time.Duration(n)), n)
-		(*m)[origin] = lim
-	}
-	return lim
-}
 
 // nameReplica gives replica roomID the name its host sent. If activate
 // is set it also makes the replica active. An active replica whose name
@@ -859,7 +840,10 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 // roomID hosted by host. A message of one of the host's keys needs none:
 // the host's request signature covers it. Any other author's server
 // signed it: we check our own with any of our keys and a third server's
-// with its stored keys (peerSigned), if it is an allowed or seen peer.
+// with its stored keys (peerSigned), if it is an allowed or seen peer;
+// when none verifies, that server may have rotated its key, which it
+// then shows us no request to re-pin from, so its document is asked
+// (repinAuthor).
 // It reports whether the signature could not be checked (no key known
 // for the author's server, or that server blocked); a wrong one is
 // errRefused.
@@ -885,6 +869,13 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 		}
 		if ok, err = s.peerSigned(ctx, peer, m, p.OriginSig); err != nil {
 			return false, err
+		}
+		if !ok {
+			pub, err := s.repinAuthor(ctx, peer)
+			if err != nil {
+				return false, err
+			}
+			ok = pub != nil && VerifyMessage(pub, m, p.OriginSig)
 		}
 	}
 	if !ok {

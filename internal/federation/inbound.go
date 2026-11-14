@@ -20,10 +20,8 @@ import (
 )
 
 const (
-	maxSkew       = 300 * time.Second
-	peerPerMinute = 120
-	peerBurst     = 30
-	modeOpen      = "open"
+	maxSkew  = 300 * time.Second
+	modeOpen = "open"
 )
 
 type originKey struct{}
@@ -144,8 +142,13 @@ func (s *Service) Verify(next http.Handler) http.Handler {
 			s.refuse(w, r, origin, http.StatusUnauthorized, "bad_signature", "nonce already used")
 			return
 		}
-		if lim := s.limiter(origin); !lim.Allow() {
-			w.Header().Set("Retry-After", retryAfter(lim))
+		lims, err := s.limitersOf(ctx, origin)
+		if err != nil {
+			s.fail(w, r, err)
+			return
+		}
+		if !lims.requests.Allow() {
+			w.Header().Set("Retry-After", retryAfter(lims.requests))
 			s.refuse(w, r, origin, http.StatusTooManyRequests, "rate_limited", "rate limit exceeded")
 			return
 		}
@@ -251,41 +254,26 @@ func (s *Service) firstContactKey(ctx context.Context, origin, keyID string) (ed
 	return nil, errUnknownKey
 }
 
-// limiter returns origin's rate limiter. ponytail: one per verified
-// peer, never evicted; peers are bounded by the table and the fetch
-// budget.
-func (s *Service) limiter(origin string) *rate.Limiter {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	lim := s.limiters[origin]
-	if lim == nil {
-		lim = rate.NewLimiter(rate.Limit(peerPerMinute/60.0), peerBurst)
-		s.limiters[origin] = lim
-	}
-	return lim
-}
-
 // retryAfter is the Retry-After value for lim: the wait for its next
 // token, at least a second.
 func retryAfter(lim *rate.Limiter) string { return retryAfterAt(lim, time.Now()) }
 
-// retryAfterAt is retryAfter at time now.
+// retryAfterAt is retryAfter at time now, at most an hour: a limit of
+// 0 has no next token.
 func retryAfterAt(lim *rate.Limiter, now time.Time) string {
 	rsv := lim.ReserveN(now, 1)
 	delay := rsv.DelayFrom(now)
 	rsv.CancelAt(now)
-	return strconv.Itoa(int(max(delay, time.Second).Seconds()))
+	return strconv.Itoa(int(min(max(delay, time.Second), time.Hour).Seconds()))
 }
 
 // repin runs when a request of a known peer names a key other than its
 // pinned one, and returns the key to verify the request with, or nil to
 // refuse it. Anyone can send such a request, so the peer's document is
 // fetched at most once per peer a minute. The presented key is pinned
-// when the document lists it endorsed by the pinned key with a valid
-// signature, and the peer never had it before; the pinned key goes to
-// the peer's history (federation.key_rotated). Otherwise the change is
-// audited (federation.key_changed) when the document cannot be fetched
-// or lists the presented key; one that does not list it is no evidence.
+// when the document lists it and adopt takes it. The change is audited
+// (federation.key_changed) too when the document cannot be fetched; one
+// that does not list the presented key is no evidence.
 func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed25519.PublicKey, error) {
 	if len(peer.PublicKey) != ed25519.PublicKeySize || !s.keyChecks.allow(peer.Domain) {
 		return nil, nil
@@ -299,7 +287,30 @@ func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed255
 	if i < 0 {
 		return nil, nil
 	}
-	k := doc.Keys[i]
+	return s.adopt(ctx, peer, doc.Keys[i])
+}
+
+// repinAuthor runs when the author signature of a bot of peer, a third
+// server we may see only through rooms hosted elsewhere, verifies with
+// none of its keys: the peer may have rotated without a request to us.
+// Under the same gate as repin, it adopts the current key of the peer's
+// document and returns it, or nil when there is none to adopt.
+func (s *Service) repinAuthor(ctx context.Context, peer Peer) (ed25519.PublicKey, error) {
+	if !s.keyChecks.allow(peer.Domain) {
+		return nil, nil
+	}
+	doc, err := s.fetch.Document(ctx, peer.Domain)
+	if err != nil || doc.Keys[0].KeyID == KeyIDFor(peer.PublicKey) {
+		return nil, nil // unreachable, or no rotation: the signature is wrong
+	}
+	return s.adopt(ctx, peer, doc.Keys[0]) // newest first
+}
+
+// adopt pins k, a key of peer's document, when it is endorsed by the
+// pinned key with a valid signature and the peer never had it before;
+// the pinned key goes to the peer's history (federation.key_rotated).
+// Otherwise it audits why not (federation.key_changed) and returns nil.
+func (s *Service) adopt(ctx context.Context, peer Peer, k DocKey) (ed25519.PublicKey, error) {
 	pub, _ := b64.DecodeString(k.PublicKey) // checked by the Fetcher
 	pinned := KeyIDFor(peer.PublicKey)
 	var sig []byte
@@ -315,9 +326,9 @@ func (s *Service) repin(ctx context.Context, peer Peer, presented string) (ed255
 	case k.EndorsedBy == nil || k.EndorsedBy.KeyID != pinned:
 		reason = "not_endorsed"
 	case len(sig) != ed25519.SignatureSize ||
-		!ed25519.Verify(peer.PublicKey, EndorsementString(peer.Domain, pinned, presented, b64.EncodeToString(pub)), sig):
+		!ed25519.Verify(peer.PublicKey, EndorsementString(peer.Domain, pinned, k.KeyID, b64.EncodeToString(pub)), sig):
 		reason = "bad_endorsement"
-	case slices.ContainsFunc(history, func(h ed25519.PublicKey) bool { return KeyIDFor(h) == presented }):
+	case slices.ContainsFunc(history, func(h ed25519.PublicKey) bool { return KeyIDFor(h) == k.KeyID }):
 		reason = "retired_key"
 	}
 	if reason != "" {

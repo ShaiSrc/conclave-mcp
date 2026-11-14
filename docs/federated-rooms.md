@@ -260,7 +260,10 @@ key. A wrong or missing signature skips the event (audited as
 `federation.room.event_refused`). When the replica has no key for the
 author's server, because it is not a peer, it stores the message as
 `unverified`: the host may have written it. Peer with that server to
-get its bots' messages verified.
+get its bots' messages verified. A third server's stored keys are its
+pinned key and its key history; when none verifies, the replica asks
+that server's document whether it rotated, and follows an endorsed
+rotation ([federation.md](federation.md#key-rotation)).
 
 Messages of the host's own keys need no author signature: the host's
 request signature covers them.
@@ -276,11 +279,12 @@ them in order, skips the ones it has, and answers the last seq it
 applied. The host stores that as the cursor.
 
 - Member servers are served at once, at most 8 at a time, each in a
-  run of its own: its rooms one after the other, in an order shuffled
-  for each run, within 60 seconds per pass. What is left after that
-  waits for the next pass; the shuffle lets no room wait behind the
-  others for ever. A new pass skips a member server whose run is still
-  going, so a slow server delays only itself.
+  run of its own: its rooms one after the other in room ID order,
+  starting after the last room the previous run attempted and wrapping
+  around, within 60 seconds per pass. What is left after that waits for
+  the next pass; the rotation reaches every room that stays due within
+  as many passes as there are rooms. A new pass skips a member server
+  whose run is still going, so a slow server delays only itself.
 - A push has a 30-second deadline. A failure backs off with jitter:
   after the n-th failure in a row, the wait is between half and all of
   2^(n−1) seconds, at most an hour.
@@ -290,7 +294,13 @@ applied. The host stores that as the cursor.
   `federation.delivery.paused` and shown as `unreachable`. The next
   contact with that server (a verified request from it, a push it
   takes, or an invite it accepts) resumes all its paused cursors. No
-  operator step is needed.
+  operator step is needed; an operator who knows the server is back
+  can retry at once (`federation peers retry <domain>`, which makes its
+  cursors due now).
+- The peer's view (`federation peers show <domain>`) sums its cursors:
+  rooms, events pending, paused cursors, the earliest failure and its
+  error, and its health (`ok`, `failing`, `unreachable`); see
+  [federation.md](federation.md#peer-health-and-limits).
 - A push answered after its member server was blocked or removed
   changes nothing: the cursor stays paused.
 
@@ -389,7 +399,7 @@ and still shows the room's new messages.
 | Retry | 1 second, doubling, at most 1 hour, with jitter. Paused after 7 days. |
 | Catch-up | At start and every 5 minutes. |
 | Member servers or hosts served at once | 8 by delivery and 8 by catch-up, each within 60 seconds per pass. |
-| Requests per peer | The federation rate limit, 120 per minute, burst 30. |
+| Requests per peer | The federation rate limit: 120 per minute, burst 30, unless the operator set another for the peer ([federation.md](federation.md#peer-health-and-limits)). A member server limited below the pushes of a pass gets 429 for the rest, which back off like any failure. |
 | Stand-ins | 2000 per address domain on a server. A new one beyond that is refused: 409 `limit` for an invite, a skipped event on a replica. |
 | Replicas | 200 per host on a member server, archived ones included. |
 

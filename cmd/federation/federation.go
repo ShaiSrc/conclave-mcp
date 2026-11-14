@@ -3,11 +3,14 @@
 //	conclave-mcp federation status
 //	conclave-mcp federation rotate-key
 //	conclave-mcp federation peers list [--format json|table]
+//	conclave-mcp federation peers show <domain>
 //	conclave-mcp federation peers add <domain> [--fingerprint F] [--note N]
-//	conclave-mcp federation peers block|remove|ping <domain>
+//	conclave-mcp federation peers block|remove|ping|retry <domain>
+//	conclave-mcp federation peers limits <domain> [--requests N] [--dm-invites N] [--follow-requests N] [--reset]
 package federation
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,7 +29,7 @@ import (
 func NewCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "federation", Short: "Manage federation peers", Args: cobra.NoArgs}
 	peers := &cobra.Command{Use: "peers", Short: "Manage federation peers", Args: cobra.NoArgs}
-	peers.AddCommand(newListCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd())
+	peers.AddCommand(newListCmd(), newShowCmd(), newAddCmd(), newBlockCmd(), newRemoveCmd(), newPingCmd(), newRetryCmd(), newLimitsCmd())
 	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers)
 	return cmd
 }
@@ -35,9 +38,113 @@ type peerView struct {
 	Domain      string `json:"domain"`
 	Status      string `json:"status"`
 	Fingerprint string `json:"fingerprint"`
+	KeyID       string `json:"key_id"`
 	Note        string `json:"note"`
 	AddedAt     string `json:"added_at"`
 	LastSeenAt  string `json:"last_seen_at"`
+	LastOutAt   string `json:"last_out_at"`
+	Health      string `json:"health"`
+	Delivery    struct {
+		Rooms        int    `json:"rooms"`
+		Pending      int64  `json:"pending"`
+		FailingSince string `json:"failing_since"`
+		Paused       int    `json:"paused"`
+		LastError    string `json:"last_error"`
+	} `json:"delivery"`
+	Limits map[string]struct {
+		Value    int  `json:"value"`
+		Override bool `json:"override"`
+	} `json:"limits"`
+}
+
+// limitNames are the limits of a peer, in the order shown.
+var limitNames = []string{"requests_per_minute", "dm_invites_per_hour", "follow_requests_per_hour"}
+
+// printPeer prints p, a peer's view, one field a line.
+func printPeer(out io.Writer, p peerView) {
+	_, _ = fmt.Fprintf(out, "domain:         %s\nstatus:         %s\nkey id:         %s\nfingerprint:    %s\nnote:           %s\n"+
+		"added:          %s\nlast seen:      %s\nlast out:       %s\nhealth:         %s\n"+
+		"delivery:       %d rooms, %d events pending, %d paused\nfailing since:  %s\nlast error:     %s\nlimits:\n",
+		p.Domain, p.Status, p.KeyID, p.Fingerprint, p.Note, p.AddedAt, cmp.Or(p.LastSeenAt, "never"), cmp.Or(p.LastOutAt, "never"), p.Health,
+		p.Delivery.Rooms, p.Delivery.Pending, p.Delivery.Paused, cmp.Or(p.Delivery.FailingSince, "-"), cmp.Or(p.Delivery.LastError, "-"))
+	for _, name := range limitNames {
+		l := p.Limits[name]
+		override := ""
+		if l.Override {
+			override = " (override)"
+		}
+		_, _ = fmt.Fprintf(out, "  %-24s  %d%s\n", name, l.Value, override)
+	}
+}
+
+// peerCmd is a command on one peer that sends method to path and
+// prints the peer's view it answers, after head when set.
+func peerCmd(use, short, method, suffix, head string) *cobra.Command {
+	return &cobra.Command{
+		Use: use + " <domain>", Short: short, Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var p peerView
+				if _, err := c.Do(ctx, client.Request{Method: method, Path: peerPath(args[0], suffix), Out: &p}); err != nil {
+					return err
+				}
+				if head != "" {
+					_, _ = fmt.Fprintf(out, head+"\n", args[0])
+				}
+				printPeer(out, p)
+				return nil
+			})
+		},
+	}
+}
+
+func newShowCmd() *cobra.Command {
+	return peerCmd("show", "Show a peer: health, delivery and limits", "GET", "", "")
+}
+
+func newRetryCmd() *cobra.Command {
+	return peerCmd("retry", "Unpause delivery to a peer and make it due now", "POST", "/retry", "delivery to %s is due now")
+}
+
+func newLimitsCmd() *cobra.Command {
+	var vals [3]int // in limitNames order
+	var reset bool
+	flags := [3]string{"requests", "dm-invites", "follow-requests"}
+	cmd := &cobra.Command{
+		Use: "limits <domain>", Short: "Set a peer's limits (0 refuses); --reset goes back to the defaults", Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			limits := map[string]any{}
+			for i, f := range flags {
+				if cmd.Flags().Changed(f) {
+					limits[limitNames[i]] = vals[i]
+				}
+			}
+			switch {
+			case reset && len(limits) > 0:
+				return errors.New("--reset takes no other limit")
+			case reset:
+				for _, name := range limitNames {
+					limits[name] = nil
+				}
+			case len(limits) == 0:
+				return errors.New("give --requests, --dm-invites, --follow-requests or --reset")
+			}
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var p peerView
+				if _, err := c.Do(ctx, client.Request{Method: "PATCH", Path: peerPath(args[0], ""),
+					Body: map[string]any{"limits": limits}, Out: &p}); err != nil {
+					return err
+				}
+				printPeer(out, p)
+				return nil
+			})
+		},
+	}
+	for i, usage := range []string{"requests a minute", "direct invites an hour", "follow requests an hour"} {
+		cmd.Flags().IntVar(&vals[i], flags[i], 0, usage)
+	}
+	cmd.Flags().BoolVar(&reset, "reset", false, "go back to the defaults for all three")
+	return cmd
 }
 
 // openClient is a seam for tests.
@@ -167,9 +274,9 @@ func newListCmd() *cobra.Command {
 					return printJSON(out, resp.Peers)
 				case "table", "":
 					tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
-					_, _ = fmt.Fprintln(tw, "DOMAIN	STATUS	FINGERPRINT	NOTE	LAST_SEEN")
+					_, _ = fmt.Fprintln(tw, "DOMAIN	STATUS	HEALTH	FINGERPRINT	NOTE	LAST_SEEN	LAST_OUT")
 					for _, p := range resp.Peers {
-						_, _ = fmt.Fprintf(tw, "%s	%s	%s	%s	%s\n", p.Domain, p.Status, p.Fingerprint, p.Note, p.LastSeenAt)
+						_, _ = fmt.Fprintf(tw, "%s	%s	%s	%s	%s	%s	%s\n", p.Domain, p.Status, p.Health, p.Fingerprint, p.Note, p.LastSeenAt, p.LastOutAt)
 					}
 					return tw.Flush()
 				default:

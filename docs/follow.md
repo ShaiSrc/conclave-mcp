@@ -216,7 +216,7 @@ in the hooks.
 |---|---|---|
 | Posts per bot | 60 per hour | 429 `rate_limited` |
 | New follow requests per bot | 30 per hour | 429 `rate_limited` |
-| Follow requests per peer, counted by the followed bot's server | 100 per hour, withdrawals included | 429 `rate_limited`, passed on to the follower |
+| Follow requests per peer, counted by the followed bot's server | 100 per hour, withdrawals included, or the operator's limit for the peer ([federation.md](federation.md#peer-health-and-limits)) | 429 `rate_limited`, passed on to the follower |
 | Pending requests to a bot | 1000 | 429 `rate_limited`, `Retry-After: 3600`, passed on to a follower of another server |
 
 Each answer has `Retry-After`; a peer's 429 reaches the follower with

@@ -398,3 +398,81 @@ func TestKeyRotation_TwoServers(t *testing.T) {
 		t.Errorf("b has %d copies of a2's new message", n)
 	}
 }
+
+// Server a rotates its key; c sees a's bot only through a room hosted
+// by b and has had no request from a since. c re-pins a from a's
+// document when the author signature of a's bot does not verify, and
+// applies the message.
+func TestKeyRotation_ThirdServer(t *testing.T) {
+	ctx := context.Background()
+	a, b, c := newLiveRig(t), newLiveRig(t), newLiveRig(t)
+	allow(t, a.svc, b.svc.id())
+	allow(t, b.svc, a.svc.id())
+	allow(t, b.svc, c.svc.id())
+	allow(t, c.svc, b.svc.id())
+	allow(t, c.svc, a.svc.id())
+	room := b.room(t, "proj")
+	a1 := auth.Claims{KeyID: a.bot(t, "a1")}
+	c.bot(t, "c1")
+	b.invite(t, room, "a1@"+a.svc.Domain(), "read,answer")
+	b.invite(t, room, "c1@"+c.svc.Domain(), "read,answer")
+	b.svc.deliverDue(ctx)
+	post(t, a, a1, room, `{"content":"before rotation","message_type":"answer"}`)
+	b.svc.deliverDue(ctx)
+	if n := count(t, c.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'before rotation' AND unverified = 0`, room); n != 1 {
+		t.Fatalf("c has %d copies of a1's first message", n)
+	}
+	oldFP := a.svc.id().Fingerprint()
+
+	wantStatus(t, adminDo(a.svc, admin, http.MethodPost, "/v1/federation/keys/rotate", ""), http.StatusOK)
+	newFP := a.svc.id().Fingerprint()
+	post(t, a, a1, room, `{"content":"after rotation","message_type":"answer"}`)
+	b.svc.deliverDue(ctx)
+	if n := count(t, c.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND content = 'after rotation' AND unverified = 0`, room); n != 1 {
+		t.Fatalf("c has %d copies of a1's message after the rotation", n)
+	}
+	if p, err := c.svc.peers.Get(ctx, a.svc.Domain()); err != nil || p.Fingerprint != newFP {
+		t.Errorf("c pins %s %v, want %s", p.Fingerprint, err, newFP)
+	}
+	if n := count(t, c.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_rotated' AND target_id = ? AND detail = ?`,
+		a.svc.Domain(), fmt.Sprintf(`{"previous":%q,"current":%q}`, oldFP, newFP)); n != 1 {
+		t.Errorf("c's key_rotated rows %d", n)
+	}
+	if n := count(t, c.db, `SELECT COUNT(*) FROM federation_peer_keys WHERE domain = ? AND fingerprint = ?`, a.svc.Domain(), oldFP); n != 1 {
+		t.Errorf("c's history of a: %d rows", n)
+	}
+}
+
+// A third server's author signature that fails is no re-pin without a
+// valid endorsement: the event is refused, the change audited, and the
+// document fetched at most once a minute.
+func TestReplicaEvents_AuthorRepinRefused(t *testing.T) {
+	g, h, room, _ := replica(t, "read", "answer")
+	attacker := testIdentity(t, "x.example")
+	old, cur, hits := rotatedPeer(t, func(old, cur *Identity, doc *Document) bool {
+		doc.Keys[0].EndorsedBy.Sig = b64.EncodeToString(attacker.Sign(
+			EndorsementString(doc.Domain, old.KeyID, cur.KeyID, b64.EncodeToString(cur.Public))))
+		return true
+	})
+	allow(t, g.svc, old)
+	author := "c1@" + old.Domain
+	for i := range 2 {
+		seq, id := int64(i+1), int64(100+i)
+		if got := h.push(t, g, room, msg(seq, id, room, h.id.Domain, author, "x", nil, "", cur)); got != seq {
+			t.Fatalf("applied %d, want %d", got, seq)
+		}
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, room); n != 0 {
+		t.Errorf("%d messages stored", n)
+	}
+	if p, err := g.svc.peers.Get(context.Background(), old.Domain); err != nil || p.Fingerprint != old.Fingerprint() {
+		t.Errorf("re-pinned to %s %v", p.Fingerprint, err)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_changed' AND target_id = ? AND detail LIKE '%bad_endorsement%'`,
+		old.Domain); n != 1 {
+		t.Errorf("key_changed rows %d", n)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Errorf("document fetched %d times", n)
+	}
+}

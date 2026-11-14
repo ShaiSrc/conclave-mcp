@@ -3,8 +3,10 @@ package federation
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 
 	"github.com/hermes/conclave-mcp/internal/audit"
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/storage"
 )
 
 // Operator lookups (and adds, which look up) have their own budget,
@@ -33,9 +36,12 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Get("/peers", s.handleListPeers)
 		r.Get("/lookup", s.handleLookup)
 		r.Post("/peers", s.handleAddPeer)
+		r.Get("/peers/{domain}", s.handleGetPeer)
+		r.Patch("/peers/{domain}", s.handlePatchPeer)
 		r.Post("/peers/{domain}/block", s.handleBlockPeer)
 		r.Delete("/peers/{domain}", s.handleRemovePeer)
 		r.Post("/peers/{domain}/ping", s.handlePingPeer)
+		r.Post("/peers/{domain}/retry", s.handleRetryPeer)
 	})
 	r.With(adminOnly).Get("/rooms/{id}/delivery", s.handleRoomDelivery)
 }
@@ -105,26 +111,128 @@ func adminOnly(next http.Handler) http.Handler {
 }
 
 type peerView struct {
-	Domain      string  `json:"domain"`
-	Status      string  `json:"status"`
-	Fingerprint string  `json:"fingerprint"`
-	KeyID       string  `json:"key_id"`
-	Note        string  `json:"note"`
-	AddedAt     string  `json:"added_at"`
-	LastSeenAt  *string `json:"last_seen_at"`
+	Domain      string   `json:"domain"`
+	Status      string   `json:"status"`
+	Fingerprint string   `json:"fingerprint"`
+	KeyID       string   `json:"key_id"`
+	Note        string   `json:"note"`
+	AddedAt     string   `json:"added_at"`
+	LastSeenAt  *string  `json:"last_seen_at"`
+	LastOutAt   *string  `json:"last_out_at"`
+	Health      string   `json:"health"` // ok, failing or unreachable
+	Delivery    delivery `json:"delivery"`
+	Limits      limits   `json:"limits"`
 }
 
-func viewOf(p Peer) peerView {
+// delivery sums a peer's delivery cursors: the rooms, the events they
+// have yet to deliver, how many are paused, and the earliest
+// failing_since with that cursor's last error.
+type delivery struct {
+	Rooms        int     `json:"rooms"`
+	Pending      int64   `json:"pending"`
+	FailingSince *string `json:"failing_since"`
+	Paused       int     `json:"paused"`
+	LastError    string  `json:"last_error"`
+}
+
+// health is unreachable when a cursor is paused, failing when one
+// fails, ok otherwise.
+func (d delivery) health() string {
+	switch {
+	case d.Paused > 0:
+		return "unreachable"
+	case d.FailingSince != nil:
+		return "failing"
+	}
+	return "ok"
+}
+
+// rfc3339 formats a nullable time for a view.
+func rfc3339(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
+}
+
+func viewOf(p Peer, d delivery, o overrides) peerView {
 	v := peerView{Domain: p.Domain, Status: p.Status, Fingerprint: p.Fingerprint, Note: p.Note,
-		AddedAt: p.AddedAt.UTC().Format(time.RFC3339)}
+		AddedAt: p.AddedAt.UTC().Format(time.RFC3339), LastSeenAt: rfc3339(p.LastSeenAt), LastOutAt: rfc3339(p.LastOutAt),
+		Health: d.health(), Delivery: d, Limits: o.effective(p.Status)}
 	if len(p.PublicKey) == ed25519.PublicKeySize {
 		v.KeyID = KeyIDFor(p.PublicKey)
 	}
-	if p.LastSeenAt != nil {
-		t := p.LastSeenAt.UTC().Format(time.RFC3339)
-		v.LastSeenAt = &t
-	}
 	return v
+}
+
+// views returns the views of ps; domain is their one domain, or "" for
+// all peers.
+func (s *Service) views(ctx context.Context, domain string, ps ...Peer) ([]peerView, error) {
+	ds, err := s.deliveryOf(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	os, err := s.overridesOf(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]peerView, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, viewOf(p, ds[p.Domain], os[p.Domain]))
+	}
+	return out, nil
+}
+
+// deliveryOf sums the delivery cursors of domain, or of every peer for
+// "", by peer.
+func (s *Service) deliveryOf(ctx context.Context, domain string) (map[string]delivery, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT peer, failing_since, paused, last_error,
+		MAX(COALESCE((SELECT MAX(e.seq) FROM fed_events e WHERE e.room_id = d.room_id), 0) - acked_seq, 0)
+		FROM fed_delivery d WHERE ? IN ('', peer)`, domain)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]delivery{}
+	for rows.Next() {
+		var peer, lastErr string
+		var failing sql.NullString
+		var paused bool
+		var pending int64
+		if err := rows.Scan(&peer, &failing, &paused, &lastErr, &pending); err != nil {
+			return nil, err
+		}
+		d := out[peer]
+		d.Rooms++
+		d.Pending += pending
+		if paused {
+			d.Paused++
+		}
+		if t := rfc3339(parseTS(failing)); t != nil && (d.FailingSince == nil || *t < *d.FailingSince) {
+			d.FailingSince, d.LastError = t, lastErr
+		}
+		out[peer] = d
+	}
+	return out, rows.Err()
+}
+
+// writePeer answers domain's view with status, or 404 peer_not_found.
+func (s *Service) writePeer(w http.ResponseWriter, r *http.Request, domain string, status int) {
+	p, err := s.peers.Get(r.Context(), domain)
+	if errors.Is(err, ErrPeerNotFound) {
+		writeErr(w, r, http.StatusNotFound, "peer_not_found", "no such peer")
+		return
+	}
+	var vs []peerView
+	if err == nil {
+		vs, err = s.views(r.Context(), domain, p)
+	}
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	writeJSON(w, status, vs[0])
 }
 
 // audit writes an entry about the peer domain. The actor is the
@@ -187,15 +295,54 @@ func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {
 	peers, err := s.peers.List(r.Context())
+	var out []peerView
+	if err == nil {
+		out, err = s.views(r.Context(), "", peers...)
+	}
 	if err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	out := make([]peerView, 0, len(peers))
-	for _, p := range peers {
-		out = append(out, viewOf(p))
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"peers": out})
+}
+
+func (s *Service) handleGetPeer(w http.ResponseWriter, r *http.Request) {
+	if domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain")); ok {
+		s.writePeer(w, r, domain, http.StatusOK)
+	}
+}
+
+// handleRetryPeer unpauses an allowed peer's delivery cursors and makes
+// them due now (409 for a peer that is not allowed), and answers its
+// view.
+func (s *Service) handleRetryPeer(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	domain, ok := s.peerDomain(w, r, chi.URLParam(r, "domain"))
+	if !ok {
+		return
+	}
+	p, err := s.peers.Get(ctx, domain)
+	switch {
+	case errors.Is(err, ErrPeerNotFound):
+		writeErr(w, r, http.StatusNotFound, "peer_not_found", "no such peer")
+		return
+	case err != nil:
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	case p.Status != statusAllowed:
+		writeErr(w, r, http.StatusConflict, "peer_not_allowed", "delivery goes to allowed peers only")
+		return
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE fed_delivery SET paused = 0, attempts = 0, next_try_at = ? WHERE peer = ?`+peerAllowed,
+		storage.FormatTS(s.now()), domain)
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	n, _ := res.RowsAffected()
+	s.DeliverSoon()
+	s.audit(ctx, "federation.delivery.retry", domain, "ok", fmt.Sprintf(`{"cursors":%d}`, n))
+	s.writePeer(w, r, domain, http.StatusOK)
 }
 
 // peerDomain returns the canonical form of raw, or answers 400 for an
@@ -273,15 +420,11 @@ func (s *Service) handleAddPeer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	s.dropLimiters(domain)
 	detail, _ := json.Marshal(map[string]string{"fingerprint": in.Fingerprint})
 	s.audit(r.Context(), "federation.peer.add", domain, "ok", string(detail))
 	s.refreshSoon(domain)
-	p, err := s.peers.Get(r.Context(), domain)
-	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusCreated, viewOf(p))
+	s.writePeer(w, r, domain, http.StatusCreated)
 }
 
 func (s *Service) handleBlockPeer(w http.ResponseWriter, r *http.Request) {
@@ -293,17 +436,13 @@ func (s *Service) handleBlockPeer(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
+	s.dropLimiters(domain)
 	if err := s.dropPeer(r.Context(), domain); err != nil {
 		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	s.audit(r.Context(), "federation.peer.block", domain, "ok", "")
-	p, err := s.peers.Get(r.Context(), domain)
-	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, viewOf(p))
+	s.writePeer(w, r, domain, http.StatusOK)
 }
 
 func (s *Service) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
@@ -313,6 +452,7 @@ func (s *Service) handleRemovePeer(w http.ResponseWriter, r *http.Request) {
 	}
 	err := s.peers.Remove(r.Context(), domain)
 	if err == nil {
+		s.dropLimiters(domain)
 		err = s.dropPeer(r.Context(), domain)
 	}
 	switch {

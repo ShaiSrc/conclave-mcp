@@ -193,7 +193,11 @@ func TestFollowRemote_IncomingLimit(t *testing.T) {
 	g.followBot(t, "b1", "approve")
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	g.svc.now = func() time.Time { return now }
-	g.svc.limiters[h.id.Domain] = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
+	lims, err := g.svc.limitersOf(context.Background(), h.id.Domain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lims.requests = rate.NewLimiter(rate.Inf, 0) // the per-peer request limit is not under test
 	for i := range 100 {
 		if rec := h.follow(t, g, h.addr(fmt.Sprintf("x%d", i)), "b1"); rec.Code != http.StatusCreated {
 			t.Fatalf("follow %d: %d %s", i, rec.Code, rec.Body)
@@ -1051,8 +1055,6 @@ func TestFollowRemote_WithdrawReceiver(t *testing.T) {
 	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE status = 'accepted'`); n != 1 || count(t, g.db, `SELECT COUNT(*) FROM follows`) != 1 {
 		t.Errorf("follows left: %d accepted", n)
 	}
-	g.svc.mu.Lock()
-	g.svc.followLimits[h.id.Domain] = rate.NewLimiter(0, 0)
-	g.svc.mu.Unlock()
+	wantStatus(t, adminDo(g.svc, admin, http.MethodPatch, "/v1/federation/peers/"+h.id.Domain, `{"limits":{"follow_requests_per_hour":0}}`), http.StatusOK)
 	wantErr(t, withdraw(h.addr("z")), http.StatusTooManyRequests, "rate_limited")
 }

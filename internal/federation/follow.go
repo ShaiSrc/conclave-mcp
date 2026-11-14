@@ -19,7 +19,7 @@ import (
 // (handleRoomInvite), which makes the follow accepted here.
 
 // FollowRequestsPerHour is how many follow requests a server takes from
-// one peer an hour.
+// one peer an hour, unless the operator set another limit.
 const FollowRequestsPerHour = 100
 
 // kindFeed is the kind the federation invite and the API give a feed,
@@ -88,9 +88,13 @@ func (s *Service) followRequest(w http.ResponseWriter, r *http.Request) (followe
 		writeErr(w, r, http.StatusBadRequest, "bad_request", "follower must be the address of a bot of the signing server")
 		return "", "", false
 	}
-	now := s.now()
-	if lim := s.hourly(&s.followLimits, origin, FollowRequestsPerHour); !lim.AllowN(now, 1) {
-		w.Header().Set("Retry-After", retryAfterAt(lim, now))
+	lims, err := s.limitersOf(ctx, origin)
+	if err != nil {
+		s.fail(w, r, err)
+		return "", "", false
+	}
+	if now := s.now(); !lims.followRequests.AllowN(now, 1) {
+		w.Header().Set("Retry-After", retryAfterAt(lims.followRequests, now))
 		detail, _ := json.Marshal(map[string]string{"from": in.Follower, "to": in.Handle[:min(len(in.Handle), 300)], "reason": "limit"})
 		s.auditRoom(ctx, "follow.refused", origin, "", "error:rate_limited", string(detail))
 		writeErr(w, r, http.StatusTooManyRequests, "rate_limited", "too many follow requests, try again later")
