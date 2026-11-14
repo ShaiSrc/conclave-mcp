@@ -89,9 +89,20 @@ var errBadPath = errors.New("paths must be relative to the repository root, with
 
 var errControlPath = errors.New("paths must not contain control characters (newline, tab, escape, ...)")
 
+// MaxPathBytes is the longest claim path. It bounds what a claim of a
+// bot of another server, and a host's claims answer, put in an agent's
+// session start.
+const MaxPathBytes = 1024
+
+var errLongPath = fmt.Errorf("paths must be at most %d bytes", MaxPathBytes)
+
 // Normalize returns the stored form of a claim path: '/'-separated,
-// cleaned and relative, with a trailing '/' for directories.
+// cleaned and relative, with a trailing '/' for directories, at most
+// MaxPathBytes long.
 func Normalize(p string) (string, error) {
+	if len(p) > MaxPathBytes {
+		return "", errLongPath
+	}
 	if strings.ContainsFunc(p, unicode.IsControl) { // before TrimSpace, which would drop a trailing "\n"
 		return "", errControlPath
 	}

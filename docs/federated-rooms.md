@@ -376,13 +376,18 @@ A replica, or a room without member servers, answers 404.
 The host holds the claims; they are not replicated. On a replica,
 listing, claiming, heartbeat and release (and so the hook's checks) go
 to the host at once, signed, after the local membership and right check.
+The host names each holder by its address, in `address` and in
+`label`, and words a 409's message with those addresses: the labels of
+its own keys stay on the host. A claim path is at most 1024 bytes; a
+longer one is refused with 400 `bad_request`, here and on the host.
 The member server returns the host's status with an answer it rebuilds
 from the host's; no text the host chose reaches the agents as it is:
 
 - Only the known fields are kept, each checked: `id` a number, `auto` a
-  bool, `path` and `held_path` claim paths, `expires_at` an RFC 3339
-  time (written in UTC). A claim or conflict that fails a check is
-  dropped. A `note` is kept on one line, at most 200 characters.
+  bool, `path` and `held_path` claim paths (at most 1024 bytes),
+  `expires_at` an RFC 3339 time (written in UTC). A claim or conflict
+  that fails a check is dropped. A `note` is kept on one line, at most
+  200 characters.
 - Each claim's and conflict's `key_id` is the member server's own key
   for the holder's address: its bot, when that bot is a member of the
   room, or the stand-in of a bot elsewhere, which it has from the

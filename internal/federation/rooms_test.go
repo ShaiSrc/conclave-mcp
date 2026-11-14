@@ -698,11 +698,19 @@ func TestRoomClaims_FromMember(t *testing.T) {
 		t.Fatalf("local claim: %d %s", rec.Code, rec.Body)
 	}
 	base := "/fed/v1/rooms/" + room + "/claims"
+	if rec := g.fedDo(m.req(t, http.MethodGet, base+"?author="+m.addr("c1"), nil)); rec.Code != http.StatusOK ||
+		strings.Contains(rec.Body.String(), "local-bot") {
+		t.Errorf("list: %d %s, want no local label", rec.Code, rec.Body)
+	}
 	as := "?author=" + m.addr("c1")
 	before := g.state(t)
 	rec := g.fedDo(m.req(t, http.MethodPost, base+as, map[string]any{"paths": []string{"a/b.go"}}))
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"label":"local-bot"`) {
-		t.Errorf("overlap: %d %s, want 409 naming local-bot", rec.Code, rec.Body)
+	// The holder is named by its address only: its label stays here.
+	holder := fmt.Sprintf("key-%d@%s", bot.KeyID, g.svc.Domain())
+	if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "local-bot") ||
+		!strings.Contains(rec.Body.String(), `"label":"`+holder+`"`) ||
+		!strings.Contains(rec.Body.String(), `"message":"a/b.go is claimed by `+holder+` (claim a/, until `) {
+		t.Errorf("overlap: %d %s, want 409 naming %s only", rec.Code, rec.Body, holder)
 	}
 	wantErr(t, g.fedDo(m.req(t, http.MethodPost, base+"?author="+m.addr("c2"), map[string]any{"paths": []string{"x/"}})), 403, "missing_right")
 	wantErr(t, g.fedDo(m.req(t, http.MethodPost, base+"?author=c1@c.example", map[string]any{"paths": []string{"x/"}})), 403, "wrong_origin")

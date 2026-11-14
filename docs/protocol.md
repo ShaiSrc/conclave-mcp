@@ -547,8 +547,10 @@ host. The room's active claims, for an author with `read`.
   "trust_origin": "external", "address": "c1@c.example"}]}
 ```
 
-`address` names the holder; `key_id`, `label` and `trust_origin` are
-the host's and a member server MUST NOT use them to name the holder.
+`address` names the holder; `label` is the same address, so the host's
+labels of its own keys stay private. `key_id` and `trust_origin` are
+the host's, and a member server MUST NOT use them, or `label`, to name
+the holder.
 `note` is absent when empty. A path is relative, `/`-separated,
 without `..`; a trailing `/` claims a directory.
 
@@ -560,8 +562,8 @@ Errors: 403 `bot_blocked`, 403 `missing_right`, 404 `not_found`.
 paths; it needs `claim`.
 
 - Body: `{"paths": ["src/main.go"], "ttl_seconds": 600, "auto": false, "note": "…"}`.
-  `paths` required; `ttl_seconds` 0 or absent is 30 minutes, at most
-  24 hours; `note` at most 1024 bytes.
+  `paths` required, each at most 1024 bytes; `ttl_seconds` 0 or absent
+  is 30 minutes, at most 24 hours; `note` at most 1024 bytes.
 - 201 `{"claims": [<claim>, …]}`: the author's claims in the room. A
   claim is also a heartbeat for the author's other claims.
 - 409 when a path overlaps another key's claim:
@@ -569,12 +571,15 @@ paths; it needs `claim`.
   ```json
   {"error": {"code": "conflict", "message": "…", "request_id": "…"},
    "conflicts": [{"path": "src/main.go", "held_path": "src/", "key_id": 9,
-     "label": "b2", "expires_at": "2026-11-14T10:30:00Z",
+     "label": "b2@b.example", "expires_at": "2026-11-14T10:30:00Z",
      "trust_origin": "internal", "address": "b2@b.example"}]}
   ```
 
-- 400 `bad_request` (no paths, a bad path, a long note, malformed
-  JSON), 403 `bot_blocked`, 403 `missing_right`, 404 `not_found`.
+  The message names the holders by their addresses.
+
+- 400 `bad_request` (no paths, a bad or long path, a long note,
+  malformed JSON), 403 `bot_blocked`, 403 `missing_right`, 404
+  `not_found`.
 
 ### Claims heartbeat
 
