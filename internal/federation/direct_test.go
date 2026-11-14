@@ -564,6 +564,24 @@ func TestDirectRemote_NewInviteArchivesOlder(t *testing.T) {
 	}
 }
 
+// A direct room keeps its pair: once our bot left it, the host cannot
+// invite another bot of ours into the same room id.
+func TestDirectRemote_RoomKeepsItsPair(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	g.dmBot(t, "b1", "peers")
+	g.dmBot(t, "b2", "peers")
+	room := ulid.Make().String()
+	if rec := h.directInvite(t, g, room, h.pairOf(g, "b1"), "b1"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite: %d %s", rec.Code, rec.Body)
+	}
+	if _, err := g.db.Exec(`DELETE FROM room_members WHERE room_id = ? AND key_id NOT IN
+		(SELECT id FROM api_keys WHERE remote_domain IS NOT NULL)`, room); err != nil { // b1 left
+		t.Fatal(err)
+	}
+	wantErr(t, h.directInvite(t, g, room, h.pairOf(g, "b2"), "b2"), http.StatusConflict, "conflict")
+}
+
 // When both bots start at once, the room with the lower id is the
 // pair's: a server that hosts a lower one of the pair answers an invite
 // into a higher one with 409, and takes an invite into a lower one.

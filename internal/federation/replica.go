@@ -236,9 +236,9 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
-	var home sql.NullString
+	var home, pair sql.NullString
 	var kind string
-	switch err := tx.QueryRowContext(ctx, `SELECT home_domain, kind FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind); {
+	switch err := tx.QueryRowContext(ctx, `SELECT home_domain, kind, pair FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind, &pair); {
 	case errors.Is(err, sql.ErrNoRows):
 		var n int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM rooms WHERE home_domain = ?`, origin).Scan(&n); err != nil {
@@ -258,12 +258,12 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			now := storage.FormatTS(time.Now())
-			var pair any // a direct replica keeps the pair's name, checked above
+			var newPair any // a direct replica keeps the pair's name, checked above
 			if direct {
-				pair = in.Name
+				newPair = in.Name
 			}
 			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind, pair)
-				VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, in.Kind, pair)
+				VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, in.Kind, newPair)
 		}
 		if err != nil {
 			s.fail(w, r, err)
@@ -272,7 +272,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.fail(w, r, err)
 		return
-	case home.String != origin || kind != in.Kind:
+	case home.String != origin || kind != in.Kind || direct && pair.String != in.Name: // a direct room keeps its pair
 		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
 		return
 	}
