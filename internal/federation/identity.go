@@ -185,6 +185,9 @@ func Fingerprint(pub ed25519.PublicKey) string {
 	return "SHA256:" + base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+// keyIDLen is the length of a key ID.
+const keyIDLen = len("ed25519:") + 16
+
 // KeyIDFor returns "ed25519:" and the first 16 characters of the
 // fingerprint after "SHA256:".
 func KeyIDFor(pub ed25519.PublicKey) string {

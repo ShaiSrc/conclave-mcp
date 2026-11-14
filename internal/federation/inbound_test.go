@@ -611,3 +611,28 @@ func TestRun_StopsWithContext(t *testing.T) {
 		t.Fatal("Run did not stop")
 	}
 }
+
+// Steps 4 and 5 run before the key is looked for, which may fetch a
+// document: requests to another server or outside the time window, from
+// an unknown origin or with a key other than a seen peer's pinned one,
+// fetch nothing and spend no fetch budget.
+func TestVerify_DestinationAndTimeBeforeFetch(t *testing.T) {
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	stranger := newRemote(t)
+	old, cur, hits := rotatedPeer(t, nil)
+	if _, err := svc.peers.RecordSeen(context.Background(), old.Domain, old.Public); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []*Identity{stranger.id, cur} {
+		for range fetchesPerMinute + 1 {
+			wantErr(t, serve(svc, signed(t, id, "c.example", "{}")), http.StatusMisdirectedRequest, "wrong_destination")
+			wantErr(t, serve(svc, signedAt(id, time.Now().Unix()-301)), http.StatusUnauthorized, "clock_skew")
+		}
+	}
+	if n, m := stranger.hits.Load(), hits.Load(); n != 0 || m != 0 {
+		t.Errorf("documents fetched: %d, %d", n, m)
+	}
+	wantOK(t, serve(svc, signed(t, stranger.id, local, "{}")))
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+}

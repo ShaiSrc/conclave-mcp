@@ -3,18 +3,22 @@ package federation
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/oklog/ulid/v2"
+	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
@@ -673,5 +677,153 @@ func TestRotate_ReturnsStoredIdentity(t *testing.T) {
 	}
 	if !reflect.DeepEqual(next, loaded) {
 		t.Errorf("rotated identity differs from the stored one:\n%+v\n%+v", next, loaded)
+	}
+}
+
+// fillDocCache fills svc's document cache with fresh failures of other
+// domains, up to its cap.
+func fillDocCache(svc *Service) {
+	done := make(chan struct{})
+	close(done)
+	svc.docs.docs = map[string]*cachedDoc{}
+	for i := range maxGateKeys {
+		svc.docs.docs[fmt.Sprintf("s%d.example", i)] = &cachedDoc{at: time.Now(), done: done, err: errors.New("down")}
+	}
+}
+
+// Re-pinning a known peer has a fetch budget of its own: strangers that
+// use up the first-contact budget do not stop a seen peer's rotation. A
+// fetch refused for its budget is no failure of the peer's: answered
+// 429, not audited and not kept, so the next request fetches.
+func TestVerify_RepinBudget(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	old, cur, hits := rotatedPeer(t, nil)
+	if _, err := svc.peers.RecordSeen(ctx, old.Domain, old.Public); err != nil {
+		t.Fatal(err)
+	}
+	for svc.fetch.limit.Allow() {
+	}
+	for svc.fetch.peerLimit.Allow() {
+	}
+	rec := serve(svc, signed(t, cur, local, "{}"))
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("no Retry-After")
+	}
+	if n := hits.Load(); n != 0 {
+		t.Errorf("document fetched %d times", n)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_changed'`); n != 0 {
+		t.Errorf("key_changed rows %d", n)
+	}
+	svc.fetch.peerLimit = rate.NewLimiter(rate.Inf, 1) // the re-pin budget is back, the strangers' is not
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+	if p, err := svc.peers.Get(ctx, old.Domain); err != nil || p.Fingerprint != cur.Fingerprint() {
+		t.Errorf("pinned %s %v, want %s", p.Fingerprint, err, cur.Fingerprint())
+	}
+}
+
+// A full document cache refuses no allowed peer's re-pin; a seen peer's
+// request is answered 429, as for the budget.
+func TestVerify_RepinCacheFull(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	old, cur, _ := rotatedPeer(t, nil)
+	allow(t, svc, old)
+	seenOld, seenCur, _ := rotatedPeer(t, nil)
+	if _, err := svc.peers.RecordSeen(ctx, seenOld.Domain, seenOld.Public); err != nil {
+		t.Fatal(err)
+	}
+	fillDocCache(svc)
+	wantOK(t, serve(svc, signed(t, cur, local, "{}")))
+	wantErr(t, serve(svc, signed(t, seenCur, local, "{}")), http.StatusTooManyRequests, "rate_limited")
+}
+
+// Junk requests in the names of many seen peers, with a key none of them
+// has, cost at most the re-pin budget in fetches and key_changed rows,
+// keep the document cache small, and `presented` is cut to the length
+// of a key ID.
+func TestVerify_RepinJunkBounded(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, modeOpen)
+	allowLoopback(svc)
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	keyID := "ed25519:" + strings.Repeat("A", 400)
+	for i := range 3 * peerFetchesPerMinute {
+		d := fmt.Sprintf("127.0.0.1:%d", i+1) // nothing listens: unreachable
+		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		if _, err := svc.peers.RecordSeen(ctx, d, pub); err != nil {
+			t.Fatal(err)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/fed/v1/ping", strings.NewReader("{}"))
+		req.Host = local
+		req.Header.Set("Authorization", formatSigHeader(SigParams{Origin: d, KeyID: keyID, TS: time.Now().Unix(),
+			Nonce: newNonce(), Sig: ed25519.Sign(priv, []byte("junk"))}))
+		if rec := serve(svc, req); rec.Code != http.StatusUnauthorized && rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("junk request: %d %s", rec.Code, rec.Body)
+		}
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.key_changed'`); n == 0 || n > peerFetchesPerMinute {
+		t.Errorf("key_changed rows %d, want 1 to %d", n, peerFetchesPerMinute)
+	}
+	if n := len(svc.docs.docs); n > peerFetchesPerMinute {
+		t.Errorf("%d documents cached", n)
+	}
+	var detail string
+	if err := svc.db.QueryRow(`SELECT detail FROM audit WHERE action = 'federation.key_changed' LIMIT 1`).Scan(&detail); err != nil {
+		t.Fatal(err)
+	}
+	var d struct{ Presented string }
+	if err := json.Unmarshal([]byte(detail), &d); err != nil || d.Presented != keyID[:24] {
+		t.Errorf("presented %q, want the first 24 bytes, a key ID's length", d.Presented)
+	}
+}
+
+// An author signature that verifies with none of a seen peer's keys is
+// wrong, not kept unverified, when the peer's document cannot be fetched
+// for the budget or the full cache: that is no evidence of a rotation.
+// Strangers using up the first-contact budget do not stop the fetch.
+func TestReplicaEvents_AuthorRepinNoEvidence(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name    string
+		prepare func(*Service)
+		fetches int32
+	}{
+		{"strangers' budget used up", func(s *Service) {
+			for s.fetch.limit.Allow() {
+			}
+		}, 1},
+		{"re-pin budget used up", func(s *Service) {
+			for s.fetch.peerLimit.Allow() {
+			}
+		}, 0},
+		{"cache full", fillDocCache, 0},
+	} {
+		g, h, room, _ := replica(t, "read")
+		allowLoopback(g.svc)
+		x := newRemote(t)
+		if _, err := g.svc.peers.RecordSeen(ctx, x.domain(), x.id.Public); err != nil {
+			t.Fatal(err)
+		}
+		tc.prepare(g.svc)
+		forger := testIdentity(t, x.domain())
+		if got := h.push(t, g, room, msg(1, 100, room, h.id.Domain, "c1@"+x.domain(), "forged", nil, "", forger)); got != 1 {
+			t.Fatalf("%s: applied %d", tc.name, got)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ?`, room); n != 0 {
+			t.Errorf("%s: %d messages stored", tc.name, n)
+		}
+		if n := x.hits.Load(); n != tc.fetches {
+			t.Errorf("%s: document fetched %d times, want %d", tc.name, n, tc.fetches)
+		}
+		// The refused fetch is asked once: it does not use up the host's
+		// re-pin budget.
+		if lims, err := g.svc.limitersOf(ctx, h.id.Domain); err != nil || lims.repins.Tokens() < repinsPerMinute-1.5 {
+			t.Errorf("%s: the host's re-pin budget has %v left", tc.name, lims.repins.Tokens())
+		}
 	}
 }
