@@ -122,7 +122,8 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
 		// No ReadTimeout or WriteTimeout: they would cut SSE streams and
-		// long MCP calls. Bodies are capped and read within 30s instead
+		// long MCP calls. A body must arrive within 30s, before
+		// authentication (BodyDeadline), bodies are capped
 		// (BodyLimitMiddleware), and the SSE handler sets a deadline on
 		// each write.
 		// No ErrorLog: rare net/http errors fall through to log.Default.
@@ -194,6 +195,7 @@ type DBHealthChecker interface {
 
 func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Service) (chi.Router, error) {
 	r := chi.NewRouter()
+	r.Use(BodyDeadline) // first: it needs the server's own ResponseWriter
 	r.Use(RequestIDMiddleware())
 	r.Use(RecoveryMiddleware(s.logger))
 

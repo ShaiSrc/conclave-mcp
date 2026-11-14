@@ -76,6 +76,39 @@ func RecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 // bodyReadTimeout bounds the read of a request body; a var for tests.
 var bodyReadTimeout = 30 * time.Second
 
+// BodyDeadline gives a request that sends a body bodyReadTimeout to send
+// it, before authentication: a client that stalls its body, signed in or
+// not, cannot hold the connection while the server waits to drain it.
+// Reading the body to its end clears the deadline, so a long handler is
+// not cut off; a request without a body (an event stream) gets none.
+// It must wrap the server's own ResponseWriter, so it goes first.
+func BodyDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != 0 {
+			rc := http.NewResponseController(w)
+			if rc.SetReadDeadline(time.Now().Add(bodyReadTimeout)) == nil {
+				r.Body = &clearOnEOF{ReadCloser: r.Body, rc: rc}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clearOnEOF clears the connection's read deadline once the body is read
+// to its end.
+type clearOnEOF struct {
+	io.ReadCloser
+	rc *http.ResponseController
+}
+
+func (b *clearOnEOF) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		_ = b.rc.SetReadDeadline(time.Time{})
+	}
+	return n, err
+}
+
 // BodyLimitMiddleware caps request bodies at limit bytes: a bigger one
 // answers 413 payload_too_large before any handler reads it. A body is
 // read here, at most limit bytes and within bodyReadTimeout (400

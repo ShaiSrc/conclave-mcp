@@ -1064,6 +1064,27 @@ func TestServer_BodyReadDeadline(t *testing.T) {
 		}
 	}
 
+	// A stalled body is cut off before authentication too: without a
+	// valid key, and on a GET the body limit refuses. The server closes
+	// the connection instead of waiting for the rest of the body.
+	for _, head := range []string{
+		"POST /v1/rooms HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\n{\"name\":",
+		"POST /v1/mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer cnc_wrong\r\nContent-Length: 20\r\n\r\n{",
+		"GET /v1/rooms/" + room.ID + "/events HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + token + "\r\nContent-Length: 20\r\n\r\nx",
+	} {
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(conn, head)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.Copy(io.Discard, conn) // the answer, then EOF once the server closes
+		conn.Close()
+		if err != nil {
+			t.Errorf("%.40q: the server kept the connection of a stalled body: %v", head, err)
+		}
+	}
+
 	resp = do(http.MethodGet, "/v1/rooms/"+room.ID+"/events?wait=30", nil)
 	defer resp.Body.Close()
 	br := bufio.NewReader(resp.Body)
