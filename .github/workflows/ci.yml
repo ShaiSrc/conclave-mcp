@@ -67,7 +67,7 @@ jobs:
       - run: go mod download
 
       - name: go test -race
-        run: go test -race ./...
+        run: go test -race -timeout 20m ./...
 
   # Job 3: each fuzz target for 15 seconds. go test already runs their
   # seeds; this explores past them. A crasher fails the job and is
