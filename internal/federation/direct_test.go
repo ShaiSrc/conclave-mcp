@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -63,9 +64,10 @@ func dmRoom(t *testing.T, rec *httptest.ResponseRecorder) string {
 }
 
 type conversation struct {
-	RoomID  string `json:"room_id"`
-	Address string `json:"address"`
-	Unread  int    `json:"unread"`
+	RoomID     string `json:"room_id"`
+	Address    string `json:"address"`
+	Unread     int    `json:"unread"`
+	LastReadAt string `json:"last_read_at"`
 }
 
 func (g *roomRig) dmList(t *testing.T, c auth.Claims) []conversation {
@@ -464,6 +466,38 @@ func TestDirectRemote_FailureKeepsUsedConversation(t *testing.T) {
 	}
 	if got := b.dmList(t, b1); len(got) != 1 || got[0].Unread != 1 {
 		t.Errorf("b1's list: %+v", got)
+	}
+}
+
+// A message that reaches a replica after its bot read the conversation,
+// though the host wrote it before that read, is stamped on arrival: it
+// counts as unread, and a page since the last read returns it.
+func TestDirectRemote_LateMessageUnread(t *testing.T) {
+	a, b := dmPair(t)
+	ctx := context.Background()
+	a1 := a.dmBot(t, "a1", "")
+	b1 := b.dmBot(t, "b1", "peers")
+	room := dmRoom(t, a.dm(a1, "b1@"+b.svc.Domain(), "first"))
+	a.svc.deliverDue(ctx)
+	dmRoom(t, a.dm(a1, "b1@"+b.svc.Domain(), "late")) // written on the host, not delivered yet
+	if rec := b.do(b1, http.MethodGet, "/rooms/"+room+"/messages", ""); rec.Code != http.StatusOK {
+		t.Fatalf("read: %d %s", rec.Code, rec.Body)
+	}
+	if got := b.dmList(t, b1); len(got) != 1 || got[0].Unread != 0 {
+		t.Fatalf("after the read: %+v", got)
+	}
+	a.svc.deliverDue(ctx)
+	got := b.dmList(t, b1)
+	if len(got) != 1 || got[0].Unread != 1 || got[0].LastReadAt == "" {
+		t.Fatalf("after the late message: %+v", got)
+	}
+	rec := b.do(b1, http.MethodGet, "/rooms/"+room+"/messages?since="+url.QueryEscape(got[0].LastReadAt), "")
+	var page struct{ Messages []struct{ Content string } }
+	if json.Unmarshal(rec.Body.Bytes(), &page) != nil || len(page.Messages) != 1 || page.Messages[0].Content != "late" {
+		t.Fatalf("page since the last read: %d %s", rec.Code, rec.Body)
+	}
+	if got := b.dmList(t, b1); got[0].Unread != 0 {
+		t.Errorf("after reading the late message: %+v", got)
 	}
 }
 
