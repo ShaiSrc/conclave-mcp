@@ -30,8 +30,8 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   drops this server's old keys: their private keys are erased, they
   leave the server document and stop verifying our bots' signatures
   (`federation.key.forget`). For use after a key leak, following a
-  rotation. `erased` in the answer and the audit row is false when a
-  reader blocked the checkpoint; run it again then.
+  rotation. `erased` in the answer and the audit row is false when the
+  checkpoint did not complete; run it again then.
 - `docs/upgrading.md`, the upgrade guide from 0.4 on, with the
   compatibility promise from 1.0; `docs/security.md`, the trust
   boundaries and the accepted limits; `SECURITY.md`, how to report a

@@ -334,7 +334,7 @@ func newForgetOldKeysCmd() *cobra.Command {
 				}
 				_, _ = fmt.Fprintf(out, "%d old keys forgotten; the current key is %s\n", resp.Dropped, resp.KeyID)
 				if !resp.Erased {
-					_, _ = fmt.Fprintln(out, "their pages are not erased yet: a reader blocked the checkpoint; run forget-old-keys again")
+					_, _ = fmt.Fprintln(out, "their pages are not erased yet: the checkpoint did not complete (a reader may hold it); run forget-old-keys again")
 				}
 				return nil
 			})

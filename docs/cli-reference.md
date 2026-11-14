@@ -682,7 +682,7 @@ Needs the admin key. With federation off, the server answers
 - `forget-old-keys` deletes every key of this server but the current
   one, private keys included, and prints
   `<n> old keys forgotten; the current key is <key ID>`, plus a line
-  asking to run it again when a reader blocked the checkpoint. The document
+  asking to run it again when the checkpoint did not complete. The document
   lists only the current key, and our bots' messages signed with an old
   key no longer verify here. After a key leak, rotate first, then
   forget. See [federation.md](federation.md#key-rotation).

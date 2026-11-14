@@ -250,7 +250,7 @@ func TestForgetOldKeys(t *testing.T) {
 	}
 	out, _, err = runCmd(t, 200, `{"key_id":"ed25519:n","fingerprint":"SHA256:n","dropped":2,"erased":false}`, "forget-old-keys")
 	if want := "2 old keys forgotten; the current key is ed25519:n\n" +
-		"their pages are not erased yet: a reader blocked the checkpoint; run forget-old-keys again\n"; err != nil || out != want {
+		"their pages are not erased yet: the checkpoint did not complete (a reader may hold it); run forget-old-keys again\n"; err != nil || out != want {
 		t.Errorf("not erased: err=%v out=%q", err, out)
 	}
 	if _, req, err := runCmd(t, 200, `{}`, "forget-old-keys", "x"); err == nil || req != "" {
