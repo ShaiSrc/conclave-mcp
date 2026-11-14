@@ -30,8 +30,9 @@ is reserved: creating a room whose name starts with it is refused with
 400, and so is a room invite from a peer with such a name. When a room
 that is not the pair's conversation holds the name anyway (one made
 before the prefix was reserved, or a replica a host renamed), the
-conversation is made as `<name>#<room id>`: a conversation is found by
-its members, not its name.
+conversation is made as `<name>#<room id>` (cut to fit 128 bytes): a
+conversation is found by its pair, a column that keeps `dm:<a>~<b>`
+whatever name the room got, not by its name.
 
 `GET /v1/rooms` lists these rooms like others, with `"kind": "direct"`
 and `last_message_at`; `?kind=direct` (or `room`) filters, and an admin

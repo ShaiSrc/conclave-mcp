@@ -8,6 +8,10 @@
 -- the order in which GET /v1/rooms/{id}/messages pages.
 
 ALTER TABLE rooms ADD COLUMN kind TEXT NOT NULL DEFAULT 'room' CHECK (kind IN ('room','direct'));
+-- pair is a direct room's dm:<a>~<b> of its two bots, whatever name the
+-- room got and whoever left it: conversations of a pair are found by it.
+ALTER TABLE rooms ADD COLUMN pair TEXT;
+CREATE INDEX rooms_pair ON rooms(pair) WHERE pair IS NOT NULL;
 ALTER TABLE bot_profiles ADD COLUMN dm_policy TEXT NOT NULL DEFAULT 'local' CHECK (dm_policy IN ('none','local','peers'));
 
 CREATE TABLE direct_reads (

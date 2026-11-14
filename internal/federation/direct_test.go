@@ -550,7 +550,11 @@ func TestDirectRemote_NewInviteArchivesOlder(t *testing.T) {
 	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND archived_at IS NULL`, newer); n != 1 {
 		t.Error("the newer replica is not active")
 	}
-	// Archiving the newer one does not let the older come back.
+	// b1 leaving the newer one (membership gone, replica archived) does
+	// not let the older come back.
+	if _, err := g.db.Exec(`DELETE FROM room_members WHERE room_id = ?`, newer); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := g.db.Exec(`UPDATE rooms SET archived_at = '2026-11-14T00:00:00Z' WHERE id = ?`, newer); err != nil {
 		t.Fatal(err)
 	}
@@ -568,9 +572,10 @@ func TestDirectRemote_LowerRoomWins(t *testing.T) {
 	h := newFakeHost(t, g)
 	b1 := g.dmBot(t, "b1", "peers")
 	lower, mine, higher := ulid.Make().String(), ulid.Make().String(), ulid.Make().String()
-	// g's own start toward the host's bot, its invite not answered yet.
-	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind)
-		VALUES (?, ?, ?, '2026-11-14T00:00:00Z', 'private', 'direct')`, mine, h.pairOf(g, "b1"), b1.KeyID); err != nil {
+	// g's own start toward the host's bot, its invite not answered yet;
+	// another room held the pair's name, so its name is cut and suffixed.
+	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind, pair)
+		VALUES (?, ?, ?, '2026-11-14T00:00:00Z', 'private', 'direct', ?)`, mine, "dm:cut#"+mine, b1.KeyID, h.pairOf(g, "b1")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := g.db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights)
@@ -659,6 +664,15 @@ func TestDirect_SquattedNames(t *testing.T) {
 	}
 	if n := count(t, a.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct'`); n != 2 {
 		t.Errorf("a has %d conversations, want 2", n)
+	}
+	// Each keeps its pair, whatever name it got: that is how it is found.
+	if n := count(t, a.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND pair IN (?, ?)`,
+		dmName("a1@"+a.svc.Domain(), "a2@"+a.svc.Domain()), dmName("a1@"+a.svc.Domain(), "b1@"+b.svc.Domain())); n != 2 {
+		t.Errorf("%d conversations keep their pair, want 2", n)
+	}
+	if n := count(t, b.db, `SELECT COUNT(*) FROM rooms WHERE kind = 'direct' AND pair = ?`,
+		dmName("a1@"+a.svc.Domain(), "b1@"+b.svc.Domain())); n != 1 {
+		t.Errorf("b's replica does not keep its pair (%d)", n)
 	}
 }
 

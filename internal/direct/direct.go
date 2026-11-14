@@ -251,7 +251,7 @@ func (s *Service) startRemote(w http.ResponseWriter, r *http.Request, caller int
 		writeErr(w, r, http.StatusBadRequest, "bad_request", err.Error())
 		return
 	}
-	find := func() (string, error) { return s.findRemote(ctx, caller, toAddr, domain, roomName) }
+	find := func() (string, error) { return s.findRemote(ctx, caller, domain, roomName) }
 	roomID, err := find()
 	pending := false
 	if err == nil && roomID != "" {
@@ -472,7 +472,7 @@ func (s *Service) post(w http.ResponseWriter, r *http.Request, caller int64, roo
 // whether it made it: when the two started it meanwhile, find's room is
 // returned. A room that is not theirs holding the name does not stop
 // them: theirs gets the name with its id as a suffix, since a
-// conversation is found by its members.
+// conversation is found by its pair, which is name.
 func (s *Service) create(ctx context.Context, name string, find func() (string, error), members ...int64) (string, bool, error) {
 	id, now := ulid.Make().String(), storage.FormatTS(time.Now())
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -480,9 +480,9 @@ func (s *Service) create(ctx context.Context, name string, find func() (string, 
 		return "", false, err
 	}
 	defer tx.Rollback()
-	insert := func(name string) error {
-		_, err := tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind) VALUES (?, ?, ?, ?, 'private', 'direct')`,
-			id, name, members[0], now)
+	insert := func(n string) error {
+		_, err := tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind, pair)
+			VALUES (?, ?, ?, ?, 'private', 'direct', ?)`, id, n, members[0], now, name)
 		return err
 	}
 	err = insert(name)
@@ -505,9 +505,7 @@ func (s *Service) create(ctx context.Context, name string, find func() (string, 
 }
 
 // suffixed is name with the room id as a suffix, cut to fit a room
-// name. ponytail: a cut name is found by its members only, so a pending
-// remote one with it is not invited into again; the next start makes a
-// new one.
+// name; the room keeps name as its pair.
 func suffixed(name, id string) string {
 	return name[:min(len(name), 128-1-len(id))] + "#" + id
 }
@@ -527,18 +525,15 @@ func (s *Service) find(ctx context.Context, a, b int64) (string, error) {
 	return id, err
 }
 
-// findRemote returns the active direct room of bot me with the bot at
-// address on server host, or "": one hosted here, or the replica of one
-// host started. Either has the bot's stand-in as a member; a room hosted
-// here whose invite had no clear answer has none yet and is found by its
-// name, with or without the suffix create gives it.
-func (s *Service) findRemote(ctx context.Context, me int64, address, host, name string) (string, error) {
+// findRemote returns the active direct room of bot me and pair, the
+// pair's name, with a bot on server host, or "": one hosted here
+// (pending or not), or the replica of one host started; the lowest id
+// when both bots started one at once.
+func (s *Service) findRemote(ctx context.Context, me int64, host, pair string) (string, error) {
 	var id string
 	err := s.DB.QueryRowContext(ctx, `SELECT r.id FROM rooms r JOIN room_members me ON me.room_id = r.id AND me.key_id = ?
-		WHERE r.kind = 'direct' AND r.archived_at IS NULL AND (r.home_domain IS NULL OR r.home_domain = ?)
-		  AND (r.name = ?3 OR r.name = ?3 || '#' || r.id OR EXISTS (SELECT 1 FROM room_members o JOIN api_keys k ON k.id = o.key_id
-		       WHERE o.room_id = r.id AND k.label = ? AND k.remote_domain = ?))
-		ORDER BY r.id LIMIT 1`, me, host, name, address, host).Scan(&id)
+		WHERE r.kind = 'direct' AND r.pair = ? AND r.archived_at IS NULL AND (r.home_domain IS NULL OR r.home_domain = ?)
+		ORDER BY r.id LIMIT 1`, me, pair, host).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

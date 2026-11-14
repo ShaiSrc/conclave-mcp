@@ -258,8 +258,12 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			now := storage.FormatTS(time.Now())
-			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind)
-				VALUES (?, ?, ?, ?, 'private', ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, in.Kind)
+			var pair any // a direct replica keeps the pair's name, checked above
+			if direct {
+				pair = in.Name
+			}
+			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind, pair)
+				VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, in.Kind, pair)
 		}
 		if err != nil {
 			s.fail(w, r, err)
@@ -312,12 +316,13 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 // the origin, before the replica is named: it held the name. A replica
 // with another member, of ours or of the origin, is a 409: a host
 // cannot put a second bot of ours into a conversation. So is a replica
-// that a newer one of the pair replaced, archived or not: a late retry
+// that a newer one of the pair replaced, archived or left: a late retry
 // of its invite neither brings it back nor archives the newer one. And
-// so is an invite while we host a room of the pair, name, with a lower
-// id: when both bots start at once, the lower room is the pair's on
-// both servers, since each refuses the other's higher one. On an error
-// it answers and returns false.
+// so is an invite while we host a room of the pair with a lower id:
+// when both bots start at once, the lower room is the pair's on both
+// servers, since each refuses the other's higher one. Rooms of the pair
+// are those whose pair is name, the pair's name. On an error it answers
+// and returns false.
 func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, name, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
 	ctx := r.Context()
@@ -331,19 +336,15 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM room_members WHERE room_id = ? AND key_id NOT IN (?, ?))`,
 			roomID, keyID, key).Scan(&taken)
 	}
-	if err == nil { // a late retry of an older invite: the newer replica stays, archived or not
-		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.kind = 'direct' AND o.home_domain = ?
-			AND o.id != ? AND o.created_at > (SELECT created_at FROM rooms WHERE id = ?)
-			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?)
-			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?))`,
-			origin, roomID, roomID, keyID, key).Scan(&superseded)
+	if err == nil { // a late retry of an older invite: the newer replica stays, archived or left
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.pair = ? AND o.home_domain = ?
+			AND o.id != ? AND o.created_at > (SELECT created_at FROM rooms WHERE id = ?))`,
+			name, origin, roomID, roomID).Scan(&superseded)
 	}
 	var lower bool
 	if err == nil { // both bots started at once: the room with the lower id is the pair's
-		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o JOIN room_members me ON me.room_id = o.id AND me.key_id = ?
-			WHERE o.kind = 'direct' AND o.home_domain IS NULL AND o.archived_at IS NULL AND o.id < ?
-			AND (o.name = ?3 OR o.name = ?3 || '#' || o.id OR EXISTS (SELECT 1 FROM room_members WHERE room_id = o.id AND key_id = ?)))`,
-			keyID, roomID, name, key).Scan(&lower)
+		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.pair = ? AND o.home_domain IS NULL
+			AND o.archived_at IS NULL AND o.id < ?)`, name, roomID).Scan(&lower)
 	}
 	switch {
 	case taken:
@@ -361,11 +362,8 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 			ON CONFLICT(room_id, key_id) DO NOTHING`, roomID, key, storage.FormatTS(time.Now()), fedrooms.DirectRights.Storage())
 	}
 	if err == nil {
-		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = ? WHERE kind = 'direct' AND home_domain = ? AND id != ?
-			AND archived_at IS NULL
-			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id AND key_id = ?)
-			AND EXISTS (SELECT 1 FROM room_members WHERE room_id = rooms.id AND key_id = ?)`,
-			storage.FormatTS(time.Now()), origin, roomID, keyID, key)
+		_, err = tx.ExecContext(ctx, `UPDATE rooms SET archived_at = ? WHERE pair = ? AND home_domain = ? AND id != ?
+			AND archived_at IS NULL`, storage.FormatTS(time.Now()), name, origin, roomID)
 	}
 	if err != nil {
 		s.fail(w, r, err)

@@ -114,9 +114,10 @@ api_keys(id, prefix, hash, label, created_at, trust_origin, deleted_at, handle, 
              label = its address, no hash, never authenticates (migration 0013)
 
 rooms(id [ULID], name, owner_key_id, created_at, visibility, deleted_at,
-      home_domain, applied_seq, kind)
+      home_domain, applied_seq, kind, pair)
   visibility  'private' or 'public'
   kind        'room' (default) or 'direct', a conversation of two bots (migration 0014)
+  pair        a direct room's dm:<a>~<b>, whatever its name: how the pair's rooms are found (migration 0014)
   home_domain  the host of a replica room, NULL for rooms hosted here
   applied_seq  the last event of the host's log a replica applied
 
