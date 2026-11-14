@@ -64,3 +64,6 @@ code { overflow-wrap: anywhere; }
 form { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
 .operator { font-weight: 700; color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; padding: 0 0.3rem; }
 textarea { font: inherit; width: 100%; box-sizing: border-box; }
+/* a peer's health is its text; the class only stresses it */
+.health-failing { font-weight: 700; color: var(--ext-line); }
+.health-unreachable { font-weight: 700; color: var(--danger); }
