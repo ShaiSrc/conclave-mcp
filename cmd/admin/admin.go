@@ -102,7 +102,7 @@ func newVacuumCmd() *cobra.Command {
 Per SPEC-0004 §5.2, this subcommand does NOT talk to a running server.
 The server must be stopped before vacuum (WAL and VACUUM are
 incompatible in the same process). The action is recorded in
-${CONCLAVE_DATA_DIR}/admin.log for audit.
+admin.log next to the database for audit.
 
 The CLI warns and exits with code 2 if free disk space is less than
 2x the current DB file size. Pass --force to skip the warning.`,
@@ -112,26 +112,25 @@ The CLI warns and exits with code 2 if free disk space is less than
 			return runVacuum(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), dbPath, dataDir, flagForce)
 		},
 	}
-	// SPEC-0004 §3 + §5.1: the spec describes a --db flag for
-	// the data file path. The previous implementation only
-	// read CONCLAVE_DATA_DIR, which made the CLI fragile in
-	// CI. Both are now supported: --db wins, then
-	// CONCLAVE_DATA_DIR, then the default.
-	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file (overrides CONCLAVE_DATA_DIR)")
+	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file (default CONCLAVE_DB_PATH, else $CONCLAVE_DATA_DIR/data.db, else ./.conclave-mcp/data.db)")
 	cmd.Flags().BoolVar(&flagForce, "force", false, "proceed even if free disk space is < 2x DB size")
 	return cmd
 }
 
 // resolveVacuumPaths returns the (dbPath, dataDir) pair for
-// the vacuum command. Precedence:
+// the offline commands. Precedence:
 //
 //  1. --db flag (explicit, per-call)
-//  2. CONCLAVE_DATA_DIR env var
-//  3. default ./.conclave-mcp
+//  2. CONCLAVE_DB_PATH, the server's own setting
+//  3. CONCLAVE_DATA_DIR env var, read by these commands only
+//  4. default ./.conclave-mcp
 //
-// If --db is given, dataDir is its parent directory. The
+// With a file path, dataDir is its parent directory. The
 // audit log is written to dataDir/admin.log (SPEC-0004 §5.1).
 func resolveVacuumPaths(flagDB string) (string, string) {
+	if flagDB == "" {
+		flagDB = os.Getenv("CONCLAVE_DB_PATH")
+	}
 	if flagDB != "" {
 		return flagDB, filepath.Dir(flagDB)
 	}
@@ -267,7 +266,7 @@ not authenticate.`,
 			return runKeysCreateBootstrap(cmd.Context(), cmd.OutOrStdout(), cmd.ErrOrStderr(), dbPath, dataDir, flagLabel, flagTrustOrigin)
 		},
 	}
-	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file (overrides CONCLAVE_DATA_DIR)")
+	cmd.Flags().StringVar(&flagDB, "db", "", "path to the SQLite file (default CONCLAVE_DB_PATH, else $CONCLAVE_DATA_DIR/data.db, else ./.conclave-mcp/data.db)")
 	cmd.Flags().StringVar(&flagLabel, "label", "", "human-readable label for the key (required, unique)")
 	cmd.Flags().StringVar(&flagTrustOrigin, "trust-origin", "internal", "operator-controlled classification: 'internal' (own infrastructure, trusted partners) or 'external' (invited collaborators, SPEC-0001 Q11 / ADR-0008 revision)")
 	return cmd

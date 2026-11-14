@@ -108,6 +108,19 @@ func TestBackup(t *testing.T) {
 		t.Errorf("backup of a stopped server's database: %v %s", err, out)
 	}
 
+	// Without --db, CONCLAVE_DB_PATH names the database, as for serve;
+	// --db wins over it.
+	t.Chdir(dir) // no ./.conclave-mcp/data.db to fall back to
+	t.Setenv("CONCLAVE_DB_PATH", dbPath)
+	if out, err := runRoot(t, "backup", filepath.Join(dir, "env.db")); err != nil {
+		t.Errorf("backup with CONCLAVE_DB_PATH: %v %s", err, out)
+	}
+	t.Setenv("CONCLAVE_DB_PATH", filepath.Join(dir, "nope", "data.db"))
+	if out, err := runRoot(t, "backup", "--db", dbPath, filepath.Join(dir, "flag.db")); err != nil {
+		t.Errorf("backup --db over CONCLAVE_DB_PATH: %v %s", err, out)
+	}
+	t.Setenv("CONCLAVE_DB_PATH", "")
+
 	missing := filepath.Join(dir, "missing.db")
 	_, err = runRoot(t, "backup", "--db", filepath.Join(dir, "nope", "data.db"), missing)
 	if exitClassifier(err) != 1 {

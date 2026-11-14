@@ -13,6 +13,25 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   settings without the `CONCLAVE_` prefix. The old names still apply as
   deprecated aliases: `serve` logs a warning for each at start, and the
   new name wins when both are set.
+- The CLI takes the server URL from `CONCLAVE_BASE_URL` before its
+  legacy alias `CONCLAVE_SERVER`, as `mcp-serve` already did; before,
+  the CLI and the hook preferred `CONCLAVE_SERVER` when both were set.
+- `admin vacuum` and `admin keys create-bootstrap` read
+  `CONCLAVE_DB_PATH` when `--db` is not given, before
+  `CONCLAVE_DATA_DIR`, so they find the server's database as `serve`
+  does. `admin.log` is written next to that database.
+
+### Fixed
+
+- `serve` ignored `CONCLAVE_DB_PATH`, `CONCLAVE_HOST` and
+  `CONCLAVE_PORT`: it always passed its flag defaults on. A flag now
+  wins over its env var and the env var over the default; `backup`
+  finds the database the same way. When `CONCLAVE_DB_PATH` names a file
+  that does not exist while `./.conclave-mcp/data.db` does (where serve
+  kept the data before), serve refuses to start instead of beginning on
+  an empty database. See the 0.14 notes in `docs/upgrading.md`.
+- `CONCLAVE_LOG_LEVEL` was validated but not applied; the server now
+  logs at that level.
 
 ## [0.13.0] — 2026-11-14
 
