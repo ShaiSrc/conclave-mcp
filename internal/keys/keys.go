@@ -358,11 +358,7 @@ func writeJSONError(w http.ResponseWriter, r *http.Request, status int, code, ms
 		"error": map[string]any{
 			"code":       code,
 			"message":    msg,
-			"request_id": requestID(r),
+			"request_id": w.Header().Get("X-Request-Id"),
 		},
 	})
-}
-
-func requestID(r *http.Request) string {
-	return r.Header.Get("X-Request-Id")
 }

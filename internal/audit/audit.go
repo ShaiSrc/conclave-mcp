@@ -63,6 +63,15 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	action := q.Get("action")  // e.g. "room.create"
 	roomID := q.Get("room_id") // SPEC-0001 Q10
 	since := q.Get("since")    // ISO-8601
+	var before int64           // entry id; 0: from the newest
+	if v := q.Get("before"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n < 1 {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "before must be an entry id")
+			return
+		}
+		before = n
+	}
 	limit := 100
 	if v := q.Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -83,10 +92,17 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	       FROM audit WHERE 1=1`
 	var args []any
 	if actor != "" {
-		if n, err := strconv.ParseInt(actor, 10, 64); err == nil {
-			q2 += " AND actor_key_id = ?"
-			args = append(args, n)
+		n, err := strconv.ParseInt(actor, 10, 64)
+		if err != nil {
+			writeErr(w, r, http.StatusBadRequest, "bad_request", "actor must be a key id")
+			return
 		}
+		q2 += " AND actor_key_id = ?"
+		args = append(args, n)
+	}
+	if before > 0 {
+		q2 += " AND id < ?"
+		args = append(args, before)
 	}
 	if action != "" {
 		// `action` is treated as a prefix, so we escape the
@@ -107,8 +123,8 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		q2 += " AND ts >= ?"
 		args = append(args, since)
 	}
-	q2 += " ORDER BY ts DESC LIMIT ?"
-	args = append(args, limit)
+	q2 += " ORDER BY id DESC LIMIT ?" // ids follow the log's order
+	args = append(args, limit+1)
 
 	rows, err := s.DB.QueryContext(r.Context(), q2, args...)
 	if err != nil {
@@ -117,7 +133,7 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var out []entryView
+	out := []entryView{}
 	for rows.Next() {
 		var (
 			ev      entryView
@@ -141,20 +157,15 @@ func (s *Service) list(w http.ResponseWriter, r *http.Request) {
 		}
 		out = append(out, ev)
 	}
-	// next_since is the ISO-8601 ts of the last entry we
-	// returned. Because we ORDER BY ts DESC, the last entry
-	// in the slice is the OLDEST; the client should pass it
-	// as the next `since` (which filters `ts >= ?`). This
-	// means some overlap, but the client de-dupes by id.
-	// An empty slice means no more entries.
-	var nextSince string
-	if n := len(out); n > 0 {
-		nextSince = out[n-1].TS
+	// Newest first: while more entries follow, next_before is the
+	// oldest id of this page, to pass back as before.
+	body := map[string]any{}
+	if len(out) > limit {
+		out = out[:limit]
+		body["next_before"] = out[limit-1].ID
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"entries":    out,
-		"next_since": nextSince,
-	})
+	body["entries"] = out
+	writeJSON(w, http.StatusOK, body)
 }
 
 // Write is a helper used by other services to record an audit row.
@@ -215,7 +226,7 @@ func writeErr(w http.ResponseWriter, r *http.Request, status int, code, msg stri
 		"error": map[string]any{
 			"code":       code,
 			"message":    msg,
-			"request_id": r.Header.Get("X-Request-Id"),
+			"request_id": w.Header().Get("X-Request-Id"),
 		},
 	})
 }

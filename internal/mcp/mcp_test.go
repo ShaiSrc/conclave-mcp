@@ -756,3 +756,28 @@ func TestFederationTools(t *testing.T) {
 		}
 	}
 }
+
+// audit.list pages with before, and large ids reach the query as
+// integers, not in float notation.
+func TestAuditTool_Before(t *testing.T) {
+	var gotQuery string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		fmt.Fprint(w, `{"entries":[]}`)
+	}))
+	defer api.Close()
+	s := NewServer(api.URL, "tk_test")
+	if text, isErr := toolText(t, s, "audit.list", `{"before":12345678,"actor":3}`); isErr {
+		t.Fatalf("audit.list: %s", text)
+	}
+	if gotQuery != "actor=3&before=12345678" {
+		t.Errorf("query %q", gotQuery)
+	}
+	for _, tool := range tools {
+		if tool.name == "audit.list" {
+			if _, ok := tool.props["before"]; !ok {
+				t.Error("audit.list schema lacks before")
+			}
+		}
+	}
+}

@@ -1137,7 +1137,7 @@ func TestReplicaPost_DeletedBeforeAnswer(t *testing.T) {
 	if n := count(t, g.db, `SELECT COUNT(*) FROM messages WHERE room_id = ? AND remote_id = 500`, room); n != 1 {
 		t.Errorf("tombstones of host id 500: %d, want 1", n)
 	}
-	if rec := g.do(bot, http.MethodGet, "/rooms/"+room+"/messages", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"messages":null`) {
+	if rec := g.do(bot, http.MethodGet, "/rooms/"+room+"/messages", ""); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"messages":[]`) {
 		t.Errorf("list: %d %s", rec.Code, rec.Body)
 	}
 	// A message.delete for a message the replica never had leaves a

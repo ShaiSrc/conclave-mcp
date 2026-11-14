@@ -65,7 +65,7 @@ func (s *Service) handleRoomDelivery(w http.ResponseWriter, r *http.Request) {
 		FROM fed_delivery d JOIN rooms r ON r.id = d.room_id
 		WHERE d.room_id = ? AND r.home_domain IS NULL ORDER BY d.peer`, id)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -82,13 +82,13 @@ func (s *Service) handleRoomDelivery(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var d row
 		if err := rows.Scan(&d.Peer, &d.AckedSeq, &d.LastSeq, &d.Attempts, &d.NextTryAt, &d.LastError, &d.Paused); err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 		out = append(out, d)
 	}
 	if rows.Err() != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 	if len(out) == 0 {

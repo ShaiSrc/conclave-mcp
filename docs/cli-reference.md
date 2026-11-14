@@ -612,17 +612,22 @@ wire format underneath.
 conclave-mcp audit list [--room-id 01ABC...]
 ```
 
-Lists the audit log. Admin key only; other keys get
+Lists the audit log, newest first. Admin key only; other keys get
 `403 admin key required`.
 
 | Flag | Default | Notes |
 |---|---|---|
+| `--actor` | (all) | Restrict to one actor key id. |
+| `--action` | (all) | Action prefix, e.g. `room.` or `key.create`. |
 | `--room-id` | (all) | Restrict to a single room. |
-| `--limit` | `100` | Max entries to return. |
+| `--limit` | `100` | Max entries to return, at most 1000. |
 | `--since` | (none) | RFC 3339 timestamp, any offset; entries at or after it. |
+| `--before` | (none) | Only entries older than this entry id: the next page. |
 
-Output is a table with columns: `TS`, `ACTOR`, `ACTION`,
-`ROOM`, `MESSAGE`, `METADATA`.
+Output is a table with columns: `ID`, `TS`, `ACTOR` (key id, or
+`system`), `ACTION`, `TARGET`, `ROOM`, `RESULT`. `--format json`
+prints the entries with the API's fields. When more entries follow,
+STDERR says `more entries: --before <id>`.
 
 ## `ui setup`
 
@@ -891,8 +896,11 @@ conclave-mcp messages subscribe "$ROOM_ID" --wait 300
 ### Drain the audit log into a file
 
 ```sh
-conclave-mcp audit list --format=json --limit 10000 > /var/log/conclave/audit.json
+conclave-mcp audit list --format=json --limit 1000 > /var/log/conclave/audit.json
 ```
+
+Up to 1000 entries a call; follow `more entries: --before <id>` on
+STDERR for older ones.
 
 ## See also
 

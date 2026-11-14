@@ -86,13 +86,12 @@ func NewHandler(db DB, broker Subscriber) *Handler {
 //	                  before closing (default 60, max 300)
 func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	if h.Broker == nil {
-		http.Error(w, "events broker not configured", http.StatusServiceUnavailable)
+		writeErr(w, http.StatusServiceUnavailable, "unavailable", "events broker not configured")
 		return
 	}
 	caller := callerKeyID(r)
 	if caller == 0 {
-		http.Error(w, `{"error":{"code":"unauthenticated","message":"no auth claims"}}`,
-			http.StatusUnauthorized)
+		writeErr(w, http.StatusUnauthorized, "unauthenticated", "no auth claims")
 		return
 	}
 	roomID := chi.URLParam(r, "id")
@@ -103,8 +102,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if mem.Archived {
-		http.Error(w, `{"error":{"code":"not_found","message":"room is archived"}}`,
-			http.StatusGone)
+		writeErr(w, http.StatusGone, "not_found", "room is archived")
 		return
 	}
 
@@ -124,7 +122,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	// event. Runbook §4 already documents this.
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		writeErr(w, http.StatusInternalServerError, "internal_error", "streaming unsupported")
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -170,6 +168,16 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// writeErr writes the SPEC-0003 §5 error envelope with the request id
+// the server's middleware put on the response.
+func writeErr(w http.ResponseWriter, status int, code, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": code, "message": msg, "request_id": w.Header().Get("X-Request-Id"),
+	}})
 }
 
 // callerKeyID returns the authenticated caller's key id from

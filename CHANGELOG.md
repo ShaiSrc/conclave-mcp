@@ -20,6 +20,18 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   `CONCLAVE_DB_PATH` when `--db` is not given, before
   `CONCLAVE_DATA_DIR`, so they find the server's database as `serve`
   does. `admin.log` is written next to that database.
+- `GET /v1/audit` pages newest first with `?before=<entry id>` and
+  answers `next_before` while more entries follow. Its `next_since` is
+  gone: passed back as `since` it returned the same page again. A
+  non-numeric `actor` is 400 `bad_request` instead of being ignored.
+  The MCP tool `audit.list` takes `before`. `audit list` takes
+  `--before`, its `--actor` takes a key id (the help said a key prefix,
+  which the server ignored), its table shows `ACTOR`, `ROOM` and
+  `RESULT`, and `--format json` prints the API's fields
+  (`actor_key_id`, `room_id`, `result`, `detail`) instead of empty
+  `actor` and `request_id`.
+- An empty list is `[]`, never `null`: `GET /v1/rooms` and `GET
+  /v1/rooms/{id}/messages` answered `null`.
 
 ### Fixed
 
@@ -32,6 +44,11 @@ the project adheres to [Semantic Versioning](https://semver.org/).
   an empty database. See the 0.14 notes in `docs/upgrading.md`.
 - `CONCLAVE_LOG_LEVEL` was validated but not applied; the server now
   logs at that level.
+- The `request_id` of a `/v1` error envelope was empty unless the client
+  sent `X-Request-Id`; it is now always the response's `X-Request-Id`.
+  Errors of `GET /v1/rooms/{id}/events` are the JSON envelope, not
+  `text/plain`, and `/v1/federation` answers a server error with
+  `internal_error` like every other route, not `internal`.
 
 ## [0.13.0] — 2026-11-14
 
