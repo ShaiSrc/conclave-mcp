@@ -285,11 +285,13 @@ Lists the rooms the caller is a member of; an admin key sees every room that is 
 table with columns: `ID`, `NAME`, `OWNER`, `CREATED`, `ARCHIVED`,
 `HOME`. `HOME` is the host of a room hosted on another server (a
 replica, see [federated-rooms.md](federated-rooms.md)), `-` for rooms
-hosted here.
+hosted here. A replica with an ID of its own shows the host's ID after
+the host: `b.example (01HOST...)`
+([Room IDs of other servers](federated-rooms.md#room-ids-of-other-servers)).
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--format` | `table` | `json`: the rooms as a JSON array, with `home` for replicas. |
+| `--format` | `table` | `json`: the rooms as a JSON array, with `home` for replicas and `remote_id` for one with an ID of its own. |
 
 ## `rooms get`
 

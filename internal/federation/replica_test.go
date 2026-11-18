@@ -286,17 +286,15 @@ func TestReplicaInvite(t *testing.T) {
 		status             int
 		code               string
 	}{
-		"unknown bot":            {room, "proj", "nobody", []string{"read"}, 404, "not_found"},
-		"revoked bot":            {room, "proj", "gone", []string{"read"}, 404, "not_found"},
-		"admin key":              {room, "proj", "adm", []string{"read"}, 404, "not_found"},
-		"bad handle":             {room, "proj", "B 1", []string{"read"}, 404, "not_found"},
-		"bad rights":             {room, "proj", "b1", []string{"fly"}, 400, "bad_request"},
-		"no name":                {room, "", "b1", []string{"read"}, 400, "bad_request"},
-		"long name":              {room, strings.Repeat("n", 129), "b1", []string{"read"}, 400, "bad_request"},
-		"room id not a ULID":     {"not-a-room", "proj", "b1", []string{"read"}, 400, "bad_request"},
-		"a local room":           {mine, "proj", "b1", []string{"read"}, 409, "conflict"},
-		"another host's replica": {theirs, "proj", "b1", []string{"read"}, 409, "conflict"},
-		"room id not canonical":  {strings.ToLower(room), "proj", "b1", []string{"read"}, 400, "bad_request"},
+		"unknown bot":           {room, "proj", "nobody", []string{"read"}, 404, "not_found"},
+		"revoked bot":           {room, "proj", "gone", []string{"read"}, 404, "not_found"},
+		"admin key":             {room, "proj", "adm", []string{"read"}, 404, "not_found"},
+		"bad handle":            {room, "proj", "B 1", []string{"read"}, 404, "not_found"},
+		"bad rights":            {room, "proj", "b1", []string{"fly"}, 400, "bad_request"},
+		"no name":               {room, "", "b1", []string{"read"}, 400, "bad_request"},
+		"long name":             {room, strings.Repeat("n", 129), "b1", []string{"read"}, 400, "bad_request"},
+		"room id not a ULID":    {"not-a-room", "proj", "b1", []string{"read"}, 400, "bad_request"},
+		"room id not canonical": {strings.ToLower(room), "proj", "b1", []string{"read"}, 400, "bad_request"},
 	} {
 		wantErr(t, h.invite(t, g, c.room, c.name, c.handle, c.rights...), c.status, c.code)
 		if g.state(t) != before || rooms() != nRooms {
@@ -335,6 +333,18 @@ func TestReplicaInvite(t *testing.T) {
 	}
 	if n := count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ? AND rights = 'read'`, room, b1); n != 1 {
 		t.Error("rights not updated")
+	}
+
+	// An id a local room or another host's replica has: the replica gets
+	// an id of its own, and remote_id keeps the host's.
+	for _, id := range []string{mine, theirs} {
+		if rec := h.invite(t, g, id, "taken-"+id, "b1", "read"); rec.Code != http.StatusCreated || !strings.Contains(rec.Body.String(), `"room_id":"`+id+`"`) {
+			t.Fatalf("invite under a taken id: %d %s", rec.Code, rec.Body)
+		}
+		if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE remote_id = ? AND home_domain = ? AND id != ? AND name = ?`,
+			id, h.id.Domain, id, "taken-"+id); n != 1 {
+			t.Errorf("no replica of its own for %s", id)
+		}
 	}
 
 	// A name a local room holds: the replica is name@host.

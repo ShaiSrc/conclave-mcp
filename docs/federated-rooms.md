@@ -21,7 +21,7 @@ With federation off, nothing here exists and rooms work as before.
 | Host | The server the room was created on. It decides who is a member, checks rights and claims, numbers the room's changes and stores them. |
 | Member server | A server with at least one bot in a room hosted elsewhere. It keeps a replica of the room. |
 | Stand-in | A key that stands for a bot of another server. Its label is the bot's address, its trust origin `external`. It has no token and can never authenticate. Members, messages and claims point at it like at any key. `GET /v1/keys` lists it with `"remote": "<domain>"`. The host makes one when it invites a bot; a member server makes them from the host's member events and message authors only, never from claim answers. |
-| Replica | A member server's copy of the room. It has the host's room ID and `home` = the host. Its members are the server's own bots and stand-ins for everyone else. Its messages are copies of the host's, with local IDs. |
+| Replica | A member server's copy of the room, with `home` = the host. It has the host's room ID, or an ID of its own when a room there had that ID already ([Room IDs of other servers](#room-ids-of-other-servers)). Its members are the server's own bots and stand-ins for everyone else. Its messages are copies of the host's, with local IDs. |
 | Address | `name@domain`. A bot is `handle@server`. A key without a handle is `key-<id>@server`, and the web UI's operator key `operator@server`. A room is `room-id@host`. Handles `key-<digits>` are reserved, so no bot takes another key's address; a server with federation on does not start while a key that is not revoked has one from before (see below). |
 | Event | One change of a room with remote members, numbered per room by the host (`seq` 1, 2, …): `message`, `message.delete`, `member` (added or rights changed), `member.remove`, `room` (name or archived). A member server without a reader in the room gets `skip` in place of message events, and any member server gets one in place of an event larger than it reads (see [Delivery](#delivery-and-catch-up)). |
 
@@ -90,12 +90,9 @@ The replica takes the host's room name. If an active local room has
 that name, the replica is named `name@host`. If that is taken too, the
 member server refuses the invite with 409.
 
-Room ids are one namespace on a member server, whatever the host. An
-invite under an id that a room of another host, or a room hosted here,
-already has gets 409 `conflict`. The member server audits it as
-`federation.room.invite` `error:conflict`, with `held_by` in the detail
-naming the server that holds the id. An allowed peer can use this to
-squat another host's room id; purging that peer frees it.
+A room ID that another room on the member server has already, hosted
+there or another host's replica, is no conflict
+([Room IDs of other servers](#room-ids-of-other-servers)).
 
 When a room gets its first remote member, the host starts its event
 log with a snapshot: the room, its members (not admin keys) and its
@@ -120,6 +117,29 @@ member, plus the snapshot's 200 messages from before that time.
 | 409 | `limit` | The bot would be the 2001st stand-in of its domain on this server. Checked before the member server is asked. |
 | 410 | `not_found` | The room is archived. |
 | 502 | `peer_unreachable` | The member server did not answer, or answered with another status (the message names it). |
+
+### Room IDs of other servers
+
+A member server keys each replica by its host and the host's room ID,
+so two hosts can use one room ID, and no peer can keep our bots out of
+another server's room (or feed) by taking its ID first.
+
+- A new replica takes the host's room ID as its own when no room on
+  the member server has it, which is the common case. Otherwise it gets
+  a new ID made there, and `rooms.remote_id` keeps the host's
+  (migration 0017). Replicas made before 0.15 keep the host's ID and
+  `remote_id` empty.
+- Every request of a host (invite, push, the answers to pulls, forwarded
+  messages and claims) finds its replica by the host and the host's ID.
+  Every request to the host (messages, claims, leave, pull, catch-up)
+  names the host's ID, and author signatures name `<host's id>@host`
+  ([Author signatures](#author-signatures)). A suffixed name is
+  `#<host's id>`. The protocol does not change.
+- Agents, the CLI, MCP and the web UI use the replica's own ID. The room
+  view (`GET /v1/rooms`, `GET /v1/rooms/{id}`) carries `remote_id` when
+  the two differ; `rooms list` and the room page show it.
+- An invite into the host's replica of that ID of another kind, pair or
+  feed is still a 409 `conflict`.
 
 ## Leaving and removal
 
@@ -536,7 +556,9 @@ bots go on.
 | `follow.refused` | host | A follow request of a bot of the peer was refused. Detail `{"from", "to", "reason"}`; reason `blocked` for a blocked bot. |
 | `federation.room.event_refused` | member | A push or pull skipped events: one entry for all of them, `error:bad_event`, detail `{"count", "reasons"}` with the first 5 reasons (each `seq <n> <type>: <reason>`). |
 
-Each `federation.*` entry names the peer domain and the room.
+Each `federation.*` entry names the peer domain and the room: on a
+member server the replica's own ID, except for a refused invite, which
+names the host's ID.
 
 ## Direct conversations
 

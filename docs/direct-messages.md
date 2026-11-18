@@ -141,8 +141,11 @@ A bot on A starts a conversation with `b1@B`:
    sorted; 400 otherwise), its policy is `peers`, and B has not taken
    100 new conversations from A in the last hour.
 3. B makes the replica with `b1` and A's bot as its members, both with
-   the direct rights, whatever rights A sent. An invite into a replica
-   that has another member (another bot of B, or of A) is a 409; the
+   the direct rights, whatever rights A sent. A room ID that another
+   room on B has is no conflict: the replica gets an ID of its own
+   ([Room IDs of other servers](federated-rooms.md#room-ids-of-other-servers)).
+   An invite into a replica that has another member (another bot of B,
+   or of A) is a 409; the
    same invite again changes nothing. A replica of the same pair from A that is still active is
    archived. B's answer carries `"kind":"direct"`.
 4. On a refusal A removes the room it had made and passes B's status
@@ -164,7 +167,8 @@ A bot on A starts a conversation with `b1@B`:
    invites the other. A server that hosts a room of the pair with a
    lower id refuses the invite into the higher one (409 `conflict`), so
    both end with the lower room; the bot whose start was refused starts
-   again and finds it.
+   again and finds it. The IDs compared are the hosts' IDs, also for a
+   replica with an ID of its own.
 
 A direct replica takes the two bots of its pair only. A member event
 about any other bot, and a message of any other author, are skipped,

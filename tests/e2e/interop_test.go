@@ -7,13 +7,15 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Servers A, B and C each allow the other two. One scenario crosses all
 // three, step by step: lookup and directory; a room on A with bots of B
 // and C; a direct conversation of B's and C's bots; bots of B and C
-// following a bot of A; C down and catching up; B rotating its key; A
-// blocking a bot of C, then blocking and purging C.
+// following a bot of A; B and C hosting a room under one ID, with A's
+// bot in both; C down and catching up; B rotating its key; A blocking a
+// bot of C, then blocking and purging C.
 func TestInterop_ThreeServers(t *testing.T) {
 	root := t
 	a, b, c := newFedEnv(t), newFedEnv(t), newFedEnv(t)
@@ -288,6 +290,78 @@ func TestInterop_ThreeServers(t *testing.T) {
 		}
 	})
 
+	step("B and C host a room with the same ID", func(t *testing.T) {
+		r := b.admin("POST", "/v1/rooms", map[string]string{"name": "same"})
+		var room struct{ ID string }
+		if r.Status != 201 || json.Unmarshal(r.Body, &room) != nil {
+			t.Fatalf("create on B: %d %s", r.Status, r.Body)
+		}
+		same := room.ID
+		// C makes a room with B's room ID, as any server may.
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := c.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility) VALUES (?, 'same', ?, ?, 'private')`,
+			same, c.keyA.ID, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'owner', ?, 'read')`,
+			same, c.keyA.ID, now); err != nil {
+			t.Fatal(err)
+		}
+		for _, h := range []reader{{b, b1}, {c, c1}} {
+			for _, in := range []map[string]any{{"key_id": h.k.ID, "allow_multi_room": true}, {"address": a1Addr}} {
+				in["rights"] = []string{"all"}
+				if r := h.f.admin("POST", "/v1/rooms/"+same+"/members", in); r.Status != 201 {
+					t.Fatalf("member %v on %s: %d %s", in, h.f.domain, r.Status, r.Body)
+				}
+			}
+		}
+		say(b, b1, same, "b1 on B")
+		say(c, c1, same, "c1 on C")
+		// A keeps both: B's room under its ID, C's under one of A's own.
+		var onB, onC string
+		waitFor(t, "both replicas on A", func() bool {
+			var list struct {
+				Rooms []struct {
+					ID, Home string
+					RemoteID string `json:"remote_id"`
+				}
+			}
+			_ = json.Unmarshal(a.callAs("GET", "/v1/rooms", a1, nil).Body, &list)
+			for _, rm := range list.Rooms {
+				switch {
+				case rm.Home == b.domain && rm.ID == same && rm.RemoteID == "":
+					onB = rm.ID
+				case rm.Home == c.domain && rm.ID != same && rm.RemoteID == same:
+					onC = rm.ID
+				}
+			}
+			return onB != "" && onC != ""
+		})
+		say(a, a1, onB, "a1 to B")
+		say(a, a1, onC, "a1 to C")
+		// Each room holds its own messages, on its host and on A.
+		for _, l := range []struct {
+			r    reader
+			room string
+			want []string
+		}{
+			{reader{b, b1}, same, []string{"b1 on B", "a1 to B"}},
+			{reader{a, a1}, onB, []string{"b1 on B", "a1 to B"}},
+			{reader{c, c1}, same, []string{"c1 on C", "a1 to C"}},
+			{reader{a, a1}, onC, []string{"c1 on C", "a1 to C"}},
+		} {
+			var got []string
+			waitFor(t, fmt.Sprintf("%q in %s on %s", l.want, l.room, l.r.f.domain), func() bool {
+				got = got[:0]
+				for _, m := range l.r.f.messageList(l.r.k, l.room) {
+					got = append(got, m.Content)
+				}
+				return slices.Equal(got, l.want)
+			})
+		}
+		external(a, a1, onC, "c1 on C", c1Addr)
+	})
+
 	step("C down and catching up", func(t *testing.T) {
 		c.close()
 		say(a, a1, proj, "a1: while C was down")
@@ -346,13 +420,15 @@ func TestInterop_ThreeServers(t *testing.T) {
 		if fs := a.follows(a1, "/v1/followers", "followers"); len(fs) != 1 || fs[0].From != b1Addr {
 			t.Fatalf("a1's followers after the block: %+v", fs)
 		}
-		// The purge counts what the blocks left: c1's and c2's messages in
-		// proj, the cursors of proj and a1's feed, and c1's stand-in
-		// (c2's is revoked already). The block ended the memberships,
+		// The purge counts what the blocks left: A's replica of C's room
+		// "same" with c1's membership there, c1's and c2's messages in
+		// proj, the cursors of proj and a1's feed, and the stand-ins of
+		// c1 and of C's operator, the replica's owner (c2's is revoked
+		// already). The block ended the memberships of rooms hosted on A,
 		// c1's claim and its follow of a1.
 		r = a.admin("POST", "/v1/federation/peers/"+c.domain+"/purge", nil)
 		if r.Status != 200 || !strings.Contains(string(r.Body),
-			`{"rooms":0,"messages":2,"members":0,"follows":0,"claims":0,"cursors":2,"stand_ins":1}`) {
+			`{"rooms":1,"messages":2,"members":1,"follows":0,"claims":0,"cursors":2,"stand_ins":2}`) {
 			t.Fatalf("purge C: %d %s", r.Status, r.Body)
 		}
 		// B's replica retracts what C's bots wrote, as A does.
