@@ -536,12 +536,13 @@ func (s *Service) find(ctx context.Context, a, b int64) (string, error) {
 // findRemote returns the active direct room of bot me and pair, the
 // pair's name, with a bot on server host, or "": one hosted here
 // (pending or not), or the replica of one host started; the lowest id
-// when both bots started one at once.
+// when both bots started one at once, by the host's id of a replica
+// (rooms.remote_id when it has its own here).
 func (s *Service) findRemote(ctx context.Context, me int64, host, pair string) (string, error) {
 	var id string
 	err := s.DB.QueryRowContext(ctx, `SELECT r.id FROM rooms r JOIN room_members me ON me.room_id = r.id AND me.key_id = ?
 		WHERE r.kind = 'direct' AND r.pair = ? AND r.archived_at IS NULL AND (r.home_domain IS NULL OR r.home_domain = ?)
-		ORDER BY r.id LIMIT 1`, me, pair, host).Scan(&id)
+		ORDER BY COALESCE(r.remote_id, r.id) LIMIT 1`, me, pair, host).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
 	}

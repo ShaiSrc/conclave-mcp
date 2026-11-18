@@ -469,8 +469,8 @@ Rules of the destination:
 
 Other errors: 400 `bad_request` (malformed JSON; `{id}` not a
 canonical ULID; a bad name, rights or kind); 404 `not_found` (no such
-bot); 409 `conflict` (a room with that id that is not this origin's
-replica of that kind, pair or feed; no free name); 409 `limit` (200
+bot); 409 `conflict` (this origin's replica of that id is of another
+kind, pair or feed; no free name); 409 `limit` (200
 replicas of the origin, archived ones included; a stand-in limit).
 
 The replica takes the host's name; when an active local room has it,

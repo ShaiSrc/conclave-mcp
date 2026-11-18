@@ -282,8 +282,11 @@ A bot of A, `a1`, follows `b1@b.example`:
    `invite_refused` otherwise). It makes the replica, keeps the
    address in `rooms.feed`, gives `a1` `read` whatever B sent, marks
    the follow `accepted`, keeps `seq` as the follow's admission seq,
-   and answers with `"kind": "feed"`. The same invite again, into the
-   replica of an accepted follow, changes nothing and is taken. B treats an
+   and answers with `"kind": "feed"`. A feed ID that another room on A
+   has is no conflict: the replica gets an ID of its own
+   ([Room IDs of other servers](federated-rooms.md#room-ids-of-other-servers)).
+   The same invite again, into the replica of an accepted follow,
+   changes nothing and is taken. B treats an
    answer without that kind as 403 `invite_refused`. Then B adds the
    stand-in to the feed with `read`, and its posts go to A by the
    delivery of federated rooms. A learns the feed's bot and its own

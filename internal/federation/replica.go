@@ -109,12 +109,13 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // handleRoomInvite answers POST /fed/v1/rooms/{id}/invite from the
 // host of room {id}: our bot named by handle joins the replica with the
 // rights. It must be a local bot, not revoked and no admin key (404
-// otherwise). The replica is created under the host's room id, of the
-// invite's kind, or updated and made active again; a room of that id
-// that is not the origin's replica of that kind is a 409. A room name
-// starting with dm: is a direct conversation's (400 otherwise), one
-// starting with feed: a feed's (400 otherwise). The answer has the kind
-// and max_events_bytes.
+// otherwise). The replica is created of the invite's kind, or updated
+// and made active again; the origin's replica of that id of another
+// kind, pair or feed is a 409. A new replica takes the host's room id
+// as its own when no room here has it, else a new one, with the host's
+// in remote_id (replicaID finds it). A room name starting with dm: is a
+// direct conversation's (400 otherwise), one starting with feed: a
+// feed's (400 otherwise). The answer has the kind and max_events_bytes.
 //
 // A feed invite (kind feed) brings our bot into the feed of a bot of the
 // origin, whose address it carries as feed, named feed:<address> or that
@@ -141,7 +142,7 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // A direct invite from a bot the operator blocked, or the feed invite of
 // one, is 403 bot_blocked.
 func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
-	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
+	ctx, origin, wire := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	var in struct {
 		Name   string   `json:"name"`
 		Handle string   `json:"handle"`
@@ -169,33 +170,28 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The audit row is written outside the transaction, which holds the
-	// write lock: it is rolled back first.
+	// write lock: it is rolled back first. A refusal names the host's id.
 	var tx *sql.Tx
-	var heldBy string // on a 409, the host of the room that has the id here
 	refuse := func(status int, code, msg string) {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
-		d := map[string]any{"handle": in.Handle, "rights": in.Rights}
-		if heldBy != "" {
-			d["held_by"] = heldBy
-		}
-		detail, _ := json.Marshal(d)
-		s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:"+code, string(detail))
+		detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
+		s.auditRoom(ctx, "federation.room.invite", origin, wire, "error:"+code, string(detail))
 		writeErr(w, r, status, code, msg)
 	}
 	// dmRefuse refuses a direct invite for reason (not a bot, policy,
 	// limit).
 	dmRefuse := func(status int, code, reason, msg string) {
 		detail, _ := json.Marshal(map[string]string{"to": in.Handle, "reason": reason})
-		s.auditRoom(ctx, "direct.refused", origin, roomID, "error:"+code, string(detail))
+		s.auditRoom(ctx, "direct.refused", origin, wire, "error:"+code, string(detail))
 		refuse(status, code, msg)
 	}
 	if derr != nil {
 		refuse(http.StatusBadRequest, "bad_request", "malformed JSON")
 		return
 	}
-	id, err := ulid.ParseStrict(roomID)
+	id, err := ulid.ParseStrict(wire)
 	set, rerr := rights.Parse(in.Rights)
 	switch {
 	case direct:
@@ -204,7 +200,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		set, rerr = rights.Set{rights.Read}, nil
 	}
 	switch {
-	case err != nil || id.String() != roomID:
+	case err != nil || id.String() != wire:
 		refuse(http.StatusBadRequest, "bad_request", "room id must be a ULID")
 		return
 	case in.Name == "" || len(in.Name) > 128:
@@ -222,7 +218,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case feed != strings.HasPrefix(in.Name, fedrooms.FeedPrefix):
 		refuse(http.StatusBadRequest, "bad_request", "names starting with "+fedrooms.FeedPrefix+" are reserved for feeds, and a feed's starts with it")
 		return
-	case feed && in.Feed != "" && in.Name != fedrooms.FeedPrefix+in.Feed && in.Name != fedrooms.Suffixed(fedrooms.FeedPrefix+in.Feed, roomID):
+	case feed && in.Feed != "" && in.Name != fedrooms.FeedPrefix+in.Feed && in.Name != fedrooms.Suffixed(fedrooms.FeedPrefix+in.Feed, wire):
 		refuse(http.StatusBadRequest, "bad_request", "a feed's name is "+fedrooms.FeedPrefix+"<address>, or that cut with #<room id>")
 		return
 	case feed && !strings.HasSuffix(feedOf, "@"+origin):
@@ -296,10 +292,14 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	// A direct room keeps its pair, a feed its bot.
-	var home, pair sql.NullString
+	var pair sql.NullString
 	var kind string
-	switch err := tx.QueryRowContext(ctx, `SELECT home_domain, CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(pair, feed)
-		FROM rooms WHERE id = ?`, roomID).Scan(&home, &kind, &pair); {
+	roomID, err := replicaID(ctx, tx, origin, wire)
+	if err == nil {
+		err = tx.QueryRowContext(ctx, `SELECT CASE WHEN feed IS NOT NULL THEN 'feed' ELSE kind END, COALESCE(pair, feed)
+			FROM rooms WHERE id = ?`, roomID).Scan(&kind, &pair)
+	}
+	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		var n int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM rooms WHERE home_domain = ?`, origin).Scan(&n); err != nil {
@@ -317,6 +317,15 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 			refuse(http.StatusConflict, "limit", err.Error())
 			return
 		}
+		var taken bool // by a room hosted here or another host's replica
+		if err == nil {
+			err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms WHERE id = ?)`, wire).Scan(&taken)
+		}
+		roomID = wire
+		var remote any // the host's id, when the replica has its own
+		if taken {
+			roomID, remote = ulid.Make().String(), wire
+		}
 		if err == nil {
 			now := storage.FormatTS(time.Now())
 			column := in.Kind
@@ -327,8 +336,8 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 			case feed:
 				column, newFeed = "room", feedOf
 			}
-			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind, pair, feed)
-				VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, column, newPair, newFeed)
+			_, err = tx.ExecContext(ctx, `INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, home_domain, archived_at, kind, pair, feed,
+				remote_id) VALUES (?, ?, ?, ?, 'private', ?, ?, ?, ?, ?, ?)`, roomID, in.Name, owner, now, origin, now, column, newPair, newFeed, remote)
 		}
 		if err != nil {
 			s.fail(w, r, err)
@@ -337,12 +346,8 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.fail(w, r, err)
 		return
-	case home.String != origin || kind != in.Kind || direct && pair.String != in.Name || feed && pair.String != feedOf:
-		// ponytail: room ids are one namespace for all hosts, so one host
-		// can hold another's id here; audited with the host that holds it.
-		// Key replicas by (host, id) if that is ever used.
-		heldBy = cmp.Or(home.String, s.id().Domain)
-		refuse(http.StatusConflict, "conflict", "a room with this id exists here")
+	case kind != in.Kind || direct && pair.String != in.Name || feed && pair.String != feedOf:
+		refuse(http.StatusConflict, "conflict", "the host's room with this id is another "+kind+" here")
 		return
 	}
 	if feed { // the follow of our bot toward the feed's bot is accepted now; without one, no replica
@@ -366,7 +371,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if direct {
-		if !s.directPair(w, r, tx, roomID, in.Name, origin, keyID, other, refuse) {
+		if !s.directPair(w, r, tx, roomID, wire, in.Name, origin, keyID, other, refuse) {
 			return
 		}
 	}
@@ -397,22 +402,23 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	// max_events_bytes is what this server reads a push up to: the host
 	// packs its pushes within it. kind tells a host that it was taken as
 	// a direct conversation.
-	writeJSON(w, http.StatusCreated, map[string]any{"room_id": roomID, "max_events_bytes": s.eventsLimit(), "kind": in.Kind})
+	writeJSON(w, http.StatusCreated, map[string]any{"room_id": wire, "max_events_bytes": s.eventsLimit(), "kind": in.Kind})
 }
 
-// directPair adds other, the origin's bot, to direct replica roomID of
-// our bot keyID, and archives an older active replica of the pair from
-// the origin, before the replica is named: it held the name. A replica
-// with another member, of ours or of the origin, is a 409: a host
-// cannot put a second bot of ours into a conversation. So is a replica
-// that a newer one of the pair replaced, archived or left: a late retry
-// of its invite neither brings it back nor archives the newer one. And
-// so is an invite while we host a room of the pair with a lower id:
-// when both bots start at once, the lower room is the pair's on both
-// servers, since each refuses the other's higher one. Rooms of the pair
-// are those whose pair is name, the pair's name. A bot refusedBot
-// refuses is 403 bot_blocked. On an error it answers and returns false.
-func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, name, origin string, keyID int64, other string,
+// directPair adds other, the origin's bot, to direct replica roomID
+// (wire on the origin) of our bot keyID, and archives an older active
+// replica of the pair from the origin, before the replica is named: it
+// held the name. A replica with another member, of ours or of the
+// origin, is a 409: a host cannot put a second bot of ours into a
+// conversation. So is a replica that a newer one of the pair replaced,
+// archived or left: a late retry of its invite neither brings it back
+// nor archives the newer one. And so is an invite while we host a room
+// of the pair with a lower id than wire: when both bots start at once,
+// the lower room is the pair's on both servers, since each refuses the
+// other's higher one. Rooms of the pair are those whose pair is name,
+// the pair's name. A bot refusedBot refuses is 403 bot_blocked. On an
+// error it answers and returns false.
+func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx, roomID, wire, name, origin string, keyID int64, other string,
 	refuse func(int, string, string)) bool {
 	ctx := r.Context()
 	// Blocked in the transaction too: a block between the check before it
@@ -443,7 +449,7 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 	var lower bool
 	if err == nil { // both bots started at once: the room with the lower id is the pair's
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.pair = ? AND o.home_domain IS NULL
-			AND o.archived_at IS NULL AND o.id < ?)`, name, roomID).Scan(&lower)
+			AND o.archived_at IS NULL AND o.id < ?)`, name, wire).Scan(&lower)
 	}
 	switch {
 	case taken:
@@ -496,6 +502,25 @@ func nameReplica(ctx context.Context, tx *sql.Tx, roomID, name, host string, act
 	return errNameTaken
 }
 
+// replicaID returns the id here of the replica of host's room wire, the
+// room's id on its host: wire itself, unless another room had that id
+// here when the replica was made, which then keeps wire in remote_id.
+// It is sql.ErrNoRows when there is no such replica. Every request of a
+// host finds its replica through it.
+func replicaID(ctx context.Context, q fedrooms.DB, host, wire string) (string, error) {
+	var id string
+	err := q.QueryRowContext(ctx, `SELECT id FROM rooms WHERE home_domain = ? AND COALESCE(remote_id, id) = ?`, host, wire).Scan(&id)
+	return id, err
+}
+
+// wireID returns the host of replica roomID and the room's id there,
+// which every request to the host and every author signature names.
+func wireID(ctx context.Context, q fedrooms.DB, roomID string) (host, wire string, err error) {
+	err = q.QueryRowContext(ctx, `SELECT home_domain, COALESCE(remote_id, id) FROM rooms WHERE id = ? AND home_domain IS NOT NULL`,
+		roomID).Scan(&host, &wire)
+	return host, wire, err
+}
+
 // handleRoomPush answers POST /fed/v1/rooms/{id}/events from the host of
 // replica {id}: up to 100 events of its log, applied in seq order. A gap
 // is filled by pulling, at most pushPages pages: the host's next push,
@@ -507,20 +532,22 @@ func nameReplica(ctx context.Context, tx *sql.Tx, roomID, name, host string, act
 // applied, so the host's cursor moves on (past the removal of our last
 // bot, which ends its delivery), and nothing is pulled.
 func (s *Service) handleRoomPush(w http.ResponseWriter, r *http.Request) {
-	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
+	ctx, origin := r.Context(), OriginFrom(r.Context())
 	if !s.allowedOrigin(w, r) {
 		return
 	}
-	var home sql.NullString
 	var archived bool
 	var applied int64
-	if err := s.db.QueryRowContext(ctx, `SELECT home_domain, archived_at IS NOT NULL, applied_seq FROM rooms WHERE id = ?`, roomID).
-		Scan(&home, &archived, &applied); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.fail(w, r, err)
-		return
+	roomID, err := replicaID(ctx, s.db, origin, chi.URLParam(r, "id"))
+	if err == nil {
+		err = s.db.QueryRowContext(ctx, `SELECT archived_at IS NOT NULL, applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&archived, &applied)
 	}
-	if !home.Valid || home.String != origin {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
 		writeErr(w, r, http.StatusNotFound, "not_found", "room not found")
+		return
+	case err != nil:
+		s.fail(w, r, err)
 		return
 	}
 	var in struct {
@@ -651,9 +678,10 @@ func (s *Service) applyEvent(ctx context.Context, roomID, host string, ev fedroo
 // takes no name reserved for direct conversations and feeds. A direct
 // conversation or a feed keeps the name of its invite: the event's name
 // must be the pair's, or the feed's (feed:<address>), or that cut with
-// #<room id> as its host may have named it; any other is refused. An
-// archived feed ends the accepted follows of our bots in it, but not of
-// those in a newer active replica of the same feed from that host.
+// #<room id on its host> as its host may have named it; any other is
+// refused. An archived feed ends the accepted follows of our bots in
+// it, but not of those in a newer active replica of the same feed from
+// that host.
 func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload json.RawMessage) error {
 	var p fedrooms.RoomPayload
 	if err := json.Unmarshal(payload, &p); err != nil || p.Name == "" || len(p.Name) > 128 {
@@ -664,10 +692,14 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 		Scan(&kind, &fixed); err != nil {
 		return err
 	}
+	_, wire, err := wireID(ctx, tx, roomID) // the host suffixes a name with its id
+	if err != nil {
+		return err
+	}
 	switch {
 	case cmp.Or(p.Kind, "room") != kind:
 		return refused("room event: kind %q, the replica is %s", p.Kind, kind)
-	case fixed != "" && p.Name != fixed && p.Name != fedrooms.Suffixed(fixed, roomID):
+	case fixed != "" && p.Name != fixed && p.Name != fedrooms.Suffixed(fixed, wire):
 		return refused("room event: %s is not renamed", fixed)
 	case fixed == "" && (strings.HasPrefix(p.Name, fedrooms.DirectPrefix) || strings.HasPrefix(p.Name, fedrooms.FeedPrefix)):
 		return refused("room event: names starting with %s or %s are reserved", fedrooms.DirectPrefix, fedrooms.FeedPrefix)
@@ -689,7 +721,7 @@ func applyRoom(ctx context.Context, tx *sql.Tx, roomID, host string, payload jso
 	if fixed != "" {
 		return nil
 	}
-	err := nameReplica(ctx, tx, roomID, p.Name, host, false)
+	err = nameReplica(ctx, tx, roomID, p.Name, host, false)
 	if errors.Is(err, errNameTaken) {
 		return refused("room event: %v", err)
 	}
@@ -979,11 +1011,12 @@ func (s *Service) applyMessage(ctx context.Context, roomID, host string, payload
 // roomID hosted by host. An author refusedBot refuses (a blocked bot,
 // or of a blocked peer) is refused first. A message of one of the host's
 // keys needs no signature: the host's request signature covers it. Any
-// other author's server signed it: we check our own with any of our keys
-// and a third server's with its stored keys (peerSigned), if it is an
-// allowed or seen peer; when none verifies, that server may have rotated
-// its key, which it then shows us no request to re-pin from, so its
-// document is asked (repinAuthor, which may return needDocError).
+// other author's server signed it, for the room's id on its host: we
+// check our own with any of our keys and a third server's with its
+// stored keys (peerSigned), if it is an allowed or seen peer; when none
+// verifies, that server may have rotated its key, which it then shows
+// us no request to re-pin from, so its document is asked (repinAuthor,
+// which may return needDocError).
 // It reports whether the signature could not be checked (no key known
 // for the author's server); a wrong one is errRefused.
 func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedrooms.MessagePayload) (unverified bool, err error) {
@@ -994,7 +1027,11 @@ func (s *Service) checkAuthor(ctx context.Context, roomID, host string, p fedroo
 	if domain == host {
 		return false, nil
 	}
-	m := MessageSig{Room: roomID + "@" + host, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
+	_, wire, err := wireID(ctx, s.db, roomID)
+	if err != nil {
+		return false, err
+	}
+	m := MessageSig{Room: wire + "@" + host, Author: p.Author, ContentType: p.ContentType, MessageType: p.MessageType,
 		Content: p.Content, Metadata: p.Metadata, ReplyTo: p.ReplyTo, Nonce: p.Nonce}
 	var ok bool
 	if domain == s.id().Domain {
@@ -1067,7 +1104,11 @@ func localMetadata(wire json.RawMessage, reply *int64) ([]byte, error) {
 // seq applied.
 func (s *Service) pull(ctx context.Context, roomID, host string, pages int, rf *refusals) (int64, error) {
 	var applied int64
-	if err := s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&applied); err != nil {
+	_, wire, err := wireID(ctx, s.db, roomID)
+	if err == nil {
+		err = s.db.QueryRowContext(ctx, `SELECT applied_seq FROM rooms WHERE id = ?`, roomID).Scan(&applied)
+	}
+	if err != nil {
 		return 0, err
 	}
 	if _, busy := s.pulling.LoadOrStore(roomID, struct{}{}); busy {
@@ -1076,7 +1117,7 @@ func (s *Service) pull(ctx context.Context, roomID, host string, pages int, rf *
 	defer s.pulling.Delete(roomID)
 	for range pages {
 		status, body, err := s.sendSigned(ctx, http.MethodGet, host,
-			fmt.Sprintf("/fed/v1/rooms/%s/events?since=%d&max=%d", roomID, applied, s.eventsLimit()), nil, s.eventsLimit())
+			fmt.Sprintf("/fed/v1/rooms/%s/events?since=%d&max=%d", wire, applied, s.eventsLimit()), nil, s.eventsLimit())
 		if err != nil {
 			return applied, err
 		}
@@ -1504,20 +1545,23 @@ func (s *Service) leaveHosted(ctx context.Context, roomID string, keyID int64) (
 // leaving go to the room's host, which decides; a message the host
 // stored is applied here like a pushed one.
 
-// ourAuthor returns the host of replica roomID and the address there of
-// our key keyID, handle@ourdomain. A key without a handle has no stand-in
-// on any host: 403 no_handle.
-func (s *Service) ourAuthor(ctx context.Context, roomID string, keyID int64) (host, address string, err error) {
+// ourAuthor returns the host of replica roomID, the room's id there
+// (wireID) and the address there of our key keyID, handle@ourdomain. A
+// key without a handle has no stand-in on any host: 403 no_handle.
+func (s *Service) ourAuthor(ctx context.Context, roomID string, keyID int64) (host, wire, address string, err error) {
 	var handle string
-	if err := s.db.QueryRowContext(ctx, `SELECT r.home_domain, COALESCE(k.handle, '') FROM rooms r JOIN api_keys k ON k.id = ?
-		WHERE r.id = ? AND r.home_domain IS NOT NULL`, keyID, roomID).Scan(&host, &handle); err != nil {
-		return "", "", err
+	host, wire, err = wireID(ctx, s.db, roomID)
+	if err == nil {
+		err = s.db.QueryRowContext(ctx, `SELECT COALESCE(handle, '') FROM api_keys WHERE id = ?`, keyID).Scan(&handle)
+	}
+	if err != nil {
+		return "", "", "", err
 	}
 	if handle == "" {
-		return "", "", &fedrooms.Error{Status: http.StatusForbidden, Code: "no_handle",
+		return "", "", "", &fedrooms.Error{Status: http.StatusForbidden, Code: "no_handle",
 			Message: "only a bot with a handle can write to a room hosted on another server"}
 	}
-	return host, handle + "@" + s.id().Domain, nil
+	return host, wire, handle + "@" + s.id().Domain, nil
 }
 
 // unreachable is the refusal for a forwarded request the host did not
@@ -1581,12 +1625,12 @@ func oneLine(s string, max int) string {
 // is the host's id. A refusal, the host's 4xx included, is a
 // *fedrooms.Error; nothing is stored then.
 func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int64, m fedrooms.MessagePayload) (int64, error) {
-	host, addr, err := s.ourAuthor(ctx, roomID, author)
+	host, wire, addr, err := s.ourAuthor(ctx, roomID, author)
 	if err != nil {
 		return 0, err
 	}
 	nonce := newNonce()
-	sig := s.id().SignMessage(MessageSig{Room: roomID + "@" + host, Author: addr, ContentType: m.ContentType,
+	sig := s.id().SignMessage(MessageSig{Room: wire + "@" + host, Author: addr, ContentType: m.ContentType,
 		MessageType: m.MessageType, Content: m.Content, Metadata: m.Metadata, ReplyTo: m.ReplyTo, Nonce: nonce})
 	body := rawJSON(struct {
 		Author      string          `json:"author"`
@@ -1598,7 +1642,7 @@ func (s *Service) ForwardMessage(ctx context.Context, roomID string, author int6
 		Sig         string          `json:"sig"`
 		Nonce       string          `json:"nonce"`
 	}{addr, m.Content, m.ContentType, m.MessageType, m.Metadata, m.ReplyTo, sig, nonce})
-	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/messages", body, s.eventsLimit())
+	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+wire+"/messages", body, s.eventsLimit())
 	if err := s.unreachable(host, status, err); err != nil {
 		return 0, err
 	}
@@ -1668,7 +1712,7 @@ func (s *Service) applyAnswered(ctx context.Context, roomID, host string, ev fed
 // unreachable or answering something else) is a *fedrooms.Error.
 func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (int, []byte, error) {
 	ctx := r.Context()
-	host, addr, err := s.ourAuthor(ctx, roomID, author)
+	host, wire, addr, err := s.ourAuthor(ctx, roomID, author)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -1685,7 +1729,7 @@ func (s *Service) ForwardClaims(r *http.Request, roomID string, author int64) (i
 	// ponytail: claim lists are read up to the events limit, which bounds
 	// what one answer of the host may cost.
 	status, out, err := s.sendSigned(ctx, r.Method, host,
-		"/fed/v1/rooms/"+roomID+sub+"?"+url.Values{"author": {addr}}.Encode(), body, s.eventsLimit())
+		"/fed/v1/rooms/"+wire+sub+"?"+url.Values{"author": {addr}}.Encode(), body, s.eventsLimit())
 	if err := s.unreachable(host, status, err); err != nil {
 		return 0, nil, err
 	}
@@ -1834,7 +1878,7 @@ func (s *Service) claimHolder(ctx context.Context, roomID, address string) (int6
 // here only, which the audit row notes. A refusal is a
 // *fedrooms.Error.
 func (s *Service) LeaveRemote(ctx context.Context, roomID string, keyID int64) error {
-	host, addr, err := s.ourAuthor(ctx, roomID, keyID)
+	host, wire, addr, err := s.ourAuthor(ctx, roomID, keyID)
 	if err != nil {
 		return err
 	}
@@ -1846,7 +1890,7 @@ func (s *Service) LeaveRemote(ctx context.Context, roomID string, keyID int64) e
 		s.auditRoom(ctx, "federation.room.leave", host, roomID, "ok", string(detail))
 		return nil
 	}
-	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+roomID+"/leave",
+	status, out, err := s.sendSigned(ctx, http.MethodPost, host, "/fed/v1/rooms/"+wire+"/leave",
 		rawJSON(map[string]string{"author": addr}), maxBody)
 	// 204 is the host's agreement, and 404 (no such member there); a
 	// redirect, which the client does not follow, or another success is

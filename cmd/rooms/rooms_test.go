@@ -383,6 +383,22 @@ func TestList_ShowsHome(t *testing.T) {
 	}
 }
 
+// A replica with an id of its own shows its host's id with the host.
+func TestList_ShowsHostID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"rooms":[{"id":"r2","name":"proj","home":"a.example","remote_id":"r1"}]}`)
+	}))
+	defer srv.Close()
+	out, _, err := runSub(t, srv.URL, newListCmd, nil)
+	if lines := strings.Split(out, "\n"); err != nil || !strings.HasSuffix(strings.TrimSpace(lines[1]), "a.example (r1)") {
+		t.Errorf("table: %q %v", out, err)
+	}
+	out, _, err = runSub(t, srv.URL, newListCmd, map[string]string{"format": "json"})
+	if err != nil || !strings.Contains(out, `"remote_id": "r1"`) {
+		t.Errorf("json: %q %v", out, err)
+	}
+}
+
 func TestInvite_ByAddress(t *testing.T) {
 	var got map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

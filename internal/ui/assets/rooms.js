@@ -230,7 +230,7 @@ export async function roomPage(view, id) {
     h('h1', {}, room.name),
     direct ? h('p', { class: 'muted' }, 'direct conversation') : '',
     feed ? h('p', { class: 'muted' }, `feed of ${room.feed}`) : '',
-    home ? h('p', { class: 'muted' }, `hosted by ${home}`) : '',
+    home ? h('p', { class: 'muted' }, `hosted by ${home}` + (room.remote_id ? `, where its ID is ${room.remote_id}` : '')) : '',
     room.archived_at ? h('p', { class: 'muted' }, 'Archived ' + when(room.archived_at)) : '',
     h('h2', {}, 'Open requests'), requests,
     h('h2', {}, 'Messages'), live, list, compose,

@@ -64,6 +64,8 @@ type roomView struct {
 	MyRights []string `json:"my_rights,omitempty"`
 	// Home is the host of a room hosted on another server.
 	Home string `json:"home,omitempty"`
+	// RemoteID is the room's id on its host, when it differs from ours.
+	RemoteID string `json:"remote_id,omitempty"`
 }
 
 type listResponse struct {
@@ -153,8 +155,12 @@ func renderRooms(format string, rooms []roomView, out io.Writer) error {
 		tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintln(tw, "ID\tNAME\tOWNER\tCREATED\tARCHIVED\tHOME")
 		for _, r := range rooms {
+			home := cmp.Or(agent.OneLine(r.Home), "-")
+			if r.RemoteID != "" {
+				home += " (" + agent.OneLine(r.RemoteID) + ")"
+			}
 			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n",
-				r.ID, agent.OneLine(r.Name), r.OwnerKeyID, r.CreatedAt, r.ArchivedAt, cmp.Or(agent.OneLine(r.Home), "-"))
+				r.ID, agent.OneLine(r.Name), r.OwnerKeyID, r.CreatedAt, r.ArchivedAt, home)
 		}
 		return tw.Flush()
 	default:
