@@ -1,0 +1,50 @@
+{
+  "comment": "Test vectors of the Conclave federation protocol, version 1 (docs/protocol.md). The seeds are the published test keys 1 and 2 of RFC 8032, section 7.1: never use them for a server. Strings are the exact bytes; signing strings have no trailing newline. internal/federation/vectors_test.go recomputes every value.",
+  "key": {
+    "seed": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+    "public_key": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+    "fingerprint": "SHA256:If4x36FUomFia_hUBG_SJxt77UtqvkWqWId-9H-XIbk",
+    "key_id": "ed25519:If4x36FUomFia_hU"
+  },
+  "request": {
+    "method": "POST",
+    "path_query": "/fed/v1/rooms/01JCV7Q5M8XKZ3T4B6N2P9R0WY/claims?author=a1%40a.example",
+    "destination": "b.example",
+    "origin": "a.example",
+    "ts": 1794650400,
+    "nonce": "AAECAwQFBgcICQoLDA0ODw",
+    "body": "{\"paths\":[\"src/main.go\"],\"ttl_seconds\":600}",
+    "body_sha256": "fa9a9101b604e7e9ef58ca8829406f6d258e59a12888029843ba07509eb0659f",
+    "signing_string": "conclave-sig-v1\nPOST\n/fed/v1/rooms/01JCV7Q5M8XKZ3T4B6N2P9R0WY/claims?author=a1%40a.example\nb.example\na.example\n1794650400\nAAECAwQFBgcICQoLDA0ODw\nfa9a9101b604e7e9ef58ca8829406f6d258e59a12888029843ba07509eb0659f",
+    "signature": "U84ak1PqOYtUXAgF7YhmZHEnDP8-QiY2J5oSeUBUnhMZjZVLnA5lL-J6YbyVhzZqXmSvYX_u0QZTpABjwiWpCg",
+    "authorization": "Conclave-Sig-v1 origin=\"a.example\",key=\"ed25519:If4x36FUomFia_hU\",ts=\"1794650400\",nonce=\"AAECAwQFBgcICQoLDA0ODw\",sig=\"U84ak1PqOYtUXAgF7YhmZHEnDP8-QiY2J5oSeUBUnhMZjZVLnA5lL-J6YbyVhzZqXmSvYX_u0QZTpABjwiWpCg\""
+  },
+  "endorsement": {
+    "domain": "a.example",
+    "previous_key_id": "ed25519:If4x36FUomFia_hU",
+    "key": {
+      "seed": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb",
+      "public_key": "PUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw",
+      "fingerprint": "SHA256:OfcT0KZEJT8EUpQhufUbmwiXnQgpWVnE85kO5hf1E58",
+      "key_id": "ed25519:OfcT0KZEJT8EUpQh"
+    },
+    "signing_string": "conclave-key-v1\na.example\ned25519:If4x36FUomFia_hU\ned25519:OfcT0KZEJT8EUpQh\nPUAXw-hDiVqStwqnTRt-vJyYLM8uxJaMwM1V8Sr0Zgw",
+    "signature": "sPgDw2xskKuLpl2adTnd5OMyKiKM1R2MFHwpdZDqwPtRaE4gV7KhgHPi6_LpRTJQ7qcsO72AQk39yB5EDj22Bw"
+  },
+  "author_signature": {
+    "room": "01JCV7Q5M8XKZ3T4B6N2P9R0WY@b.example",
+    "author": "a1@a.example",
+    "content_type": "text/plain",
+    "message_type": "answer",
+    "content": "Looks good to me.",
+    "metadata": "{\"lang\":\"en\"}",
+    "reply_to": 41,
+    "nonce": "EBESExQVFhcYGRobHB0eHw",
+    "signing_string": "conclave-msg-v1\n01JCV7Q5M8XKZ3T4B6N2P9R0WY@b.example\na1@a.example\ntext/plain\nanswer\n52eaefe1b0dca62010c30f6ff321e7f42fc945bd0cd665ed2dc9627b0f32eeba\ndf328ab0fa16f1c139f21fff0eb7e85ea53c8890f33783f9874ed1a9516b08af\n41\nEBESExQVFhcYGRobHB0eHw",
+    "signature": "vkXv9SlpMs5hUYWbG0VME-yOX0IUXFtAIcq7kISZU26gIB5xZlPwexnt1m0HrMbZcU-x-wHhSoYR6y5q3X7iBg"
+  },
+  "metadata_wire": {
+    "metadata": "{\"z\": {\"b\": 1, \"a\": [2, {\"y\": \"<&>\", \"x\": 3}]}, \"reply_to\": 41, \"a\": null}",
+    "wire": "{\"a\":null,\"z\":{\"b\":1,\"a\":[2,{\"y\":\"<&>\",\"x\":3}]}}"
+  }
+}

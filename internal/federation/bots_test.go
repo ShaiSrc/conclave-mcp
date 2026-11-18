@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"golang.org/x/time/rate"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
 	"github.com/hermes/conclave-mcp/internal/bots"
@@ -31,7 +33,7 @@ var (
 
 // addBot creates a key on db with handle, display name "Bot <handle>"
 // and visibility vis.
-func addBot(t *testing.T, db *sql.DB, handle, vis string) {
+func addBot(t testing.TB, db *sql.DB, handle, vis string) {
 	t.Helper()
 	ctx := context.Background()
 	res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at) VALUES (?, 'x', ?, '2026-01-01T00:00:00Z')`, handle, handle)
@@ -367,6 +369,30 @@ func TestLookup_PerKeyLimit(t *testing.T) {
 	}
 }
 
+// Remote lookups are limited per peer too, whichever keys ask: a burst
+// of 5, then 429 with Retry-After. Other peers are not affected.
+func TestLookup_PerPeerLimit(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	var hits atomic.Int32
+	answer := func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, `{"handle":"bob"}`)
+	}
+	d, other := fakePeer(t, svc, answer), fakePeer(t, svc, answer)
+	for i := range 5 {
+		entryOf(t, lookup(svc, svc.db, auth.Claims{KeyID: 100 + int64(i)}, "bob@"+d))
+	}
+	rec := lookup(svc, svc.db, auth.Claims{KeyID: 200}, "bob@"+d)
+	wantErr(t, rec, http.StatusTooManyRequests, "rate_limited")
+	if ra, err := strconv.Atoi(rec.Header().Get("Retry-After")); err != nil || ra < 1 {
+		t.Errorf("Retry-After %q", rec.Header().Get("Retry-After"))
+	}
+	entryOf(t, lookup(svc, svc.db, auth.Claims{KeyID: 200}, "bob@"+other))
+	if n := hits.Load(); n != 6 {
+		t.Errorf("requests to the peers: %d, want 6", n)
+	}
+}
+
 // A peer that does not answer gets a generic 502; the detail goes to
 // the log only.
 func TestLookup_UnreachableIsGeneric(t *testing.T) {
@@ -446,13 +472,13 @@ func TestLookup_FederationOff(t *testing.T) {
 }
 
 // A remote answer is signed for, checked and cleaned: an answer for
-// another bot or another server is refused, as is one over 2 MiB.
+// another bot or another server is refused, as is one over 64 KiB.
 func TestLookup_RemoteAnswerChecked(t *testing.T) {
 	svc := newLocal(t, "allowlist")
 	answers := map[string]string{
 		"/fed/v1/bots/bob":  `{"handle":"bob","display_name":"‮Bob\u0000","description":"hi​","skills":[{"id":"x","name":"X"},{"id":"Bad Id"}],"visibility":"peers"}`,
-		"/fed/v1/bots/wide": `{"handle":"wide","description":"` + strings.Repeat("a", 100<<10) + `"}`,
-		"/fed/v1/bots/big":  `{"handle":"big","description":"` + strings.Repeat("a", 3<<20) + `"}`,
+		"/fed/v1/bots/wide": `{"handle":"wide","description":"` + strings.Repeat("a", 60<<10) + `"}`,
+		"/fed/v1/bots/big":  `{"handle":"big","description":"` + strings.Repeat("a", 64<<10) + `"}`,
 		"/fed/v1/bots/eve":  `{"handle":"mallory"}`,
 		"/fed/v1/bots/carl": `{"handle":"carl@other.example"}`,
 		"/fed/v1/bots/junk": `not json`,
@@ -471,6 +497,7 @@ func TestLookup_RemoteAnswerChecked(t *testing.T) {
 		}
 		_, _ = io.WriteString(w, body)
 	})
+	svc.peerLookups[d] = rate.NewLimiter(rate.Inf, 0) // more lookups than the per-peer burst
 	if e := entryOf(t, lookup(svc, svc.db, plainKey, "bob@"+d)); e.DisplayName != "Bob" || e.Description != "hi" ||
 		len(e.Skills) != 1 || e.Skills[0].ID != "x" || e.Address != "bob@"+d || !e.Remote {
 		t.Errorf("bob: %+v", e)
@@ -554,16 +581,16 @@ func TestDirectory_RefreshChecksEntries(t *testing.T) {
 	}
 }
 
-// A refresh keeps at most 50 entries of a page and 1000 of a peer.
+// A refresh keeps 20 pages of 50 bots: 1000 of a peer.
 func TestDirectory_RefreshBounds(t *testing.T) {
 	ctx := context.Background()
 	svc := newLocal(t, "allowlist")
-	// page answers with 5000 bots named after the page number, and a
+	// page answers with 50 bots named after the page number, and a
 	// next page only if more.
 	page := func(more bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			n, _ := strconv.Atoi(r.URL.Query().Get("page"))
-			list := make([]string, 5000)
+			list := make([]string, directoryPage)
 			for i := range list {
 				list[i] = fmt.Sprintf(`{"handle":"p%02d-%04d"}`, n, i)
 			}
@@ -581,6 +608,100 @@ func TestDirectory_RefreshBounds(t *testing.T) {
 		if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, d); n != want {
 			t.Errorf("cached bots: %d, want %d", n, want)
 		}
+	}
+}
+
+// A directory page with an array over its bound is refused before it
+// is decoded, and the old rows stay: more than 50 bots, more than 20
+// skills of a bot (the key in any case, as encoding/json matches it),
+// any other array over 50, or nesting deeper than 16.
+func TestDirectory_LongArraysRefused(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	var answer atomic.Value
+	d := fakePeer(t, svc, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, answer.Load().(string)) })
+	list := func(n int, elem string) string { return strings.TrimSuffix(strings.Repeat(elem+",", n), ",") }
+	page := func(bots string) string { return `{"bots":[` + bots + `],"next":null}` }
+	skills := func(key string, n int) string {
+		return page(`{"handle":"bob","` + key + `":[` + list(n, `{"id":"x"}`) + `]}`)
+	}
+	answer.Store(page(`{"handle":"keep"}`))
+	if err := svc.refreshDirectory(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		body string
+		ok   bool
+	}{
+		{page(list(50, `{"handle":"bob"}`)), true},
+		{page(list(51, `{"handle":"bob"}`)), false},
+		{page(list(51, `1`)), false},
+		{skills("skills", 20), true},
+		{skills("skills", 21), false},
+		{skills("Skills", 21), false},
+		{skills("ſkills", 21), false},
+		{page(`{"handle":"bob","other":[` + list(51, `1`) + `]}`), false},
+		{`{"bots":[],"next":null,"x":[[` + list(51, `[]`) + `]]}`, false},
+		{`{"bots":[],"next":null,"x":` + strings.Repeat(`[`, 16) + strings.Repeat(`]`, 16) + `}`, false},
+		{`{"bots":[],"next":null,"x":` + strings.Repeat(`[`, 15) + strings.Repeat(`]`, 15) + `}`, true},
+	} {
+		answer.Store(c.body)
+		err := svc.refreshDirectory(ctx, d)
+		if (err == nil) != c.ok {
+			t.Errorf("%.80s…: err %v, want ok %v", c.body, err, c.ok)
+		}
+		if !c.ok && count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ? AND handle = 'keep'`, d) != 1 {
+			t.Fatalf("%.80s…: the old rows are gone", c.body)
+		}
+		if c.ok {
+			answer.Store(page(`{"handle":"keep"}`))
+			if err := svc.refreshDirectory(ctx, d); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+// A 2 MiB directory page of [1,1,…] is refused at little cost: decoded
+// as profiles it took about 600 MiB.
+func TestDirectory_ArrayPageCheap(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	page := `{"bots":[` + strings.Repeat("1,", (maxBotsBody-30)/2) + `1],"next":null}`
+	d := fakePeer(t, svc, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, page) })
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err := svc.refreshDirectory(context.Background(), d)
+	runtime.ReadMemStats(&after)
+	if err == nil {
+		t.Error("a page of a million bots was accepted")
+	}
+	t.Logf("the refresh allocated %d KiB", (after.TotalAlloc-before.TotalAlloc)>>10)
+	if n := after.TotalAlloc - before.TotalAlloc; n > 64<<20 {
+		t.Errorf("the refresh allocated %d MiB", n>>20)
+	}
+}
+
+// A bot the operator blocked leaves the directory at once, and a
+// refresh does not cache it again.
+func TestDirectory_BlockedBotHidden(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	d := fakePeer(t, svc, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"bots":[{"handle":"bob"},{"handle":"carl"}],"next":null}`)
+	})
+	if err := svc.refreshDirectory(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := svc.blockBot(ctx, "bob@"+d, "", adminKey.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	wantList(t, addresses(t, botDo(svc, svc.db, plainKey, "/v1/directory")), "carl@"+d+" remote")
+	if err := svc.refreshDirectory(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, svc.db, `SELECT COUNT(*) FROM remote_bots WHERE domain = ?`, d); n != 1 {
+		t.Errorf("cached bots after a refresh: %d, want 1", n)
 	}
 }
 
@@ -696,6 +817,15 @@ func TestDirectory_FullPageFitsCap(t *testing.T) {
 		if rec.Code != 200 || rec.Body.Len() >= maxBotsBody || strings.Contains(rec.Body.String(), "\\u") {
 			t.Fatalf("%+q: status %d, %d bytes (cap %d)", c, rec.Code, rec.Body.Len(), maxBotsBody)
 		}
+		// One bot's profile fits the 64 KiB a lookup reads.
+		rec = serve(peer, signedGet2(t, svc.id(), peer.id().Domain, "/fed/v1/bots/bot000"))
+		t.Logf("%+q: one bot is %d bytes", c, rec.Body.Len())
+		if rec.Code != 200 || rec.Body.Len() >= maxBody {
+			t.Fatalf("%+q: bot: status %d, %d bytes (cap %d)", c, rec.Code, rec.Body.Len(), maxBody)
+		}
+		if e := entryOf(t, lookup(svc, svc.db, plainKey, "bot000@"+peer.id().Domain)); len(e.Skills) != 20 || e.Description == "" {
+			t.Errorf("%+q: lookup: %+v", c, e)
+		}
 		if err := svc.refreshDirectory(ctx, peer.id().Domain); err != nil {
 			t.Fatal(err)
 		}
@@ -714,4 +844,77 @@ func signedGet2(t *testing.T, id *Identity, domain, path string) *http.Request {
 		t.Fatal(err)
 	}
 	return req
+}
+
+// A refresh refused because the peer does not allow us yet is retried
+// when the peer contacts us, at most once a minute.
+func TestDirectory_RetriedOnContact(t *testing.T) {
+	ctx := context.Background()
+	svc := newLocal(t, "allowlist")
+	peer := newPeer(t, svc)
+	if err := peer.peers.Remove(ctx, svc.id().Domain); err != nil {
+		t.Fatal(err)
+	}
+	allow(t, svc, peer.id())
+	d := peer.id().Domain
+	svc.refreshLogged(ctx, d)
+	if _, ok := svc.dirFailed.Load(d); !ok {
+		t.Fatal("a refused refresh is not recorded")
+	}
+
+	allow(t, peer, svc.id())
+	ping := func() {
+		t.Helper()
+		if rec := serve(svc, signed(t, peer.id(), local, "{}")); rec.Code != 200 {
+			t.Fatalf("ping: %d %s", rec.Code, rec.Body)
+		}
+	}
+	ping()
+	select {
+	case got := <-svc.refresh:
+		if got != d {
+			t.Fatalf("refresh of %q, want %q", got, d)
+		}
+	default:
+		t.Fatal("contact did not retry the refresh")
+	}
+	svc.refreshLogged(ctx, d)
+	if _, ok := svc.dirFailed.Load(d); ok {
+		t.Fatal("a successful refresh stays recorded")
+	}
+
+	// A refresh that keeps failing is retried at most once a minute.
+	svc.dirFailed.Store(d, svc.now())
+	ping()
+	select {
+	case <-svc.refresh:
+		t.Fatal("retried within a minute")
+	default:
+	}
+}
+
+// Contacts that arrive together claim a due retry once: one refresh is
+// queued, not one per contact.
+func TestDirectory_RetryClaimedOnce(t *testing.T) {
+	svc := newLocal(t, "allowlist")
+	for round := 0; round < 20; round++ {
+		svc.dirFailed.Store("peer.example", time.Time{})
+		start := make(chan struct{})
+		done := make(chan struct{})
+		for i := 0; i < 16; i++ {
+			go func() {
+				<-start
+				svc.retryDirectory("peer.example")
+				done <- struct{}{}
+			}()
+		}
+		close(start)
+		for i := 0; i < 16; i++ {
+			<-done
+		}
+		if n := len(svc.refresh); n != 1 {
+			t.Fatalf("round %d: %d refreshes queued, want 1", round, n)
+		}
+		<-svc.refresh
+	}
 }

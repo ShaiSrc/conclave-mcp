@@ -20,7 +20,7 @@ import (
 	"github.com/hermes/conclave-mcp/migrations"
 )
 
-func testDB(t *testing.T) *sql.DB {
+func testDB(t testing.TB) *sql.DB {
 	t.Helper()
 	db, closeDB, err := storage.Open(context.Background(), filepath.Join(t.TempDir(), "data.db"))
 	if err != nil {

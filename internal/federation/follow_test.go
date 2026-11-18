@@ -191,6 +191,7 @@ func TestFollowRemote_IncomingLimit(t *testing.T) {
 	g := newRoomRig(t)
 	h := newFakeHost(t, g)
 	g.followBot(t, "b1", "approve")
+	g.followBot(t, "b2", "approve") // b1 then holds as many pending requests of h's bots as it takes
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 	g.svc.now = func() time.Time { return now }
 	lims, err := g.svc.limitersOf(context.Background(), h.id.Domain)
@@ -212,7 +213,7 @@ func TestFollowRemote_IncomingLimit(t *testing.T) {
 		t.Errorf("%d limit refusals audited, want 1", n)
 	}
 	now = now.Add(time.Minute)
-	if rec := h.follow(t, g, h.addr("x101"), "b1"); rec.Code != http.StatusCreated {
+	if rec := h.follow(t, g, h.addr("x101"), "b2"); rec.Code != http.StatusCreated {
 		t.Errorf("a minute later: %d %s", rec.Code, rec.Body)
 	}
 }
@@ -904,14 +905,11 @@ func TestFollowRemote_OldReplicaArchived(t *testing.T) {
 	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ?`, b2.KeyID); n != 0 {
 		t.Error("b2's follow, in the archived replica only, is kept")
 	}
-	// Removed from the old replica, b1 keeps the follow it holds through
-	// the newer one.
+	// The archived old replica takes no more events: b1 keeps the follow
+	// it holds through the newer one.
 	h.push(t, g, old, removeEv(2, "b1@"+g.svc.Domain()))
-	if n := count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, old, b1.KeyID); n != 0 {
-		t.Error("b1 is still in the old replica")
-	}
 	if n := count(t, g.db, `SELECT COUNT(*) FROM follows WHERE follower_key_id = ? AND status = 'accepted'`, b1.KeyID); n != 1 {
-		t.Error("b1's follow ended with its removal from the old replica")
+		t.Error("b1's follow ended with a removal from the old replica")
 	}
 }
 

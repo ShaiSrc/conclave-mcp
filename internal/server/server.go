@@ -42,13 +42,14 @@ import (
 // Server is the Conclave MCP HTTP server. Construct with New and
 // call Start.
 type Server struct {
-	cfg    Config
-	logger *slog.Logger
-	router chi.Router
-	http   *http.Server
-	fed    *http.Server // the federation listener; nil with federation off
-	fedSvc *federation.Service
-	fedRun func(context.Context) // the federation loops, fedSvc.Run; nil with federation off
+	cfg       Config
+	logger    *slog.Logger
+	router    chi.Router
+	http      *http.Server
+	fed       *http.Server // the federation listener; nil with federation off
+	fedSvc    *federation.Service
+	fedRun    func(context.Context) // the federation loops, fedSvc.Run; nil with federation off
+	startedAt time.Time             // when New built the server, for GET /v1/server
 
 	mu      sync.Mutex
 	started bool
@@ -62,6 +63,9 @@ type Config struct {
 	ReadHeader  time.Duration // default 5s
 	IdleTimeout time.Duration // default 120s
 	Logger      *slog.Logger
+	// Version is the build's version, answered by GET /v1/server to
+	// admin keys only: never in /healthz or the server document.
+	Version string
 
 	// Federation. An empty FederationDomain turns it off: no second
 	// listener, no key.
@@ -84,7 +88,7 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		cfg.IdleTimeout = 120 * time.Second
 	}
 
-	s := &Server{cfg: cfg, logger: cfg.Logger}
+	s := &Server{cfg: cfg, logger: cfg.Logger, startedAt: time.Now().UTC()}
 
 	// The web UI and its sessions exist only on a loopback
 	// listen address (docs/web-ui.md).
@@ -117,7 +121,11 @@ func New(cfg Config, deps Deps) (*Server, error) {
 		Handler:           s.router,
 		ReadHeaderTimeout: cfg.ReadHeader,
 		IdleTimeout:       cfg.IdleTimeout,
-		// No WriteTimeout: long-running MCP streams may block on writes.
+		// No ReadTimeout or WriteTimeout: they would cut SSE streams and
+		// long MCP calls. A body must arrive within 30s, before
+		// authentication (BodyDeadline), bodies are capped
+		// (BodyLimitMiddleware), and the SSE handler sets a deadline on
+		// each write.
 		// No ErrorLog: rare net/http errors fall through to log.Default.
 	}
 
@@ -187,6 +195,7 @@ type DBHealthChecker interface {
 
 func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Service) (chi.Router, error) {
 	r := chi.NewRouter()
+	r.Use(BodyDeadline) // first: it needs the server's own ResponseWriter
 	r.Use(RequestIDMiddleware())
 	r.Use(RecoveryMiddleware(s.logger))
 
@@ -275,6 +284,10 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		}
 	}
 
+	// Every /v1 body is capped at a message plus 64 KiB, after auth, so
+	// a stranger's body is never read.
+	bodyCap := BodyLimitMiddleware(s.logger, int64(messagesSvc.MaxMessageBytes)+64<<10)
+
 	r.Route("/v1", func(r chi.Router) {
 		// Auth applies to all /v1 endpoints, per SPEC-0003.
 		r.Use(authMW)
@@ -285,6 +298,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		// Deps.RateLimitPerMin falls back to the SPEC-0003 §6
 		// default of 600 rpm with a burst of 30.
 		r.Use(RateLimitMiddleware(deps.RateLimitPerMin, BurstFromRate(deps.RateLimitPerMin)))
+		r.Use(bodyCap)
 
 		// Keys endpoints (SPEC-0003 §3): bootstrap key can call
 		// these; the keys service enforces that internally.
@@ -306,6 +320,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 		if uiSvc != nil {
 			uiSvc.V1Routes(r)
 		}
+		r.Get("/server", s.handleServerInfo(deps.DB))
 
 		// 404/405 envelopes apply AFTER the routes are mounted,
 		// otherwise the NotFound handler shadows the routes.
@@ -319,7 +334,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// calls back to the Conclave control plane. This means
 	// /v1/mcp does NOT bypass auth — the verifier.Middleware
 	// already validated the token before the handler runs.
-	r.With(verifier.Middleware()).Post("/v1/mcp", s.mcpProxy())
+	r.With(verifier.Middleware(), bodyCap).Post("/v1/mcp", s.mcpProxy())
 
 	// /v1/rooms/{id}/events — SSE stream of new messages
 	// (ADR-0009). Mounted at the router level (not inside
@@ -328,7 +343,7 @@ func (s *Server) buildRouter(deps Deps, uiSvc *ui.Service, fedSvc *federation.Se
 	// would kill long-lived connections.
 	if deps.Broker != nil {
 		evH := events.NewHandler(deps.DB, deps.Broker)
-		r.With(authMW).Get("/v1/rooms/{id}/events", evH.Handle)
+		r.With(authMW, bodyCap).Get("/v1/rooms/{id}/events", evH.Handle)
 	}
 
 	// A change the operator confirmed with a passkey runs through the
@@ -451,6 +466,31 @@ func (s *Server) notFound(w http.ResponseWriter, r *http.Request) {
 // methodNotAllowed returns 405.
 func (s *Server) methodNotAllowed(w http.ResponseWriter, r *http.Request) {
 	writeError(w, r, s.logger, http.StatusMethodNotAllowed, "bad_request", "method not allowed")
+}
+
+// handleServerInfo answers GET /v1/server to admin keys: the version,
+// the schema version from meta, the start time and the federation
+// settings. With federation off, domain and mode are empty; protocol is
+// the one this build speaks.
+func (s *Server) handleServerInfo(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !auth.IsAdmin(r.Context()) {
+			writeError(w, r, s.logger, http.StatusForbidden, "forbidden", "admin key required")
+			return
+		}
+		var schema int
+		if err := db.QueryRowContext(r.Context(), `SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'`).Scan(&schema); err != nil {
+			writeError(w, r, s.logger, http.StatusInternalServerError, "internal_error", "internal error")
+			return
+		}
+		fed := map[string]any{"enabled": s.fedSvc != nil, "domain": "", "mode": "", "protocol": federation.Protocol}
+		if s.fedSvc != nil {
+			fed["domain"], fed["mode"] = s.fedSvc.Domain(), s.cfg.FederationMode
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"version": s.cfg.Version, "schema_version": schema,
+			"started_at": s.startedAt.Format(time.RFC3339), "federation": fed})
+	}
 }
 
 func (s *Server) handleHealthz(deps Deps) http.HandlerFunc {

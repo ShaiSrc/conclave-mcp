@@ -18,14 +18,15 @@ import (
 )
 
 const (
-	maxBody          = 64 << 10         // request and response bodies
-	fetchTimeout     = 5 * time.Second  // documents, pings, bot lookups; dialing and TLS of every request
-	roomTimeout      = 30 * time.Second // room requests: invites, pushes, pulls, forwarded writes, leaves
-	fetchesPerMinute = 10               // documents of domains that are not allowed, server-wide
+	maxBody              = 64 << 10         // request and response bodies
+	fetchTimeout         = 5 * time.Second  // documents, pings, bot lookups; dialing and TLS of every request
+	roomTimeout          = 30 * time.Second // room requests: invites, pushes, pulls, forwarded writes, leaves
+	fetchesPerMinute     = 10               // first contacts: documents of domains that are not allowed, server-wide
+	peerFetchesPerMinute = 10               // re-pinning: documents of known peers that are not allowed, server-wide
 )
 
-// ErrFetchLimited is returned when the fetch budget for domains that
-// are not allowed is used up.
+// ErrFetchLimited is returned when a fetch budget for domains that are
+// not allowed is used up.
 var ErrFetchLimited = errors.New("too many federation document fetches, try again later")
 
 var errNonPublicAddr = errors.New("refusing a non-public address")
@@ -67,9 +68,10 @@ func inAny(a netip.Addr, ps []netip.Prefix) bool {
 type Fetcher struct {
 	insecureHTTP bool
 	isAllowed    func(domain string) bool
-	limit        *rate.Limiter
-	client       *http.Client // fetchTimeout
-	roomClient   *http.Client // roomTimeout, the same transport
+	limit        *rate.Limiter // first contacts (Document)
+	peerLimit    *rate.Limiter // known peers (peerDocument)
+	client       *http.Client  // fetchTimeout
+	roomClient   *http.Client  // roomTimeout, the same transport
 }
 
 type allowPrivateKey struct{}
@@ -81,6 +83,7 @@ func NewFetcher(insecureHTTP bool, isAllowed func(domain string) bool) *Fetcher 
 		insecureHTTP: insecureHTTP,
 		isAllowed:    isAllowed,
 		limit:        rate.NewLimiter(rate.Every(time.Minute/fetchesPerMinute), fetchesPerMinute),
+		peerLimit:    rate.NewLimiter(rate.Every(time.Minute/peerFetchesPerMinute), peerFetchesPerMinute),
 		client: &http.Client{
 			Timeout:       fetchTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -135,11 +138,22 @@ func public(a netip.Addr) bool {
 	return a.IsGlobalUnicast() && !a.IsPrivate() && !inAny(a, nonPublic)
 }
 
-// Document fetches and checks domain's server document. Domains that
-// are not allowed share a budget of 10 fetches a minute.
+// Document fetches and checks domain's server document, for a first
+// contact. Domains that are not allowed share a budget of 10 fetches a
+// minute.
 func (f *Fetcher) Document(ctx context.Context, domain string) (Document, error) {
+	return f.budgeted(ctx, domain, f.limit)
+}
+
+// peerDocument is Document for a known peer, to re-pin it, with a
+// budget of its own.
+func (f *Fetcher) peerDocument(ctx context.Context, domain string) (Document, error) {
+	return f.budgeted(ctx, domain, f.peerLimit)
+}
+
+func (f *Fetcher) budgeted(ctx context.Context, domain string, lim *rate.Limiter) (Document, error) {
 	allowed := f.isAllowed(domain)
-	if !allowed && !f.limit.Allow() {
+	if !allowed && !lim.Allow() {
 		return Document{}, ErrFetchLimited
 	}
 	return f.document(ctx, domain, allowed)
@@ -157,6 +171,13 @@ func (f *Fetcher) document(ctx context.Context, domain string, allowPrivate bool
 	if status != http.StatusOK {
 		return Document{}, fmt.Errorf("document of %s: status %d", domain, status)
 	}
+	return parseDocument(body, domain)
+}
+
+// parseDocument decodes body, the server document of domain, and checks
+// it: the protocol, the domain, at least one key, and each key's ID and
+// fingerprint against its public key.
+func parseDocument(body []byte, domain string) (Document, error) {
 	var doc Document
 	if err := json.Unmarshal(body, &doc); err != nil {
 		return Document{}, fmt.Errorf("document of %s: %w", domain, err)

@@ -2,6 +2,7 @@
 //
 //	conclave-mcp federation status
 //	conclave-mcp federation rotate-key
+//	conclave-mcp federation forget-old-keys
 //	conclave-mcp federation peers list [--format json|table]
 //	conclave-mcp federation peers show <domain>
 //	conclave-mcp federation peers add <domain> [--fingerprint F] [--note N]
@@ -40,7 +41,7 @@ func NewCmd() *cobra.Command {
 		newForgetKeysCmd())
 	bots := &cobra.Command{Use: "bots", Short: "Block single bots of other servers", Args: cobra.NoArgs}
 	bots.AddCommand(newBotBlockCmd(), newBotUnblockCmd(), newBotsBlockedCmd())
-	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), peers, bots)
+	cmd.AddCommand(newStatusCmd(), newRotateKeyCmd(), newForgetOldKeysCmd(), peers, bots)
 	return cmd
 }
 
@@ -311,6 +312,30 @@ func newRotateKeyCmd() *cobra.Command {
 				_, _ = fmt.Fprintf(out, "new key id:  %s\nfingerprint: %s\n"+
 					"peers follow the new key through the old key's endorsement; the old key stays listed for 30 days, and the next rotation is possible after them\n",
 					k.KeyID, k.Fingerprint)
+				return nil
+			})
+		},
+	}
+}
+
+func newForgetOldKeysCmd() *cobra.Command {
+	return &cobra.Command{
+		Use: "forget-old-keys", Args: cobra.NoArgs,
+		Short: "Delete this server's keys other than the current one, private keys included; after a key leak, rotate first",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return run(cmd, func(ctx context.Context, c *client.Client, out io.Writer) error {
+				var resp struct {
+					KeyID   string `json:"key_id"`
+					Dropped int
+					Erased  bool
+				}
+				if _, err := c.Do(ctx, client.Request{Method: "DELETE", Path: "/v1/federation/keys/previous", Out: &resp}); err != nil {
+					return err
+				}
+				_, _ = fmt.Fprintf(out, "%d old keys forgotten; the current key is %s\n", resp.Dropped, resp.KeyID)
+				if !resp.Erased {
+					_, _ = fmt.Fprintln(out, "their pages are not erased yet: the checkpoint did not complete (a reader may hold it); run forget-old-keys again")
+				}
 				return nil
 			})
 		},

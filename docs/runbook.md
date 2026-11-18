@@ -34,12 +34,12 @@ systemd, with a reverse proxy in front of it for TLS.
    install -d -m 0750 -o root -g root /etc/conclave-mcp
    install -m 0600 -o root -g root /dev/null /etc/conclave-mcp/conclave.env
    ```
-   Fill `conclave.env` with the values from SPEC-0005 §5. The
-   important keys: `CONCLAVE_BIND=127.0.0.1:7432`,
+   Fill `conclave.env` (every setting: [architecture.md](architecture.md#configuration)).
+   The important keys: `CONCLAVE_DB_PATH=/var/lib/conclave-mcp/data.db`,
+   `CONCLAVE_HOST=127.0.0.1`, `CONCLAVE_PORT=7432`,
    `CONCLAVE_MAX_MESSAGE_BYTES=262144`,
-   `RATE_LIMIT_PER_MIN=600`,
-   `AUDIT_RETENTION_DAYS=730`,
-   `CONCLAVE_LOG=info`. Do **not** put `CONCLAVE_API_KEY` here.
+   `CONCLAVE_RATE_LIMIT_PER_MIN=600`, `CONCLAVE_LOG_LEVEL=info`.
+   Do **not** put `CONCLAVE_API_KEY` here.
 6. Install the systemd unit from `packaging/systemd/` and enable
    it:
    ```sh
@@ -55,7 +55,7 @@ systemd, with a reverse proxy in front of it for TLS.
    can create more keys (SPEC-0003 §3.3), so store the returned
    plaintext in a password manager immediately. The command writes
    to the SQLite file directly, so stop the service first, point
-   `--db` (or `CONCLAVE_DATA_DIR`) at the service's database, run it
+   `--db` (or `CONCLAVE_DB_PATH`) at the service's database, run it
    as the service user, and start the service again:
    ```sh
    systemctl stop conclave-mcp
@@ -73,19 +73,12 @@ systemd, with a reverse proxy in front of it for TLS.
 
 ## Upgrade
 
-The migrations are forward-only and idempotent (SPEC-0002 §5).
-Roll-back is not supported in v0.x.
-
-1. Pull the new image (or replace the binary).
-2. Stop the service: `systemctl stop conclave-mcp`.
-3. Start the new version. On the first request the migration
-   runner will apply any new migrations in order.
-4. Verify: `curl -fsS http://127.0.0.1:7432/healthz` returns
-   200; create a key, a room, send a message — all should
-   succeed.
-5. Roll back by repeating steps 2-4 with the previous image.
-   Forward-only migrations may require restoring a backup of
-   the data dir if you need to downgrade.
+Follow [the upgrade guide](upgrading.md): read the notes of every
+version you skip, take an online backup (below, with `--db`) and go on
+only if it succeeds, stop the service, replace the binary or image,
+start it (migrations run at start, forward only), and check
+`conclave-mcp server`. There is no downgrade: roll back by restoring
+the backup with the old binary.
 
 ## Backup and restore
 
@@ -103,9 +96,9 @@ systemctl start conclave-mcp
 `-a` preserves modes and timestamps. The `*.db-wal` and
 `*.db-shm` files are included automatically.
 
-For an online backup (without stopping), use SQLite's `.backup`
-command from a separate process against the live DB file. The
-server does not expose a backup HTTP endpoint in v0.1.
+For an online backup, run `sudo -u conclave conclave-mcp backup
+--db /var/lib/conclave-mcp/data.db /var/backups/conclave-$(date +%F).db`.
+It refuses an existing file; the copy is mode 0600. No HTTP backup.
 
 **Restore:**
 
@@ -115,6 +108,13 @@ rm -rf /var/lib/conclave-mcp
 cp -a /var/backups/conclave-YYYY-MM-DD /var/lib/conclave-mcp
 chown -R conclave:conclave /var/lib/conclave-mcp
 systemctl start conclave-mcp
+```
+
+From an online backup file, run these between stop and start instead:
+
+```sh
+rm -f /var/lib/conclave-mcp/data.db-wal /var/lib/conclave-mcp/data.db-shm
+install -o conclave -g conclave -m 0600 /var/backups/conclave-YYYY-MM-DD.db /var/lib/conclave-mcp/data.db
 ```
 
 Downgrading the binary after upgrading the DB is not detected:
@@ -186,7 +186,7 @@ Mirrors the v0.1 security constraints (SPEC-0001 §4):
 - [ ] Backups run at least daily and the most recent backup
       has been restore-tested within the last 90 days.
 - [ ] The audit retention is set per your compliance regime
-      (`AUDIT_RETENTION_DAYS=730` default; increase to 2555 for
+      (`CONCLAVE_AUDIT_RETENTION=730d` default; `2555d` for
       7-year retention).
 
 ## What this runbook does not cover

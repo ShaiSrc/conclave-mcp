@@ -30,9 +30,10 @@ func TestList_Table(t *testing.T) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"entries": []map[string]any{
-				{"id": 1, "ts": "2026-01-01T00:00:00Z", "actor": "abc12345", "action": "message.send", "target_type": "room", "target_id": "r1", "request_id": "req-1"},
-				{"id": 2, "ts": "2026-01-02T00:00:00Z", "actor": "def67890", "action": "key.create"},
+				{"id": 2, "ts": "2026-01-02T00:00:00Z", "actor_key_id": 7, "action": "message.send", "target_type": "message", "target_id": "m1", "room_id": "r1", "result": "ok"},
+				{"id": 1, "ts": "2026-01-01T00:00:00Z", "action": "key.create", "target_type": "key", "target_id": "3", "result": "ok"},
 			},
+			"next_before": 1,
 		})
 	}))
 	defer srv.Close()
@@ -46,15 +47,20 @@ func TestList_Table(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if !strings.Contains(buf.String(), "abc12345") || !strings.Contains(buf.String(), "message.send") {
-		t.Errorf("table missing data: %s", buf.String())
+	for _, want := range []string{"ACTOR", "ROOM", "RESULT", "message.send", "message/m1", "r1", "ok", "system", "--before 1"} {
+		if !strings.Contains(buf.String(), want) {
+			t.Errorf("table lacks %q: %s", want, buf.String())
+		}
+	}
+	if !strings.Contains(strings.SplitN(buf.String(), "\n", 3)[1], "7") {
+		t.Errorf("first row lacks the actor key id: %s", buf.String())
 	}
 }
 
 func TestList_Filters(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.RawQuery
-		if !strings.Contains(q, "actor=abc") {
+		if !strings.Contains(q, "actor=7") || !strings.Contains(q, "before=9") {
 			t.Errorf("actor missing: %s", q)
 		}
 		if !strings.Contains(q, "action=key.create") {
@@ -70,7 +76,13 @@ func TestList_Filters(t *testing.T) {
 
 	var buf bytes.Buffer
 	sub := newListCmd()
-	_ = sub.Flags().Set("actor", "abc")
+	if err := sub.Flags().Set("actor", "abc12345"); err == nil {
+		t.Error("--actor takes a key id, not a key prefix")
+	}
+	if err := sub.Flags().Set("actor", "7"); err != nil {
+		t.Fatal(err)
+	}
+	_ = sub.Flags().Set("before", "9")
 	_ = sub.Flags().Set("action", "key.create")
 	_ = sub.Flags().Set("since", "2026-01-01T00:00:00Z")
 	_ = sub.Flags().Set("limit", "50")
@@ -116,7 +128,8 @@ func TestList_403IsExit1(t *testing.T) {
 func TestList_JSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
-			"entries": []map[string]any{{"id": 1, "action": "x"}},
+			"entries": []map[string]any{{"id": 1, "ts": "2026-01-01T00:00:00Z", "actor_key_id": 7, "action": "x",
+				"target_type": "room", "target_id": "r1", "room_id": "r1", "result": "ok", "detail": "{}"}},
 		})
 	}))
 	defer srv.Close()
@@ -131,9 +144,15 @@ func TestList_JSON(t *testing.T) {
 	if err := sub.RunE(sub, nil); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	var got []entry
-	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
-		t.Fatalf("not json: %v", err)
+	var got []map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil || len(got) != 1 {
+		t.Fatalf("not json: %v %s", err, buf.String())
+	}
+	// The API's fields, as the API names them.
+	for _, k := range []string{"id", "ts", "actor_key_id", "action", "target_type", "target_id", "room_id", "result", "detail"} {
+		if _, ok := got[0][k]; !ok {
+			t.Errorf("json output lacks %s: %s", k, buf.String())
+		}
 	}
 }
 

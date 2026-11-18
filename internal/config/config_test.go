@@ -12,7 +12,8 @@ func TestLoad_Defaults(t *testing.T) {
 	for _, k := range []string{
 		"CONCLAVE_HOST", "CONCLAVE_PORT", "CONCLAVE_DB_PATH",
 		"CONCLAVE_MAX_MESSAGE_BYTES", "MAX_CONCURRENT_VERIFY",
-		"RATE_LIMIT_PER_MIN", "CONCLAVE_AUDIT_RETENTION",
+		"RATE_LIMIT_PER_MIN", "CONCLAVE_MAX_CONCURRENT_VERIFY",
+		"CONCLAVE_RATE_LIMIT_PER_MIN", "CONCLAVE_AUDIT_RETENTION",
 		"CONCLAVE_LOG_LEVEL", "CONCLAVE_FEDERATION_DOMAIN",
 		"CONCLAVE_FEDERATION_HOST", "CONCLAVE_FEDERATION_PORT",
 		"CONCLAVE_FEDERATION_MODE", "CONCLAVE_FEDERATION_INSECURE_HTTP",
@@ -353,5 +354,45 @@ func TestParseRetention(t *testing.T) {
 				t.Errorf("parseRetention(%q): got %s, want %s", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+// The rate limit and the verify cap have CONCLAVE_ names; the old names
+// still apply, with a warning for serve to log, and lose to the new ones.
+func TestLoad_PrefixedLimitNames(t *testing.T) {
+	for _, k := range []string{"CONCLAVE_RATE_LIMIT_PER_MIN", "RATE_LIMIT_PER_MIN", "CONCLAVE_MAX_CONCURRENT_VERIFY", "MAX_CONCURRENT_VERIFY"} {
+		t.Setenv(k, "")
+	}
+	t.Setenv("CONCLAVE_RATE_LIMIT_PER_MIN", "120")
+	t.Setenv("CONCLAVE_MAX_CONCURRENT_VERIFY", "8")
+	c, err := Load(nil)
+	if err != nil || c.RateLimitPerMin != 120 || c.MaxConcurrentVerify != 8 || len(c.Warnings) != 0 {
+		t.Fatalf("new names: %+v %v", c, err)
+	}
+
+	t.Setenv("CONCLAVE_RATE_LIMIT_PER_MIN", "")
+	t.Setenv("CONCLAVE_MAX_CONCURRENT_VERIFY", "")
+	t.Setenv("RATE_LIMIT_PER_MIN", "60")
+	t.Setenv("MAX_CONCURRENT_VERIFY", "4")
+	c, err = Load(nil)
+	if err != nil || c.RateLimitPerMin != 60 || c.MaxConcurrentVerify != 4 {
+		t.Fatalf("old names: %+v %v", c, err)
+	}
+	if w := strings.Join(c.Warnings, "\n"); len(c.Warnings) != 2 ||
+		!strings.Contains(w, "RATE_LIMIT_PER_MIN is deprecated") || !strings.Contains(w, "CONCLAVE_RATE_LIMIT_PER_MIN") ||
+		!strings.Contains(w, "MAX_CONCURRENT_VERIFY is deprecated") || !strings.Contains(w, "CONCLAVE_MAX_CONCURRENT_VERIFY") {
+		t.Errorf("warnings: %q", c.Warnings)
+	}
+
+	t.Setenv("CONCLAVE_RATE_LIMIT_PER_MIN", "120")
+	t.Setenv("CONCLAVE_MAX_CONCURRENT_VERIFY", "8")
+	c, err = Load(nil)
+	if err != nil || c.RateLimitPerMin != 120 || c.MaxConcurrentVerify != 8 || len(c.Warnings) != 2 {
+		t.Fatalf("both names: %+v %v", c, err)
+	}
+
+	t.Setenv("CONCLAVE_RATE_LIMIT_PER_MIN", "fast")
+	if _, err := Load(nil); err == nil || !strings.Contains(err.Error(), "CONCLAVE_RATE_LIMIT_PER_MIN") {
+		t.Errorf("bad new name: %v", err)
 	}
 }

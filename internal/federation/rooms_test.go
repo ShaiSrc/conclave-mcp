@@ -110,7 +110,7 @@ type roomRig struct {
 	follow *follow.Service
 }
 
-func newRoomRig(t *testing.T) *roomRig {
+func newRoomRig(t testing.TB) *roomRig {
 	t.Helper()
 	return wireRig(t, newLocal(t, "allowlist"))
 }
@@ -137,7 +137,7 @@ func newLiveRig(t *testing.T) *roomRig {
 	return g
 }
 
-func wireRig(t *testing.T, svc *Service) *roomRig {
+func wireRig(t testing.TB, svc *Service) *roomRig {
 	t.Helper()
 	db := svc.db
 	broker := events.NewBroker()
@@ -168,7 +168,7 @@ func wireRig(t *testing.T, svc *Service) *roomRig {
 }
 
 // bot adds a local bot with handle and returns its key.
-func (g *roomRig) bot(t *testing.T, handle string) int64 {
+func (g *roomRig) bot(t testing.TB, handle string) int64 {
 	t.Helper()
 	res, err := g.db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, handle) VALUES (?, 'x', ?, '2026-01-01T00:00:00Z', ?)`,
 		handle, "p-"+handle, handle)
@@ -199,7 +199,7 @@ func (g *roomRig) fedDo(req *http.Request) *httptest.ResponseRecorder {
 	return rec
 }
 
-func (g *roomRig) room(t *testing.T, name string) string {
+func (g *roomRig) room(t testing.TB, name string) string {
 	t.Helper()
 	rec := g.do(g.admin, http.MethodPost, "/rooms", `{"name":"`+name+`"}`)
 	if rec.Code != http.StatusCreated {
@@ -225,7 +225,7 @@ func (g *roomRig) localBot(t *testing.T, room, label, rights string) auth.Claims
 	return auth.Claims{KeyID: id}
 }
 
-func (g *roomRig) invite(t *testing.T, room, address, rights string) int64 {
+func (g *roomRig) invite(t testing.TB, room, address, rights string) int64 {
 	t.Helper()
 	rec := g.do(g.admin, http.MethodPost, "/rooms/"+room+"/members", `{"address":"`+address+`","rights":["`+strings.ReplaceAll(rights, ",", `","`)+`"]}`)
 	if rec.Code != http.StatusCreated {
@@ -304,7 +304,7 @@ func applyAll(path string, body []byte) (int, string) {
 	return http.StatusOK, fmt.Sprintf(`{"applied":%d}`, in.Events[len(in.Events)-1].Seq)
 }
 
-func newMemberServer(t *testing.T, g *roomRig) *memberServer {
+func newMemberServer(t testing.TB, g *roomRig) *memberServer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -365,7 +365,7 @@ func (m *memberServer) req(t *testing.T, method, path string, body any) *http.Re
 
 // signedReq is a request to dest signed by id; body is marshalled
 // unless it is nil.
-func signedReq(t *testing.T, id *Identity, dest, method, path string, body any) *http.Request {
+func signedReq(t testing.TB, id *Identity, dest, method, path string, body any) *http.Request {
 	t.Helper()
 	var b []byte
 	if body != nil {
@@ -698,11 +698,19 @@ func TestRoomClaims_FromMember(t *testing.T) {
 		t.Fatalf("local claim: %d %s", rec.Code, rec.Body)
 	}
 	base := "/fed/v1/rooms/" + room + "/claims"
+	if rec := g.fedDo(m.req(t, http.MethodGet, base+"?author="+m.addr("c1"), nil)); rec.Code != http.StatusOK ||
+		strings.Contains(rec.Body.String(), "local-bot") {
+		t.Errorf("list: %d %s, want no local label", rec.Code, rec.Body)
+	}
 	as := "?author=" + m.addr("c1")
 	before := g.state(t)
 	rec := g.fedDo(m.req(t, http.MethodPost, base+as, map[string]any{"paths": []string{"a/b.go"}}))
-	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"label":"local-bot"`) {
-		t.Errorf("overlap: %d %s, want 409 naming local-bot", rec.Code, rec.Body)
+	// The holder is named by its address only: its label stays here.
+	holder := fmt.Sprintf("key-%d@%s", bot.KeyID, g.svc.Domain())
+	if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "local-bot") ||
+		!strings.Contains(rec.Body.String(), `"label":"`+holder+`"`) ||
+		!strings.Contains(rec.Body.String(), `"message":"a/b.go is claimed by `+holder+` (claim a/, until `) {
+		t.Errorf("overlap: %d %s, want 409 naming %s only", rec.Code, rec.Body, holder)
 	}
 	wantErr(t, g.fedDo(m.req(t, http.MethodPost, base+"?author="+m.addr("c2"), map[string]any{"paths": []string{"x/"}})), 403, "missing_right")
 	wantErr(t, g.fedDo(m.req(t, http.MethodPost, base+"?author=c1@c.example", map[string]any{"paths": []string{"x/"}})), 403, "wrong_origin")

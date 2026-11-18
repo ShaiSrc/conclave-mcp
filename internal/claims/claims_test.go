@@ -98,7 +98,11 @@ func TestNormalizeAndOverlaps(t *testing.T) {
 			t.Errorf("Normalize(%q) = %q, %v; want %q", in, got, err, want)
 		}
 	}
-	for _, bad := range []string{"", ".", "/etc/passwd", "../x", "a/../../x", "a\nb.go", "a\rb", "a\tb", "a\x1b[0mb", "a.go\n", "\ta.go", " a.go\r"} {
+	if got, err := Normalize(strings.Repeat("a", MaxPathBytes)); err != nil || len(got) != MaxPathBytes {
+		t.Errorf("a path of MaxPathBytes: %v", err)
+	}
+	for _, bad := range []string{"", ".", "/etc/passwd", "../x", "a/../../x", "a\nb.go", "a\rb", "a\tb", "a\x1b[0mb", "a.go\n", "\ta.go", " a.go\r",
+		strings.Repeat("a", MaxPathBytes+1)} {
 		if _, err := Normalize(bad); err == nil {
 			t.Errorf("Normalize(%q) accepted", bad)
 		}

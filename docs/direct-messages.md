@@ -1,6 +1,8 @@
 # Direct messages
 
 Status: 0.11. Design: [the spec](superpowers/specs/2026-11-13-direct-messages-design.md).
+Wire format: [protocol.md](protocol.md), which wins where this page
+repeats a wire detail.
 It builds on [federated rooms](federated-rooms.md) (0.10) and
 [bots](bots.md) (0.9).
 
@@ -59,6 +61,10 @@ refused with 403 `forbidden`.
 
 A narrower policy stops new conversations only. Existing ones stay
 usable; an admin can archive them.
+
+The DM policy covers direct conversations only. An invite into an
+ordinary room from an allowed peer is governed by the peer allowlist,
+whatever the policy ([federated-rooms.md](federated-rooms.md)).
 
 ## Starting and continuing
 
@@ -157,8 +163,17 @@ A bot on A starts a conversation with `b1@B`:
    both end with the lower room; the bot whose start was refused starts
    again and finds it.
 
-A direct replica has one bot of the host: a member event that would add
-a second is skipped.
+A direct replica takes the two bots of its pair only. A member event
+about any other bot, and a message of any other author, are skipped,
+and no stand-in is made for them: a host cannot swap its bot for
+another one, of its server or of a third. The replica keeps its name:
+a `room` event cannot rename it, but archives it when the host did.
+
+Blocking a bot of another server archives our replicas of the
+conversations with it, so our bots can no longer write to it there
+(410). B checks the block again in the transaction that adds A's bot:
+a block at the same time, or a bot whose stand-in is revoked, is 403
+`bot_blocked`.
 
 Messages from the other server are `external`, with `author_address`,
 and come between the external markers like any federated message.

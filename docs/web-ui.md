@@ -125,7 +125,9 @@ Until. Rotate key asks in the page, then for the passkey, and makes a
 new key current at once. Peers follow the rotation through the old
 key's endorsement, with no new fingerprint check. While a previous key
 is listed, another rotation shows "Not rotated: the previous key is
-still in its 30-day overlap".
+still in its 30-day overlap". Forget old keys, after a key leak and a
+rotation, deletes every key but the current one, private keys
+included: our bots' messages signed with them no longer verify here.
 
 **Peers** lists each peer with:
 
@@ -162,6 +164,18 @@ address, note and since. Block bot takes an address (`name@domain`) and
 a note; Unblock lifts a block, and the bot's memberships and follows
 stay ended.
 
+## Server
+
+The Server entry shows what runs: version, schema version, start time
+(`GET /v1/server`), federation on or off with its domain and mode, and
+the protocol. Below it is the backup command to run on the server's
+machine before an upgrade, `conclave-mcp backup
+/path/to/conclave-backup.db` (with `--db` for a database elsewhere than
+`./.conclave-mcp/data.db`), and a link to the
+[upgrade guide](https://github.com/ShaiSrc/conclave-mcp/blob/main/docs/upgrading.md).
+The page only reads. A backup holds the server's private federation key,
+so the page cannot take or download one.
+
 ## Federated rooms
 
 With federation on, the room page lists each member with its address and
@@ -181,7 +195,9 @@ A replica room is marked `hosted by <domain>`. The page hides what the
 server refuses there: inviting, rights, archiving, removing remote
 members, deleting messages and operator messages (the operator key has
 no address on the host). Removing a local bot stays; it is that bot
-leaving the room. Claims are held on the host, which shows them to
+leaving the room. When the host refuses or does not answer, the page
+shows its error and Leave here only, which takes the bot out here only
+(`?force=true`). Claims are held on the host, which shows them to
 member bots only, so the page names the host instead of listing them.
 See [federated-rooms.md](federated-rooms.md).
 
@@ -297,7 +313,7 @@ mark:
 |---|---|
 | Who the UI acts as | An admin key labelled `operator`, created by the first registration. The UI knows it by its id, kept in the `meta` table (`ui_operator_key_id`), not by its label. Its secret is random and never shown or stored in plain text, so only UI sessions act as it. An agent holding the admin key already has every right the operator key has: the UI does not protect against that, it only keeps such an agent from getting its own UI login. The audit log shows UI actions as `operator`, apart from CLI use of the bootstrap admin key. |
 | Trust anchor | The first passkey needs a setup token (10 minutes, single use) and is accepted only while no passkey exists. Later passkeys can only be added from a logged-in session, confirmed with a passkey already registered, so neither an agent holding the admin key nor one driving the browser (which could offer a virtual authenticator) can add its own. `POST /v1/ui/setup-tokens` answers 409 once a passkey exists. |
-| Passkeys | WebAuthn with user verification required, discoverable credentials, no attestation. The server stores public keys only. A failed registration or login answers `passkey not accepted` and is audited with the reason. A login whose sign counter went backwards (a possible cloned passkey) is refused and audited. At most 64 ceremonies are open at once; more get 503. |
+| Passkeys | WebAuthn with user verification required, discoverable credentials, no attestation. The server stores public keys only. A failed registration or login answers `passkey not accepted` and is audited with the reason. A login whose sign counter went backwards (a possible cloned passkey) is refused and audited. At most 64 logins (and first-passkey registrations) are open at once; one more drops the oldest open login, so a flood of logins cannot lock the operator out. Confirmations and operator messages have 8 slots per session that logins cannot take; one more drops that session's oldest. |
 | Session | A token of 32 random bytes, returned by the passkey login (and the first registration). The page keeps it in memory only and sends it in the header `X-Conclave-UI`. It is not a cookie: browsers send `localhost` cookies to every port on `localhost`, so any local program listening on another port could collect one. It is not in `localStorage` or `sessionStorage` either: browsers keep those unencrypted on disk, readable by any program of the same user. Hence a reload or a new tab needs a passkey login. The database keeps only the token's SHA-256. A session ends after 1 hour without use and 12 hours after login; logout deletes it. The only cookie left is `conclave_ui_ceremony`, which ties a passkey ceremony's begin to its finish for 5 minutes; a local program that collects it can make a login, registration or message confirmation in progress fail, but cannot take it over, because the signature must come from the operator's authenticator on the `http://localhost:<port>` page. |
 | `/v1` with a session | Accepted only with the token in `X-Conclave-UI` (a site cannot send it cross-origin without CORS, which the server does not allow, nor does it know the token), a `Host` of `localhost:<port>` or `127.0.0.1:<port>` (against DNS rebinding) and, for anything but GET, the `Origin` `http://localhost:<port>`. A session alone only reads: anything but GET runs only through a passkey confirmation, which marks the request in the server's memory (no header or field can). No cookie counts as a session. `/v1/mcp` takes bearer keys only. |
 | `/ui` requests | A foreign `Host` gets 403. Every non-GET request needs the exact `Origin`. Bodies are capped at 64 KiB. |
@@ -322,6 +338,8 @@ mark:
 
 - Offline commands (`admin vacuum`, `admin keys create-bootstrap`,
   `admin ui-reset`): they need the service stopped.
+- Taking a backup: `conclave-mcp backup` on the server's machine (the
+  Server page shows the command).
 - `init`, hooks and `agent add --store`: they set up a repository or a
   local key store, not the server.
 - Access from another machine.

@@ -84,19 +84,17 @@ func ResolveToken(token, agent string) (string, error) {
 }
 
 // New constructs a Client. Empty Options fields fall back to env vars
-// (CONCLAVE_SERVER or CONCLAVE_BASE_URL for the URL, ResolveToken for
-// the token) and DefaultTimeout. CONCLAVE_BASE_URL is the
+// (CONCLAVE_BASE_URL, then CONCLAVE_SERVER for the URL, ResolveToken
+// for the token) and DefaultTimeout. CONCLAVE_BASE_URL is the
 // spec-mandated name (SPEC-0004 §3); CONCLAVE_SERVER is the
-// historical alias kept for backward compatibility.
+// historical alias kept for backward compatibility. mcp-serve uses
+// the same order.
 func New(opts Options) (*Client, error) {
 	if opts.Server == "" {
-		opts.Server = os.Getenv("CONCLAVE_SERVER")
+		opts.Server = os.Getenv("CONCLAVE_BASE_URL")
 	}
 	if opts.Server == "" {
-		// SPEC-0004 §3: the env var is called CONCLAVE_BASE_URL.
-		// We accept it as the canonical name; CONCLAVE_SERVER
-		// above is the legacy alias.
-		opts.Server = os.Getenv("CONCLAVE_BASE_URL")
+		opts.Server = os.Getenv("CONCLAVE_SERVER")
 	}
 	if opts.Server == "" {
 		opts.Server = "http://127.0.0.1:7432"

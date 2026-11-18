@@ -2,11 +2,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -64,6 +68,83 @@ func RecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 						"internal_error", "internal error")
 				}
 			}()
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+// bodyReadTimeout bounds the read of a request body; a var for tests.
+var bodyReadTimeout = 30 * time.Second
+
+// BodyDeadline gives a request that sends a body bodyReadTimeout to send
+// it, before authentication: a client that stalls its body, signed in or
+// not, cannot hold the connection while the server waits to drain it.
+// Reading the body to its end clears the deadline, so a long handler is
+// not cut off; a request without a body (an event stream) gets none.
+// It must wrap the server's own ResponseWriter, so it goes first.
+func BodyDeadline(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != 0 {
+			rc := http.NewResponseController(w)
+			if rc.SetReadDeadline(time.Now().Add(bodyReadTimeout)) == nil {
+				r.Body = &clearOnEOF{ReadCloser: r.Body, rc: rc}
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// clearOnEOF clears the connection's read deadline once the body is read
+// to its end.
+type clearOnEOF struct {
+	io.ReadCloser
+	rc *http.ResponseController
+}
+
+func (b *clearOnEOF) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if err == io.EOF {
+		_ = b.rc.SetReadDeadline(time.Time{})
+	}
+	return n, err
+}
+
+// BodyLimitMiddleware caps request bodies at limit bytes: a bigger one
+// answers 413 payload_too_large before any handler reads it. A body is
+// read here, at most limit bytes and within bodyReadTimeout (400
+// beyond), and handed on in memory; the read deadline is cleared once
+// the body is in (net/http's HTTP/1 server does too, at its end), so a
+// long response (an MCP call) is not cut. A GET or HEAD with a body is
+// 400: no handler reads one, and an event stream must never carry a
+// read deadline, whose expiry would end it. Routes that need less keep
+// their own smaller caps.
+func BodyLimitMiddleware(logger *slog.Logger, limit int64) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case r.ContentLength > limit:
+				writeError(w, r, logger, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+				return
+			case r.ContentLength == 0:
+				next.ServeHTTP(w, r)
+				return
+			case r.Method == http.MethodGet || r.Method == http.MethodHead:
+				writeError(w, r, logger, http.StatusBadRequest, "bad_request", "a "+r.Method+" request takes no body")
+				return
+			}
+			rc := http.NewResponseController(w)
+			_ = rc.SetReadDeadline(time.Now().Add(bodyReadTimeout)) // ErrNotSupported only off a real connection
+			body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, limit))
+			if tooBig := (*http.MaxBytesError)(nil); errors.As(err, &tooBig) {
+				writeError(w, r, logger, http.StatusRequestEntityTooLarge, "payload_too_large", "request body too large")
+				return
+			}
+			if err != nil { // the deadline stays: what is left of the body fails at once, and the connection closes
+				writeError(w, r, logger, http.StatusBadRequest, "bad_request", "read body")
+				return
+			}
+			_ = rc.SetReadDeadline(time.Time{})
+			r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 			next.ServeHTTP(w, r)
 		})
 	}

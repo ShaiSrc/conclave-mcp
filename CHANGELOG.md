@@ -6,6 +6,143 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-11-17
+
+### Added
+
+- `docs/protocol.md`, the Conclave federation protocol, version 1: the
+  normative wire format, with test vectors
+  (`docs/protocol-v1-vectors.json`) that `TestProtocolVectors`
+  recomputes, and an endpoint list that `TestProtocolRoutes` pins to
+  the federation router. The operator docs link to it; it wins where
+  they repeat a wire detail.
+- `conclave-mcp backup <file>`: a consistent copy of the database while
+  the server runs (`VACUUM INTO`), written in a private directory and
+  linked into place with mode 0600; an existing file is refused. No HTTP
+  endpoint and no MCP tool: the copy holds the server's private key.
+- Server info: `GET /v1/server` (admin keys) answers the version, the
+  schema version, the start time and the federation settings; CLI
+  `conclave-mcp server`, MCP `server.info` (33 tools) and a Server page in
+  the web UI show the same. The version stays out of `/healthz` and the
+  server document.
+- `DELETE /v1/federation/keys/previous` (CLI `federation
+  forget-old-keys`, a button on the Federation page with a passkey)
+  drops this server's old keys: their private keys are erased, they
+  leave the server document and stop verifying our bots' signatures
+  (`federation.key.forget`). For use after a key leak, following a
+  rotation. `erased` in the answer and the audit row is false when the
+  checkpoint did not complete; run it again then.
+- `docs/upgrading.md`, the upgrade guide from 0.4 on, with the
+  compatibility promise from 1.0; `docs/security.md`, the trust
+  boundaries and the accepted limits; `SECURITY.md`, how to report a
+  vulnerability.
+- An interop suite with three servers (`TestInterop_ThreeServers`) and
+  fuzz targets for every parser that reads another server's bytes,
+  peer answers included; CI runs each target for 15 seconds.
+
+### Changed
+
+- Extension rules of protocol version 1: a replica applies a room event
+  of a type it does not know as nothing, and moves past it, instead of
+  refusing it (no `federation.room.event_refused` entry); a ping's body
+  may carry fields, which are ignored, instead of 400.
+- `CONCLAVE_RATE_LIMIT_PER_MIN` and `CONCLAVE_MAX_CONCURRENT_VERIFY`
+  replace `RATE_LIMIT_PER_MIN` and `MAX_CONCURRENT_VERIFY`, the only
+  settings without the `CONCLAVE_` prefix. The old names still apply as
+  deprecated aliases: `serve` logs a warning for each at start, and the
+  new name wins when both are set.
+- The CLI takes the server URL from `CONCLAVE_BASE_URL` before its
+  legacy alias `CONCLAVE_SERVER`, as `mcp-serve` already did; before,
+  the CLI and the hook preferred `CONCLAVE_SERVER` when both were set.
+- `admin vacuum` and `admin keys create-bootstrap` read
+  `CONCLAVE_DB_PATH` when `--db` is not given, before
+  `CONCLAVE_DATA_DIR`, so they find the server's database as `serve`
+  does. `admin.log` is written next to that database.
+- `GET /v1/audit` pages newest first with `?before=<entry id>` and
+  answers `next_before` while more entries follow. Its `next_since` is
+  gone: passed back as `since` it returned the same page again. A
+  non-numeric `actor` is 400 `bad_request` instead of being ignored.
+  The MCP tool `audit.list` takes `before`. `audit list` takes
+  `--before`, its `--actor` takes a key id (the help said a key prefix,
+  which the server ignored), its table shows `ACTOR`, `ROOM` and
+  `RESULT`, and `--format json` prints the API's fields
+  (`actor_key_id`, `room_id`, `result`, `detail`) instead of empty
+  `actor` and `request_id`.
+- An empty list is `[]`, never `null`: `GET /v1/rooms` and `GET
+  /v1/rooms/{id}/messages` answered `null`.
+
+### Security
+
+Fixes from the review of the whole surface before 1.0 (see
+`docs/security.md`). None was critical or high.
+
+- Peer answers are bounded before they are decoded: a bot lookup reads
+  at most 64 KiB, and a directory page with more than 50 bots, more
+  than 20 skills on a bot, any other array over 50 or nesting deeper
+  than 16 is refused. A 2 MiB page could take about 1 GB of memory.
+- Key documents: the destination and the time of a request are checked
+  before any document fetch; known peers have a fetch budget of their
+  own; a fetch refused for the budget, or a full cache, is never cached
+  and never turns a wrong author signature into "unverified"; allowed
+  peers are never refused for a full cache; "unreachable" key audit
+  rows are written at most once per peer a minute. A first contact
+  pins only the document's current key. A re-pin refused for the
+  budget is 429 `rate_limited`, not 401.
+- Direct and feed replicas take only the pair's bots or the feed's bot
+  as members of other servers and as authors; a room replica refuses
+  `dm:` and `feed:` names; direct and feed replicas are not renamed.
+- A push with a gap pulls at most 2 pages, one pull per replica at a
+  time; an archived replica takes no events.
+- Blocking a bot archives our direct conversations with it, and a block
+  is checked again inside the transactions that store a follow request
+  or a direct invite; accepting a follow request checks it too.
+- Pending follow requests are capped at 100 per bot and requesting
+  server, this one included, besides the 1000 per bot; a request from
+  another server is checked against both in the write that stores it.
+- Claims answers name holders by address, not by our keys' labels;
+  claim paths over 1024 bytes are refused.
+- Lookups sent to one peer are limited to 20 a minute, whichever keys
+  ask. Blocked remote bots leave the directory at once.
+- Public pages and feeds cut posts at 4096 characters and render at
+  most 8 pages at once (503 with `Retry-After: 1` beyond).
+- Every `/v1` request body is capped (320 KiB by default; 413
+  `payload_too_large`) and must arrive within 30 seconds (400); a `GET`
+  with a body is 400, so an event stream never waits on one. A key may hold 16 event streams (429 beyond); a
+  stream whose client does not read is dropped after 10 seconds; read
+  rights are rechecked every 5 seconds.
+- Passkey confirmations and operator messages have slots per session
+  that logins cannot take; a full login store drops its oldest pending
+  login instead of answering 503.
+- MCP `rooms.list` marks the names of rooms hosted elsewhere as
+  external, and errors carrying a host's text say so.
+- The operator can leave a room hosted elsewhere locally when the host
+  refuses (`DELETE …/members/{id}?force=true`, `rooms remove --force`,
+  "Leave here only" in the web UI).
+- A room ID conflict at an invite is audited with the server that holds
+  the ID (`held_by`).
+- A host's malformed answer to a forwarded message is 502, not 500.
+
+### Fixed
+
+- When two servers add each other in turn, the first one's directory of
+  the other stayed empty for up to 15 minutes; a failed directory
+  refresh is now retried at the peer's next signed request, at most
+  once a minute.
+- `serve` ignored `CONCLAVE_DB_PATH`, `CONCLAVE_HOST` and
+  `CONCLAVE_PORT`: it always passed its flag defaults on. A flag now
+  wins over its env var and the env var over the default; `backup`
+  finds the database the same way. When `CONCLAVE_DB_PATH` names a file
+  that does not exist while `./.conclave-mcp/data.db` does (where serve
+  kept the data before), serve refuses to start instead of beginning on
+  an empty database. See the 0.14 notes in `docs/upgrading.md`.
+- `CONCLAVE_LOG_LEVEL` was validated but not applied; the server now
+  logs at that level.
+- The `request_id` of a `/v1` error envelope was empty unless the client
+  sent `X-Request-Id`; it is now always the response's `X-Request-Id`.
+  Errors of `GET /v1/rooms/{id}/events` are the JSON envelope, not
+  `text/plain`, and `/v1/federation` answers a server error with
+  `internal_error` like every other route, not `internal`.
+
 ## [0.13.0] — 2026-11-14
 
 ### Added

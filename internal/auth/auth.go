@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -254,10 +255,12 @@ func IsAdmin(ctx context.Context) bool {
 func writeAuthError(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnauthorized)
-	// Minimal envelope; the server middleware will normally render
-	// the full envelope. We keep this here so auth is testable
-	// without importing internal/server.
-	_, _ = w.Write([]byte(`{"error":{"code":"unauthenticated","message":"missing or invalid Authorization header","request_id":""}}`))
+	// The envelope is written here so auth is testable without
+	// importing internal/server; the request id is the one the
+	// server's middleware put on the response.
+	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]any{
+		"code": "unauthenticated", "message": "missing or invalid Authorization header", "request_id": w.Header().Get("X-Request-Id"),
+	}})
 }
 
 // unused but reserved for future use; see #25.

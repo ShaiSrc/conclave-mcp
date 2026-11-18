@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"time"
 
 	"github.com/hermes/conclave-mcp/internal/auth"
+	"github.com/hermes/conclave-mcp/internal/events"
 	"github.com/hermes/conclave-mcp/internal/federation"
 	"github.com/hermes/conclave-mcp/internal/fedrooms"
 	"github.com/hermes/conclave-mcp/internal/storage"
@@ -771,6 +773,363 @@ func TestServer_Follows(t *testing.T) {
 		s.fed.Handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, path, strings.NewReader(`{}`)))
 		if rec.Code != http.StatusUnauthorized {
 			t.Errorf("unsigned %s: %d, want 401", path, rec.Code)
+		}
+	}
+}
+
+// GET /v1/server answers admin keys only: the build's version, the schema
+// version from meta, the start time and the federation settings. The
+// version stays out of /healthz and the server document.
+func TestServer_Info(t *testing.T) {
+	db := uiDB(t)
+	tokens := map[string]string{}
+	for label, admin := range map[string]int{"root": 1, "agent": 0} {
+		token, phc, err := auth.GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', ?)`,
+			label, phc, token[3:11], admin); err != nil {
+			t.Fatal(err)
+		}
+		tokens[label] = token
+	}
+	var schema int
+	if err := db.QueryRow(`SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'`).Scan(&schema); err != nil || schema == 0 {
+		t.Fatalf("schema_version: %d %v", schema, err)
+	}
+	const version = "0.14.0-test"
+	for _, domain := range []string{"", "conclave.example.org"} {
+		before := time.Now().Add(-time.Second)
+		s, err := New(Config{Host: "127.0.0.1", Port: 7432, Version: version, FederationDomain: domain, FederationHost: "127.0.0.1",
+			FederationPort: 7433, FederationMode: "allowlist"}, Deps{DB: db})
+		if err != nil {
+			t.Fatal(err)
+		}
+		get := func(h http.Handler, who, path string) *httptest.ResponseRecorder {
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			if who != "" {
+				req.Header.Set("Authorization", "Bearer "+tokens[who])
+			}
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			return rec
+		}
+		rec := get(s.Handler(), "root", "/v1/server")
+		var info struct {
+			Version       string    `json:"version"`
+			SchemaVersion int       `json:"schema_version"`
+			StartedAt     time.Time `json:"started_at"`
+			Federation    struct {
+				Enabled                bool
+				Domain, Mode, Protocol string
+			} `json:"federation"`
+		}
+		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &info) != nil {
+			t.Fatalf("%q: /v1/server: %d %s", domain, rec.Code, rec.Body)
+		}
+		wantMode := ""
+		if domain != "" {
+			wantMode = "allowlist"
+		}
+		f := info.Federation
+		if info.Version != version || info.SchemaVersion != schema || info.StartedAt.Before(before) || info.StartedAt.After(time.Now()) ||
+			f.Enabled != (domain != "") || f.Domain != domain || f.Mode != wantMode || f.Protocol != federation.Protocol {
+			t.Errorf("%q: /v1/server: %s", domain, rec.Body)
+		}
+		// The web UI's Server page reads it with the session.
+		rec = httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, uiRequest("GET", "/v1/server", "localhost:7432"))
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), version) {
+			t.Errorf("%q: /v1/server with the UI session: %d %s", domain, rec.Code, rec.Body)
+		}
+		if rec := get(s.Handler(), "agent", "/v1/server"); rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"forbidden"`) {
+			t.Errorf("%q: /v1/server with a key that is not an admin: %d %s", domain, rec.Code, rec.Body)
+		}
+		if rec := get(s.Handler(), "", "/healthz"); strings.Contains(rec.Body.String(), version) {
+			t.Errorf("/healthz shows the version: %s", rec.Body)
+		}
+		if s.fed != nil {
+			if rec := get(s.fed.Handler, "", "/.well-known/conclave"); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), version) {
+				t.Errorf("server document: %d %s", rec.Code, rec.Body)
+			}
+		}
+	}
+}
+
+// Every /v1 list answers [] when empty, never null, and every /v1 error
+// is the JSON envelope with the request's id, the one in the
+// X-Request-Id response header, also when the client sent none.
+func TestServer_APIConsistency(t *testing.T) {
+	db := uiDB(t)
+	tokens, ids := map[string]string{}, map[string]int64{}
+	for label, admin := range map[string]int{"root": 1, "alice": 0} {
+		token, phc, err := auth.GenerateToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin, handle) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', ?, ?)`,
+			label, phc, token[3:11], admin, map[int]any{0: label, 1: nil}[admin])
+		if err != nil {
+			t.Fatal(err)
+		}
+		tokens[label] = token
+		ids[label], _ = res.LastInsertId()
+	}
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432, FederationDomain: "conclave.example.org", FederationHost: "127.0.0.1",
+		FederationPort: 7433, FederationMode: "allowlist"}, Deps{DB: db, Broker: events.NewBroker()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(who, method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		if who != "" {
+			req.Header.Set("Authorization", "Bearer "+tokens[who])
+		}
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+	room := func(name string) string {
+		rec := do("root", "POST", "/v1/rooms", `{"name":"`+name+`"}`)
+		var r struct{ ID string }
+		if rec.Code != http.StatusCreated || json.Unmarshal(rec.Body.Bytes(), &r) != nil {
+			t.Fatalf("create room: %d %s", rec.Code, rec.Body)
+		}
+		return r.ID
+	}
+	open, archived := room("open"), room("archived")
+	if rec := do("root", "POST", "/v1/rooms/"+archived+"/archive", `{}`); rec.Code/100 != 2 {
+		t.Fatalf("archive: %d %s", rec.Code, rec.Body)
+	}
+
+	for _, l := range []struct{ who, path string }{
+		{"root", "/v1/rooms?visibility=public"}, {"root", "/v1/keys"}, {"root", "/v1/audit?action=nothing"},
+		{"root", "/v1/bots"}, {"root", "/v1/directory"}, {"root", "/v1/federation/peers"},
+		{"root", "/v1/federation/blocked-bots"}, {"root", "/v1/rooms/" + open + "/messages"},
+		{"root", "/v1/rooms/" + open + "/claims"}, {"root", "/v1/rooms/" + open + "/members"},
+		{"alice", "/v1/direct"}, {"alice", "/v1/timeline"}, {"alice", "/v1/follows"},
+		{"alice", "/v1/followers"}, {"alice", "/v1/follows/requests"},
+	} {
+		if rec := do(l.who, "GET", l.path, ""); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), ":null") {
+			t.Errorf("%s: %d %s, want 200 without null", l.path, rec.Code, rec.Body)
+		}
+	}
+
+	for _, e := range []struct{ who, method, path, body string }{
+		{"", "GET", "/v1/whoami", ""},
+		{"root", "GET", "/v1/nope", ""},
+		{"root", "GET", "/v1/rooms/nope", ""},
+		{"root", "GET", "/v1/rooms/nope/messages", ""},
+		{"root", "DELETE", "/v1/rooms/" + open + "/messages/999", ""},
+		{"root", "GET", "/v1/rooms/nope/claims", ""},
+		{"root", "GET", "/v1/rooms/" + archived + "/events", ""},
+		{"root", "GET", "/v1/audit?limit=x", ""},
+		{"root", "POST", "/v1/keys", "{"},
+		{"root", "GET", "/v1/bots/nobody", ""},
+		{"root", "GET", "/v1/federation/peers/nope.example", ""},
+		{"alice", "GET", "/v1/timeline?limit=0", ""},
+		{"alice", "POST", "/v1/direct", "{"},
+	} {
+		rec := do(e.who, e.method, e.path, e.body)
+		var env struct {
+			Error struct {
+				Code      string `json:"code"`
+				RequestID string `json:"request_id"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(rec.Body.Bytes(), &env)
+		if rec.Code < 400 || env.Error.Code == "" || env.Error.RequestID == "" || env.Error.RequestID != rec.Header().Get("X-Request-Id") ||
+			!strings.HasPrefix(rec.Header().Get("Content-Type"), "application/json") {
+			t.Errorf("%s %s: %d %q %s, want the envelope with the X-Request-Id %q", e.method, e.path, rec.Code,
+				rec.Header().Get("Content-Type"), rec.Body, rec.Header().Get("X-Request-Id"))
+		}
+	}
+}
+
+// Every /v1 request body is capped at MaxMessageBytes + 64 KiB: a bigger
+// one answers 413 payload_too_large in the error envelope, with or
+// without a Content-Length, on /v1/mcp too; a body under the cap still
+// reaches the handler.
+func TestServer_BodyCap(t *testing.T) {
+	db := uiDB(t)
+	token, phc, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', ?, ?, '2026-01-01T00:00:00Z', 1)`,
+		phc, token[3:11]); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db, MaxMessageBytes: 1 << 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limit := 1<<10 + 64<<10
+	big := `{"jsonrpc":"2.0","id":1,"method":"ping","params":{"x":"` + strings.Repeat("x", limit) + `"}}`
+	for _, path := range []string{"/v1/mcp", "/v1/rooms", "/v1/rooms/R/claims", "/v1/keys"} {
+		for _, chunked := range []bool{false, true} {
+			var body io.Reader = strings.NewReader(big)
+			if chunked {
+				body = io.MultiReader(body) // no Content-Length
+			}
+			req := httptest.NewRequest(http.MethodPost, path, body)
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, req)
+			if rec.Code != http.StatusRequestEntityTooLarge || !strings.Contains(rec.Body.String(), `"code":"payload_too_large"`) ||
+				!strings.Contains(rec.Body.String(), `"request_id"`) {
+				t.Errorf("%s (chunked %v): %d %s, want 413 payload_too_large", path, chunked, rec.Code, rec.Body)
+			}
+		}
+	}
+	for _, chunked := range []bool{false, true} {
+		var body io.Reader = strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"ping"}`)
+		if chunked {
+			body = io.MultiReader(body)
+		}
+		req := httptest.NewRequest(http.MethodPost, "/v1/mcp", body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		s.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"result":{}`) {
+			t.Errorf("small body (chunked %v): %d %s", chunked, rec.Code, rec.Body)
+		}
+	}
+}
+
+// A /v1 request body must arrive within bodyReadTimeout: a stalled one,
+// with a Content-Length or chunked, is cut off with 400. A GET carries
+// no body (400), so an event stream never gets a read deadline: it
+// stays open past bodyReadTimeout.
+func TestServer_BodyReadDeadline(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	db := uiDB(t)
+	token, phc, err := auth.GenerateToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO api_keys(label, hash, prefix, created_at, is_admin) VALUES ('root', ?, ?, '2026-01-01T00:00:00Z', 1)`,
+		phc, token[3:11]); err != nil {
+		t.Fatal(err)
+	}
+	broker := events.NewBroker()
+	s, err := New(Config{Host: "127.0.0.1", Port: 7432}, Deps{DB: db, Broker: broker})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s.Handler())
+	defer srv.Close()
+
+	for _, framing := range []string{"Content-Length: 20\r\n\r\n{\"name\":", "Transfer-Encoding: chunked\r\n\r\n8\r\n{\"name\":\r\n"} {
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := time.Now()
+		fmt.Fprintf(conn, "POST /v1/rooms HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n%s", token, framing)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("%q: no answer to a stalled body: %v", framing, err)
+		}
+		resp.Body.Close()
+		conn.Close()
+		if resp.StatusCode != http.StatusBadRequest || time.Since(start) < bodyReadTimeout {
+			t.Errorf("%q: %d after %v, want 400 after %v", framing, resp.StatusCode, time.Since(start), bodyReadTimeout)
+		}
+	}
+
+	do := func(method, path string, body io.Reader) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(method, srv.URL+path, body)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	resp := do(http.MethodPost, "/v1/rooms", strings.NewReader(`{"name":"proj"}`))
+	var room struct{ ID string }
+	if err := json.NewDecoder(resp.Body).Decode(&room); err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create room: %d %v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+	for _, body := range []io.Reader{strings.NewReader("x"), io.MultiReader(strings.NewReader("x"))} {
+		if resp := do(http.MethodGet, "/v1/rooms/"+room.ID+"/events", body); resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("a GET with a body: %d, want 400", resp.StatusCode)
+		}
+	}
+
+	// A stalled body is cut off before authentication too: without a
+	// valid key, and on a GET the body limit refuses. The server closes
+	// the connection instead of waiting for the rest of the body.
+	for _, head := range []string{
+		"POST /v1/rooms HTTP/1.1\r\nHost: x\r\nContent-Length: 20\r\n\r\n{\"name\":",
+		"POST /v1/mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer cnc_wrong\r\nContent-Length: 20\r\n\r\n{",
+		"GET /v1/rooms/" + room.ID + "/events HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + token + "\r\nContent-Length: 20\r\n\r\nx",
+	} {
+		conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.WriteString(conn, head)
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, err = io.Copy(io.Discard, conn) // the answer, then EOF once the server closes
+		conn.Close()
+		if err != nil {
+			t.Errorf("%.40q: the server kept the connection of a stalled body: %v", head, err)
+		}
+	}
+
+	resp = do(http.MethodGet, "/v1/rooms/"+room.ID+"/events?wait=30", nil)
+	defer resp.Body.Close()
+	br := bufio.NewReader(resp.Body)
+	if line, err := br.ReadString('\n'); err != nil || line != ": ok\n" {
+		t.Fatalf("stream: %q %v", line, err)
+	}
+	time.Sleep(3 * bodyReadTimeout)
+	broker.Publish(room.ID, []byte(`{"id":1}`))
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("the stream ended past the body deadline: %v", err)
+		}
+		if line == "data: {\"id\":1}\n" {
+			break
+		}
+	}
+}
+
+// The body's read deadline ends with the body: a handler that runs
+// longer, as an MCP call or a stream does, keeps its request.
+func TestBodyLimit_DeadlineEndsWithTheBody(t *testing.T) {
+	old := bodyReadTimeout
+	bodyReadTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { bodyReadTimeout = old })
+	mw := BodyLimitMiddleware(slog.New(slog.DiscardHandler), 1<<10)
+	srv := httptest.NewServer(mw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		select {
+		case <-r.Context().Done():
+			http.Error(w, "cancelled", http.StatusServiceUnavailable)
+		case <-time.After(3 * bodyReadTimeout):
+			_, _ = w.Write(body)
+		}
+	})))
+	defer srv.Close()
+	for _, body := range []io.Reader{strings.NewReader("hello"), io.MultiReader(strings.NewReader("hello"))} {
+		resp, err := http.Post(srv.URL, "text/plain", body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK || string(got) != "hello" {
+			t.Errorf("%d %q, want 200 hello", resp.StatusCode, got)
 		}
 	}
 }

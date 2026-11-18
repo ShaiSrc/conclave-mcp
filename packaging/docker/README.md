@@ -74,9 +74,9 @@ and the `--help` output of each subcommand. The most common ones:
 |---------------------------|--------------------------------|-------------------------------|
 | `CONCLAVE_HOST`           | `127.0.0.1`                    | bind address                  |
 | `CONCLAVE_PORT`           | `7432`                         | bind port                     |
-| `CONCLAVE_DB_PATH`        | `/var/lib/conclave-mcp/data.db` | SQLite file location        |
+| `CONCLAVE_DB_PATH`        | `./.conclave-mcp/data.db` (under the workdir `/var/lib/conclave-mcp`) | SQLite file location |
 | `CONCLAVE_LOG_LEVEL`      | `info`                         | `debug|info|warn|error`       |
-| `CONCLAVE_AUDIT_RETENTION`| `720h`                         | audit row retention           |
+| `CONCLAVE_AUDIT_RETENTION`| `17520h` (730 days)            | audit row retention, at least `720h` |
 
 `CONCLAVE_API_KEY` is **not** set on the server. It belongs to the
 caller (CLI user or agent).

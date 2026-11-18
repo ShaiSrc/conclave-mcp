@@ -336,21 +336,67 @@ func TestSetup_OperatorKeyIsRecordedNotAdoptedByLabel(t *testing.T) {
 	}
 }
 
-// Begins beyond the cap are refused; expired ones free their slots.
+// A flood of login begins never answers 503: each begin past the cap
+// drops the oldest pending login, and the operator can still log in.
+// Confirmations and messages have slots of their own per session, which
+// logins cannot take; a session past its own cap drops its oldest.
+// Expired ceremonies free their slots.
 func TestCeremonies_Capped(t *testing.T) {
-	_, clk, base := newTestUI(t)
-	b := newBrowser(t, base)
-	for i := 0; i < maxCeremonies; i++ {
-		if st, body := b.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
+	s, clk, base := newTestUI(t)
+	b, pk := loggedIn(t, s, base)
+	count := func(session string) int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		n := 0
+		for _, c := range s.ceremonies {
+			if c.session == session {
+				n++
+			}
+		}
+		return n
+	}
+
+	first := newBrowser(t, base)
+	if st, body := first.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
+		t.Fatalf("first begin: %d %s", st, body)
+	}
+	clk.advance(time.Second)
+	flood := newBrowser(t, base)
+	for i := 0; i < maxCeremonies+5; i++ {
+		if st, body := flood.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
 			t.Fatalf("begin %d: %d %s", i, st, body)
 		}
 	}
-	if st, _ := b.do("POST", "/ui/auth/login/begin", nil); st != http.StatusServiceUnavailable {
-		t.Errorf("begin over the cap: %d, want 503", st)
+	if n := count(""); n != maxCeremonies {
+		t.Errorf("pending logins: %d, want %d", n, maxCeremonies)
+	}
+	// The oldest login was dropped: its finish finds no ceremony (400),
+	// where a live one would fail on the assertion (401).
+	if st, body := first.do("POST", "/ui/auth/login/finish", map[string]string{}); st != http.StatusBadRequest {
+		t.Errorf("finish of the dropped login: %d %s, want 400", st, body)
+	}
+	if st, body := pk.login(newBrowser(t, base)); st != http.StatusOK {
+		t.Errorf("login during the flood: %d %s", st, body)
+	}
+	// A confirmation still gets a slot; it runs (404: no such passkey).
+	if st, body := pk.confirmChange(b, "DELETE", "/ui/auth/credentials/nope", nil); st != http.StatusNotFound {
+		t.Errorf("confirmation during the flood: %d %s, want 404", st, body)
+	}
+	session := hashToken(b.session)
+	for i := 0; i < maxSessionCeremonies+3; i++ {
+		if st, body := b.do("POST", "/ui/auth/message/begin", map[string]any{"room_id": "r1", "content": "x"}); st != http.StatusOK {
+			t.Fatalf("message begin %d: %d %s", i, st, body)
+		}
+	}
+	if n := count(session); n != maxSessionCeremonies {
+		t.Errorf("pending confirmations of the session: %d, want %d", n, maxSessionCeremonies)
 	}
 	clk.advance(CeremonyTTL + time.Second)
-	if st, _ := b.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
+	if st, _ := flood.do("POST", "/ui/auth/login/begin", nil); st != http.StatusOK {
 		t.Errorf("begin after expiry: %d, want 200", st)
+	}
+	if n := count(""); n != 1 || count(session) != 0 {
+		t.Errorf("after expiry: %d logins, %d confirmations, want 1 and 0", n, count(session))
 	}
 }
 

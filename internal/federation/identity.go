@@ -110,7 +110,9 @@ func LoadOrCreateIdentity(ctx context.Context, db *sql.DB, domain string) (*Iden
 // it. id's key, the current one, signs an endorsement of the new key
 // and stays in the document until keyOverlap after now. While a key
 // rotated out earlier is still in its overlap, it returns
-// ErrRotationTooSoon, so a peer never needs more than one step.
+// ErrRotationTooSoon, so a peer never needs more than one step; so it
+// does while the current key, made by a rotation, is younger than the
+// overlap, even after ForgetOldKeys.
 func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Identity, error) {
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -136,9 +138,13 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Too soon while a key rotated out is in its overlap, or, once the
+	// old keys are forgotten, while the current key is younger than the
+	// overlap and was made by a rotation (it carries an endorsement).
 	res, err := tx.ExecContext(ctx, `UPDATE federation_keys SET retired_at = ? WHERE key_id = ? AND retired_at IS NULL
-		AND NOT EXISTS (SELECT 1 FROM federation_keys WHERE retired_at > ?)`,
-		until, id.KeyID, storage.FormatTS(now))
+		AND NOT EXISTS (SELECT 1 FROM federation_keys WHERE retired_at > ?)
+		AND NOT (COALESCE(endorsement, '') != '' AND created_at > ?)`,
+		until, id.KeyID, storage.FormatTS(now), storage.FormatTS(now.Add(-keyOverlap)))
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +161,79 @@ func Rotate(ctx context.Context, db *sql.DB, id *Identity, now time.Time) (*Iden
 		return nil, err
 	}
 	return next, nil
+}
+
+// ForgetOldKeys deletes every key in db but id's current one, private
+// keys included, and returns the identity without them, the key IDs
+// deleted and whether their pages are erased: the document no longer
+// lists them, and our bots' author signatures made with them no longer
+// verify. The current key keeps its endorsement, so a peer still pinned
+// to the key before it follows it.
+//
+// The whole table is cleared and the current key written back, with
+// secure_delete on: SQLite then zeroes the table's pages, where an
+// update or delete would leave old copies of a row in free space, and a
+// checkpoint moves the zeroed pages into the database file and empties
+// the write-ahead log. A checkpoint that readers block leaves old pages
+// in the log: not erased, until a later checkpoint (another run, or the
+// next start). Backups made before keep the keys.
+func ForgetOldKeys(ctx context.Context, db *sql.DB, id *Identity) (*Identity, []string, bool, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `PRAGMA secure_delete = ON`); err != nil {
+		return nil, nil, false, err
+	}
+	defer func() { _, _ = conn.ExecContext(context.WithoutCancel(ctx), `PRAGMA secure_delete = OFF`) }()
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var dropped []string
+	rows, err := tx.QueryContext(ctx, `SELECT key_id FROM federation_keys WHERE key_id != ? ORDER BY created_at DESC, rowid DESC`, id.KeyID)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			_ = rows.Close()
+			return nil, nil, false, err
+		}
+		dropped = append(dropped, k)
+	}
+	if err := rows.Err(); err != nil { // a partial list must not be deleted and audited as all
+		_ = rows.Close()
+		return nil, nil, false, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, nil, false, err
+	}
+	var pub, priv []byte
+	var created string
+	var endorsement sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT public_key, private_key, created_at, endorsement FROM federation_keys
+		WHERE key_id = ? AND retired_at IS NULL`, id.KeyID).Scan(&pub, &priv, &created, &endorsement); err != nil {
+		return nil, nil, false, fmt.Errorf("load the current federation key: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM federation_keys`); err != nil {
+		return nil, nil, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO federation_keys(key_id, public_key, private_key, created_at, endorsement)
+		VALUES (?, ?, ?, ?, ?)`, id.KeyID, pub, priv, created, endorsement); err != nil {
+		return nil, nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, false, err
+	}
+	var busy, logFrames, moved int
+	err = conn.QueryRowContext(context.WithoutCancel(ctx), `PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &moved)
+	next := *id
+	next.keys = slices.DeleteFunc(slices.Clone(id.keys), func(k ownKey) bool { return k.keyID != id.KeyID })
+	return &next, dropped, err == nil && busy == 0, nil
 }
 
 // EndorsementString is what a server's previous key signs for the key
@@ -184,6 +263,9 @@ func Fingerprint(pub ed25519.PublicKey) string {
 	sum := sha256.Sum256(pub)
 	return "SHA256:" + base64.RawURLEncoding.EncodeToString(sum[:])
 }
+
+// keyIDLen is the length of a key ID.
+const keyIDLen = len("ed25519:") + 16
 
 // KeyIDFor returns "ed25519:" and the first 16 characters of the
 // fingerprint after "SHA256:".

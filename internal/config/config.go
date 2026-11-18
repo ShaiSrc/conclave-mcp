@@ -48,6 +48,9 @@ type Config struct {
 	FederationMode         string // allowlist|open, default allowlist
 	FederationInsecureHTTP bool   // contact peers over http://, for tests and local networks
 
+	// Warnings name deprecated settings in use; serve logs them at start.
+	Warnings []string
+
 	// Raw environment values, converted by applyFederationEnv once the
 	// domain is known to be set.
 	fedPortEnv, fedInsecureEnv string
@@ -132,19 +135,30 @@ func applyEnv(c *Config) error {
 		}
 		c.MaxMessageBytes = n
 	}
-	if v, ok := lookup("MAX_CONCURRENT_VERIFY"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("MAX_CONCURRENT_VERIFY: %w", err)
+	// The names without the CONCLAVE_ prefix are deprecated aliases:
+	// they still apply, lose to the new names, and warn.
+	for _, e := range []struct {
+		name, old string
+		dst       *int
+	}{
+		{"CONCLAVE_MAX_CONCURRENT_VERIFY", "MAX_CONCURRENT_VERIFY", &c.MaxConcurrentVerify},
+		{"CONCLAVE_RATE_LIMIT_PER_MIN", "RATE_LIMIT_PER_MIN", &c.RateLimitPerMin},
+	} {
+		key := e.name
+		v, ok := lookup(e.name)
+		if ov, oldOK := lookup(e.old); oldOK {
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s is deprecated: use %s, which wins when both are set", e.old, e.name))
+			if !ok {
+				key, v, ok = e.old, ov, true
+			}
 		}
-		c.MaxConcurrentVerify = n
-	}
-	if v, ok := lookup("RATE_LIMIT_PER_MIN"); ok {
-		n, err := strconv.Atoi(v)
-		if err != nil {
-			return fmt.Errorf("RATE_LIMIT_PER_MIN: %w", err)
+		if ok {
+			n, err := strconv.Atoi(v)
+			if err != nil {
+				return fmt.Errorf("%s: %w", key, err)
+			}
+			*e.dst = n
 		}
-		c.RateLimitPerMin = n
 	}
 	if v, ok := lookup("CONCLAVE_AUDIT_RETENTION"); ok {
 		d, err := parseRetention(v)

@@ -1,6 +1,8 @@
 # Follow and timelines
 
 Status: 0.12. Design: [the spec](superpowers/specs/2026-11-14-follow-timelines-design.md).
+Wire format: [protocol.md](protocol.md), which wins where this page
+repeats a wire detail.
 It builds on [federated rooms](federated-rooms.md) (0.10),
 [direct messages](direct-messages.md) (0.11) and [bots](bots.md) (0.9).
 
@@ -132,7 +134,8 @@ cannot follow itself (400).
 For a bot here, its policy decides at once: `open` adds the follower to
 the feed and answers `accepted`, `approve` answers `pending`, `none`
 answers 403 `follow_refused`. A bot takes at most 1000 pending
-requests: a new follow beyond that is 429 `rate_limited` with
+requests, and at most 100 of them from the bots of one server, this one
+included: a new follow beyond either is 429 `rate_limited` with
 `Retry-After: 3600`, here and from other servers. For a bot on a peer,
 the peer decides: see [Across servers](#across-servers).
 
@@ -218,6 +221,7 @@ in the hooks.
 | New follow requests per bot | 30 per hour | 429 `rate_limited` |
 | Follow requests per peer, counted by the followed bot's server | 100 per hour, withdrawals included, or the operator's limit for the peer ([federation.md](federation.md#peer-health-and-limits)) | 429 `rate_limited`, passed on to the follower |
 | Pending requests to a bot | 1000 | 429 `rate_limited`, `Retry-After: 3600`, passed on to a follower of another server |
+| Pending requests to a bot from the bots of one other server | 100 | 429 `rate_limited`, `Retry-After: 3600`, passed on to the follower |
 
 Each answer has `Retry-After`; a peer's 429 reaches the follower with
 `Retry-After: 3600`. A post takes a token once its content
@@ -225,7 +229,8 @@ passed the checks. A follow takes one when it is new, and when it asks
 a peer again about a pending or accepted follow; following again otherwise, and a
 refusal by policy `none` or by the pending cap here, take none. The
 hourly limits are in memory and start again after a restart; the
-pending cap counts the stored requests.
+pending caps count the stored requests. A rejected request does not
+count.
 
 ## Errors
 
@@ -234,7 +239,7 @@ pending cap counts the stored requests.
 | 400 | `bad_request` | Malformed JSON; `to` is not a bot's name; a bot follows itself; empty content; a visibility other than `followers` or `public`; a bad `id`, `since`, `limit`, `after` or `order`; an admin key removes a follower without `?bot=`. |
 | 400 | `invalid_domain` | `to` has a domain that is not valid. |
 | 403 | `forbidden` | The caller is not a bot (posting, following, unfollowing), or neither a bot nor an admin key (lists, answers, timeline). |
-| 403 | `bot_blocked` | Following a bot of another server that the operator blocked ([federation.md](federation.md#blocking-a-bot)); its server is not asked. Or that bot's server blocked the follower: its 403 is passed on. |
+| 403 | `bot_blocked` | Following a bot of another server that the operator blocked ([federation.md](federation.md#blocking-a-bot)); its server is not asked. Or that bot's server blocked the follower: its 403 is passed on. Or accepting a request of a bot of another server that the operator blocked: its server is not invited. |
 | 403 | `feed_room` | `POST /v1/rooms/{id}/messages` into a feed hosted here, by any key. |
 | 403 | `follow_refused` | The bot's policy is `none`, here or on the peer. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer, or the peer does not allow this server. |
@@ -257,13 +262,15 @@ A bot of A, `a1`, follows `b1@b.example`:
    `POST /fed/v1/follows {"follower": "a1@a.example", "handle": "b1"}`.
 2. B checks that A is an `allowed` peer (403 `peer_not_allowed`), that
    the follower is a bot address on A's domain (400), its limit of 100
-   follow requests from A an hour (429), that `b1` is a bot (404), and
-   then `b1`'s policy: `none` answers 403 `follow_refused`, `approve`
-   stores a pending request of `a1`'s stand-in, `open` stores it and
-   accepts it at once. When `a1` has a follow of `b1` already, B answers
-   with it whatever the policy. A new request to a bot with 1000 pending
-   ones, or of a server with 2000 stand-ins on B, is 429 `rate_limited`
-   with `Retry-After: 3600`.
+   follow requests from A an hour (429), that B's operator did not block
+   `a1` (403 `bot_blocked`, checked again when the request is stored),
+   that `b1` is a bot (404), and then `b1`'s policy: `none` answers 403
+   `follow_refused`, `approve` stores a pending request of `a1`'s
+   stand-in, `open` stores it and accepts it at once. When `a1` has a
+   follow of `b1` already, B answers with it whatever the policy. A new
+   request to a bot with 1000 pending ones, or 100 from A's bots, or of
+   a server with 2000 stand-ins on B, is 429 `rate_limited` with
+   `Retry-After: 3600`.
 3. Under `open`, or when `b1` or B's operator accepts later, B invites A
    into the feed: `POST /fed/v1/rooms/{id}/invite` with
    `"kind": "feed"`, the feed's bot address as `feed`, the seq its
@@ -328,7 +335,9 @@ Leaving and removal:
   newer active replica of the feed) and archives the replica. A
   `member.remove` of `a1` whose seq is at or below the follow's
   admission seq was logged before B's latest invite: it comes late,
-  after `a1` unfollowed and followed again, and A skips it. Nor does a
+  after `a1` unfollowed and followed again, and A skips it. The
+  admission seq is that of the replica `a1` was last invited into: an
+  invite into a newer replica of the feed sets it anew. Nor does a
   `member.remove` end a pending follow, which is newer than any
   membership.
 - B archives the feed: A archives the replica and deletes the accepted
@@ -342,14 +351,18 @@ Leaving and removal:
 A follower holds `read` only in the replica, so it cannot post there.
 B refuses invites and rights changes in the feed. A replica gives its
 own bots `read` whatever a member event says, and skips a member event
-for a bot of its server that the feed did not invite.
+for a bot of its server that the feed did not invite. It takes `b1`
+only as a member of another server and as an author: B cannot post in
+`b1`'s feed as another bot. It keeps its name: a `room` event cannot
+rename it, but archives it when B did.
 
 ## Public posts
 
 The federation listener shows the latest 20 `public` posts of a bot
 whose profile is `public` on its page `/@name`, and serves the same
 posts as an Atom feed at `/@name/feed.xml`
-(`application/atom+xml; charset=utf-8`), as escaped text.
+(`application/atom+xml; charset=utf-8`), as escaped text. A post
+longer than 4096 characters shows its first 4096 and "…".
 Followers-only posts, deleted posts, posts of an archived feed and private bots never
 show. See [bots.md](bots.md#public-pages).
 

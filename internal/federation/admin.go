@@ -36,6 +36,7 @@ func (s *Service) AdminRoutes(r chi.Router) {
 		r.Use(adminOnly)
 		r.Get("/", s.handleStatus)
 		r.Post("/keys/rotate", s.handleRotateKey)
+		r.Delete("/keys/previous", s.handleForgetOwnKeys)
 		r.Get("/peers", s.handleListPeers)
 		r.Get("/lookup", s.handleLookup)
 		r.Post("/peers", s.handleAddPeer)
@@ -65,7 +66,7 @@ func (s *Service) handleRoomDelivery(w http.ResponseWriter, r *http.Request) {
 		FROM fed_delivery d JOIN rooms r ON r.id = d.room_id
 		WHERE d.room_id = ? AND r.home_domain IS NULL ORDER BY d.peer`, id)
 	if err != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -82,13 +83,13 @@ func (s *Service) handleRoomDelivery(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var d row
 		if err := rows.Scan(&d.Peer, &d.AckedSeq, &d.LastSeq, &d.Attempts, &d.NextTryAt, &d.LastError, &d.Paused); err != nil {
-			writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+			writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 			return
 		}
 		out = append(out, d)
 	}
 	if rows.Err() != nil {
-		writeErr(w, r, http.StatusInternalServerError, "internal", "internal error")
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", "internal error")
 		return
 	}
 	if len(out) == 0 {
@@ -282,6 +283,8 @@ func (s *Service) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleRotateKey makes a new key current (Rotate) and answers it.
 func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
 	prev := s.id()
 	id, err := Rotate(r.Context(), s.db, prev, s.now())
 	switch {
@@ -299,6 +302,31 @@ func (s *Service) handleRotateKey(w http.ResponseWriter, r *http.Request) {
 	}{prev.Fingerprint(), id.Fingerprint()})
 	s.auditTarget(r.Context(), "federation.key.rotate", "federation_key", id.KeyID, "", "ok", string(detail))
 	writeJSON(w, http.StatusOK, map[string]any{"key_id": id.KeyID, "fingerprint": id.Fingerprint(), "keys": id.Document(s.now()).Keys})
+}
+
+// handleForgetOwnKeys deletes this server's keys other than the current
+// one, private keys included (ForgetOldKeys): after a key leak, the
+// operator rotates and then forgets. It answers the keys now, how many
+// were dropped and whether their pages are erased from the database
+// files (false while a reader blocks the checkpoint: run it again);
+// audit federation.key.forget.
+func (s *Service) handleForgetOwnKeys(w http.ResponseWriter, r *http.Request) {
+	s.keysMu.Lock()
+	defer s.keysMu.Unlock()
+	id, dropped, erased, err := ForgetOldKeys(r.Context(), s.db, s.id())
+	if err != nil {
+		writeErr(w, r, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	s.ident.Store(id)
+	detail, _ := json.Marshal(struct {
+		Dropped int      `json:"dropped"`
+		KeyIDs  []string `json:"key_ids"`
+		Erased  bool     `json:"erased"`
+	}{len(dropped), append([]string{}, dropped...), erased})
+	s.auditTarget(r.Context(), "federation.key.forget", "federation_key", id.KeyID, "", "ok", string(detail))
+	writeJSON(w, http.StatusOK, map[string]any{"key_id": id.KeyID, "fingerprint": id.Fingerprint(),
+		"keys": id.Document(s.now()).Keys, "dropped": len(dropped), "erased": erased})
 }
 
 func (s *Service) handleListPeers(w http.ResponseWriter, r *http.Request) {
