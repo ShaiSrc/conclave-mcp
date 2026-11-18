@@ -756,6 +756,14 @@ func (s *Service) applyMember(ctx context.Context, tx *sql.Tx, roomID, host stri
 		case kind == kindFeed:
 			set = rights.Set{rights.Read}
 		}
+		if !invited { // a new member of a room: like an invite, refused by a bot that takes none
+			switch none, err := bots.RefusesRoomInvites(ctx, tx, key); {
+			case err != nil:
+				return err
+			case none:
+				return refused("member event: %s takes no room invites", p.Address)
+			}
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO room_members(room_id, key_id, role, joined_at, rights) VALUES (?, ?, 'reader', ?, ?)
 		ON CONFLICT(room_id, key_id) DO UPDATE SET rights = excluded.rights`,

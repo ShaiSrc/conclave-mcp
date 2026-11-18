@@ -112,7 +112,9 @@ rooms: `peers` (default) takes room invites from allowed peers, `none`
 refuses them. A refused invite answers the host exactly like an unknown
 bot (404 `not_found`), so a peer cannot learn from it that the bot
 exists. This server audits it as `federation.room.invite` with
-`error:room_invites`. Rooms the bot is in already stay. Direct invites
+`error:room_invites`. A host's member event that would add the bot to a
+room it is not in is skipped too (`federation.room.event_refused`).
+Rooms the bot is in already stay, and their hosts still set its rights. Direct invites
 still follow the DM policy, feed invites the bot's follows, and invites
 into rooms of this server are not affected.
 

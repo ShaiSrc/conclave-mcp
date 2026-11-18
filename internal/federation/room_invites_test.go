@@ -61,3 +61,31 @@ func TestRoomInvites_None(t *testing.T) {
 		}
 	}
 }
+
+// A host cannot bring a bot that refuses room invites into a room by a
+// member event either. A bot in the room before keeps its membership,
+// and the host still sets its rights.
+func TestRoomInvites_NoneMemberEvent(t *testing.T) {
+	g, h, room, _ := replica(t, "read")
+	b3 := g.bot(t, "b3")
+	if rec := h.invite(t, g, room, "proj", "b3", "read"); rec.Code != http.StatusCreated {
+		t.Fatalf("invite b3: %d %s", rec.Code, rec.Body)
+	}
+	b4 := g.bot(t, "b4")
+	none := bots.InvitesNone
+	for _, b := range []string{"b3", "b4"} {
+		if _, err := g.svc.botStore.Update(context.Background(), b, bots.Patch{RoomInvites: &none}, true); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := g.svc.Domain()
+	if got := h.push(t, g, room, memberEv(1, "b4@"+d, "read"), memberEv(2, "b3@"+d, "read", "answer")); got != 2 {
+		t.Fatalf("applied %d", got)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ?`, room, b4); n != 0 {
+		t.Error("a member event brought b4 in")
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM room_members WHERE room_id = ? AND key_id = ? AND rights = 'read,answer'`, room, b3); n != 1 {
+		t.Error("b3's rights were not set")
+	}
+}
