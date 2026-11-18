@@ -140,6 +140,9 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 //
 // A direct invite from a bot the operator blocked, or the feed invite of
 // one, is 403 bot_blocked.
+//
+// A room invite (kind room) of a bot whose room invites are none answers
+// as for an unknown bot; only the audit row (error:room_invites) tells.
 func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, roomID := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	var in struct {
@@ -247,6 +250,18 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.fail(w, r, err)
 		return
+	}
+	if in.Kind == "room" {
+		switch none, err := bots.RefusesRoomInvites(ctx, s.db, keyID); {
+		case err != nil:
+			s.fail(w, r, err)
+			return
+		case none:
+			detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
+			s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:room_invites", string(detail))
+			writeErr(w, r, http.StatusNotFound, "not_found", "no such bot")
+			return
+		}
 	}
 	var other string // the origin's bot in a direct conversation
 	if direct {

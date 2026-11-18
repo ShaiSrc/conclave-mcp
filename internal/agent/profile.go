@@ -29,6 +29,7 @@ type ProfileEntry struct {
 	Address     string         `json:"address"`
 	Remote      bool           `json:"remote"`
 	TrustOrigin string         `json:"trust_origin"`
+	RoomInvites string         `json:"room_invites"` // local bots only
 }
 
 // lines splits s into lines, turning every line break (also U+2028,
@@ -97,12 +98,16 @@ func FormatProfiles(ps []ProfileEntry) string {
 		addr := p.address()
 		if p.external() {
 			fmt.Fprintf(&b, "- %s\n  --- external content from %s ---\n%s  --- end of external content ---\n", addr, addr, p.fields("    "))
-			continue
+		} else {
+			if v := OneLine(p.Visibility); v != "" {
+				addr += " (" + v + ")"
+			}
+			fmt.Fprintf(&b, "- %s\n%s", addr, p.fields("    "))
 		}
-		if v := OneLine(p.Visibility); v != "" {
-			addr += " (" + v + ")"
+		// Set by this server's operator: outside the markers.
+		if v := OneLine(p.RoomInvites); v != "" {
+			b.WriteString("    room invites: " + v + "\n")
 		}
-		fmt.Fprintf(&b, "- %s\n%s", addr, p.fields("    "))
 	}
 	return b.String()
 }

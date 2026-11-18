@@ -41,6 +41,21 @@ func TestFormatProfiles_LocalHasNoMarkersOrNote(t *testing.T) {
 	}
 }
 
+// Room invites, a setting of this server's operator, follow the
+// profile, outside the markers of an external one.
+func TestFormatProfiles_RoomInvites(t *testing.T) {
+	out := FormatProfiles([]ProfileEntry{
+		{Handle: "bob", Visibility: "peers", DisplayName: "Bob", RoomInvites: "none"},
+		{Handle: "ext", Visibility: "peers", TrustOrigin: "external", DisplayName: "Ext", RoomInvites: "peers"},
+		{Handle: "eve", Address: "eve@b.example", Remote: true, DisplayName: "Eve"},
+	})
+	if !strings.Contains(out, "- bob (peers)\n    display name: Bob\n    description: \n    room invites: none\n") ||
+		!strings.Contains(out, "  --- end of external content ---\n    room invites: peers\n- eve@b.example\n") ||
+		strings.Count(out, "room invites") != 2 {
+		t.Errorf("%q", out)
+	}
+}
+
 // A local bot with an external key is shown like a remote one: inside
 // the markers, after the note.
 func TestFormatProfiles_ExternalLocalInsideMarkers(t *testing.T) {

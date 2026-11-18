@@ -139,3 +139,11 @@ func TestProfile_FollowPolicy(t *testing.T) {
 		t.Errorf("err=%v req=%q", err, req)
 	}
 }
+
+func TestProfile_RoomInvites(t *testing.T) {
+	out, req, err := runCmd(t, 200, strings.Replace(bob, `"visibility"`, `"room_invites":"none","visibility"`, 1), "profile", "bob", "--room-invites", "none")
+	if err != nil || !strings.HasPrefix(req, "PATCH /v1/bots/bob/profile ") || !strings.Contains(req, `{"room_invites":"none"}`) ||
+		!strings.Contains(out, "    room invites: none\n") {
+		t.Errorf("err=%v req=%q out=%q", err, req, out)
+	}
+}

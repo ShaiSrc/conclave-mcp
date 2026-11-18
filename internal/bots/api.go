@@ -21,7 +21,7 @@ const maxBody = 64 << 10
 //	GET    /bots                   any key: the bots it may see
 //	GET    /bots/{handle}          any key: a bot it may see
 //	PATCH  /bots/{handle}/profile  admin keys; a bot for its own text fields
-//	                               (visibility, dm_policy and follow_policy: admin keys only)
+//	                               (visibility, dm_policy, follow_policy and room_invites: admin keys only)
 //	PUT    /keys/{id}/handle       admin keys: set or change a key's handle
 //	DELETE /keys/{id}/handle       admin keys: remove it
 func (s *Store) Routes(r chi.Router) {
@@ -110,12 +110,14 @@ func (s *Store) handlePatch(w http.ResponseWriter, r *http.Request) {
 	add("visibility", patch.Visibility != nil && np.Visibility != p.Visibility)
 	add("dm_policy", patch.DMPolicy != nil && np.DMPolicy != p.DMPolicy)
 	add("follow_policy", patch.FollowPolicy != nil && np.FollowPolicy != p.FollowPolicy)
+	add("room_invites", patch.RoomInvites != nil && np.RoomInvites != p.RoomInvites)
 	detail, _ := json.Marshal(struct {
 		Fields       []string `json:"fields"`
 		Visibility   string   `json:"visibility"`
 		DMPolicy     string   `json:"dm_policy"`
 		FollowPolicy string   `json:"follow_policy"`
-	}{fields, np.Visibility, np.DMPolicy, np.FollowPolicy})
+		RoomInvites  string   `json:"room_invites"`
+	}{fields, np.Visibility, np.DMPolicy, np.FollowPolicy, np.RoomInvites})
 	_ = audit.Write(r.Context(), s.db, c.KeyID, "bot.profile.update", "bot", np.Handle, "", "ok", string(detail))
 	writeJSON(w, http.StatusOK, np)
 }

@@ -310,6 +310,38 @@ func TestProfile_FollowPolicy(t *testing.T) {
 	}
 }
 
+// Room invites are peers without a saved setting, only admin keys
+// change them, and a bot's own save keeps them.
+func TestProfile_RoomInvites(t *testing.T) {
+	w := newWorld(t)
+	ctx := context.Background()
+	fresh := addKey(t, w.db, "fresh", false)
+	if err := w.s.SetHandle(ctx, fresh, "fresh"); err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range []string{"fresh", "pub"} {
+		if p := profileOf(t, do(w.s, adminC(w.admin), "GET", "/v1/bots/"+h, "")); p.RoomInvites != InvitesPeers {
+			t.Errorf("%s: room_invites %q, want peers", h, p.RoomInvites)
+		}
+	}
+	want(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"room_invites":"none"}`), 403, "forbidden")
+	want(t, do(w.s, adminC(w.admin), "PATCH", "/v1/bots/pub/profile", `{"room_invites":"local"}`), 400, "bad_request")
+	if p := profileOf(t, do(w.s, adminC(w.admin), "PATCH", "/v1/bots/pub/profile", `{"room_invites":"none"}`)); p.RoomInvites != InvitesNone {
+		t.Errorf("admin set: %+v", p)
+	}
+	if p := profileOf(t, do(w.s, keyC(w.pub), "PATCH", "/v1/bots/pub/profile", `{"description":"d"}`)); p.RoomInvites != InvitesNone || p.Visibility != Public {
+		t.Errorf("bot's save: %+v", p)
+	}
+	if p, err := w.s.Update(ctx, "fresh", Patch{Description: new(string)}, false); err != nil || p.RoomInvites != InvitesPeers {
+		t.Errorf("first save: %+v, %v", p, err)
+	}
+	for id, wantRefuses := range map[int64]bool{w.pub: true, fresh: false, w.plain: false} {
+		if refuses, err := RefusesRoomInvites(ctx, w.db, id); err != nil || refuses != wantRefuses {
+			t.Errorf("RefusesRoomInvites(%d) = %v, %v; want %v", id, refuses, err, wantRefuses)
+		}
+	}
+}
+
 // A bot's save writes only the fields it sent: it keeps the visibility
 // and the other fields an admin set, also when the bot read the profile
 // before the admin wrote it. A first save fills the rest with defaults.
@@ -441,6 +473,7 @@ func TestAudit_Rows(t *testing.T) {
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"display_name":"C","description":"d","visibility":"public"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"dm_policy":"peers"}`), 200, "")
 	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"follow_policy":"none"}`), 200, "")
+	want(t, do(s, adminC(admin), "PATCH", "/v1/bots/bob/profile", `{"room_invites":"none"}`), 200, "")
 	want(t, do(s, adminC(admin), "DELETE", handlePath(k), ""), 204, "")
 
 	rows, err := db.Query(`SELECT actor_key_id, action, target_type, target_id, result, detail FROM audit ORDER BY id`)
@@ -459,11 +492,12 @@ func TestAudit_Rows(t *testing.T) {
 	}
 	wantRows := []string{
 		fmt.Sprintf(`%d bot.handle.set key %d ok {"handle":"bob"}`, admin, k),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private","dm_policy":"local","follow_policy":"approve"}`, k),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public","dm_policy":"local","follow_policy":"approve"}`, admin),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public","dm_policy":"local","follow_policy":"approve"}`, admin),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["dm_policy"],"visibility":"public","dm_policy":"peers","follow_policy":"approve"}`, admin),
-		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["follow_policy"],"visibility":"public","dm_policy":"peers","follow_policy":"none"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["description"],"visibility":"private","dm_policy":"local","follow_policy":"approve","room_invites":"peers"}`, k),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name","visibility"],"visibility":"public","dm_policy":"local","follow_policy":"approve","room_invites":"peers"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["display_name"],"visibility":"public","dm_policy":"local","follow_policy":"approve","room_invites":"peers"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["dm_policy"],"visibility":"public","dm_policy":"peers","follow_policy":"approve","room_invites":"peers"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["follow_policy"],"visibility":"public","dm_policy":"peers","follow_policy":"none","room_invites":"peers"}`, admin),
+		fmt.Sprintf(`%d bot.profile.update bot bob ok {"fields":["room_invites"],"visibility":"public","dm_policy":"peers","follow_policy":"none","room_invites":"none"}`, admin),
 		fmt.Sprintf(`%d bot.handle.remove key %d ok {"handle":"bob"}`, admin, k),
 	}
 	if !slices.Equal(got, wantRows) {

@@ -63,8 +63,11 @@ A narrower policy stops new conversations only. Existing ones stay
 usable; an admin can archive them.
 
 The DM policy covers direct conversations only. An invite into an
-ordinary room from an allowed peer is governed by the peer allowlist,
-whatever the policy ([federated-rooms.md](federated-rooms.md)).
+ordinary room from an allowed peer is governed by the peer allowlist and
+the bot's room invites setting, whatever the DM policy: with
+`room_invites` `none` the bot refuses it
+([bots.md](bots.md#room-invites)). That setting does not touch direct
+invites.
 
 ## Starting and continuing
 

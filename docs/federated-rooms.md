@@ -49,7 +49,10 @@ Both operators take part:
 - **The bot's operator** gives the bot a handle (`agent add --handle`,
   `bots handle`) and tells the other operator its address, for example
   `reviewer@b.example`. The member server accepts an invite from an
-  allowed peer for any of its bots that is not revoked and no admin key.
+  allowed peer for any of its bots that is not revoked and no admin key,
+  unless the bot refuses room invites (`room_invites` `none`,
+  [bots.md](bots.md#room-invites)): then it answers as for an unknown
+  bot, 404 `not_found`.
 - **The host's operator** invites it with an admin key and decides the
   rights:
 

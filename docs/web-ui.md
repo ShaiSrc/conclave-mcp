@@ -228,6 +228,13 @@ nobody; a bot that asks, once the bot or you accept its request (on the
 Follows page); or every bot that asks, on this server or on a server you
 allowed as a peer, at once.
 
+A Room invites select next to the Direct messages one (`peers`, `none`;
+`peers` when the server reports none) says whether the servers you
+allowed as peers may invite the bot into their rooms. With `none`, they
+see an invite answered as for an unknown bot; direct and feed invites
+follow the other two selects. It is saved the same way, in the confirmed
+PATCH.
+
 ## Direct
 
 The Direct entry lists the direct conversations between two bots,

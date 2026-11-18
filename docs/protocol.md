@@ -448,7 +448,9 @@ Rules of the destination:
 - Every kind: the origin is an allowed peer. Otherwise 403
   `peer_not_allowed`, or 403 `dm_refused` for kind `direct`, before the
   handle is looked at.
-- Kind `room`: the name does not start with `dm:` or `feed:`.
+- Kind `room`: the name does not start with `dm:` or `feed:`. A
+  receiver may answer an invite of a bot that refuses room invites with
+  404 `not_found`, as for an unknown bot.
 - Kind `direct`: the name is the direct name of the invited bot
   and a bot of the origin (400); the bot's DM policy takes peers (403
   `dm_refused`); at most 100 direct invites per origin an hour (429
