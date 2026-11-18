@@ -6,6 +6,32 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-11-18
+
+### Added
+
+- `room_invites` per bot (`peers`, the default, or `none`): with `none`,
+  a room invite of the bot from another server answers exactly as for
+  an unknown bot (404 `not_found`), audited here as
+  `federation.room.invite` with `error:room_invites`, and a host's
+  member event cannot add the bot either. Direct invites still follow
+  the DM policy and feed invites the bot's follows. Admin keys only:
+  `PATCH /v1/bots/{handle}/profile {"room_invites"}`, `bots profile
+  <handle> --room-invites`, the bot page in the web UI; the MCP profile
+  tools show it. Migration 0018.
+
+### Changed
+
+- Rooms hosted on other servers are kept by host and room ID: a replica
+  keeps the host's ID when no room here has it, and otherwise gets a
+  local ID of its own with the host's in `rooms.remote_id` (migration
+  0017). Every federation path translates between the two; author
+  signatures still use the host's ID, so the wire protocol is
+  unchanged. `GET /v1/rooms`, `GET /v1/rooms/{id}`, `rooms list` and the
+  room page show `remote_id` when it differs. An invite under a room ID
+  another server's room holds is no longer 409 `conflict`, which closes
+  the room ID squatting 0.14.0 accepted.
+
 ## [0.14.0] — 2026-11-17
 
 ### Added

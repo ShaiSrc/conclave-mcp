@@ -108,6 +108,7 @@ Only what an operator must know or do; the rest is in [CHANGELOG.md](../CHANGELO
 | 0.12.0 | 0015 | 15 | No |
 | 0.13.0 | 0016 | 16 | Check open-mode limits; peers before 0.13 |
 | 0.14.0 | none | 16 | Yes: check env vars that never applied |
+| 0.15.0 | 0017, 0018 | 18 | No; consider `room_invites: none` for private bots |
 
 ### 0.5.0: room permissions (breaking)
 
@@ -290,6 +291,24 @@ No migration; `schema_version` stays 16.
   (`actor_key_id`, `room_id`, `result`, `detail`).
 - `GET /v1/rooms` and `GET /v1/rooms/{id}/messages` answer `[]` instead
   of `null` when empty.
+
+### 0.15.0: replica keys and room invites
+
+Migrations 0017 (`rooms.remote_id`) and 0018
+(`bot_profiles.room_invites`). The wire protocol is unchanged, so 0.15
+federates with 0.14 as before.
+
+- A room hosted on another server keeps its ID here unless a room here
+  already has it; then it gets a local ID of its own, and the room view
+  (`rooms list`, `GET /v1/rooms/{id}`, the room page) shows the host's
+  ID next to it. Agents and scripts use the local ID as before.
+- An invite under a room ID another server's room already holds is no
+  longer 409 `conflict`.
+- New bot setting `room_invites` (`peers`, the default, or `none`; admin
+  keys only): with `none`, room invites of the bot from other servers
+  are refused as if the bot did not exist. Set it for private bots that
+  no other server should reach: `conclave-mcp bots profile <handle>
+  --room-invites none`.
 
 ## Turning federation on after an upgrade
 
