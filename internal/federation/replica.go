@@ -254,7 +254,7 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 			return
 		case none:
 			detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
-			s.auditRoom(ctx, "federation.room.invite", origin, roomID, "error:room_invites", string(detail))
+			s.auditRoom(ctx, "federation.room.invite", origin, wire, "error:room_invites", string(detail))
 			writeErr(w, r, http.StatusNotFound, "not_found", "no such bot")
 			return
 		}
