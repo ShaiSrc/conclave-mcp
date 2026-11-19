@@ -7,9 +7,11 @@ wire protocol is unchanged: protocol version 1 holds.
 ## Goal
 
 An allowed peer can no longer keep our bots out of another server's
-room by taking that room's ID first. It also can no longer learn that a
-bot exists by inviting it, once the bot refuses room invites from other
-servers.
+room by taking that room's ID first. A bot that refuses room invites
+from other servers no longer shows that it exists when it refuses one.
+Hiding it from peers completely also needs a DM policy and a follow
+policy that refuse them, private visibility and no followers on other
+servers: what those accept stays reachable by choice.
 
 ## Threats
 
@@ -26,7 +28,7 @@ servers.
 | Wire and local IDs | Every inbound federation path (invite, push, pull answers, leave, claims, follows and feed invites, direct invites, purge) finds a replica by `(home_domain, COALESCE(remote_id, id))`. Every outbound path (forwarded messages, claims, leave, pull, catch-up) sends `COALESCE(remote_id, id)`. Author signatures (`conclave-msg-v1`) sign and verify the host's ID. Agents, the CLI, MCP and the web UI use the local ID. The room view (`GET /v1/rooms/{id}`, room list, the room page) shows `remote_id` when it differs. | The protocol stays version 1; only local storage changes. |
 | The 0.14 conflict audit | The 409 `conflict` and its `held_by` audit detail at an invite go away. A second host's room is simply another replica. | Nothing to report any more. |
 | Room invites | A new per-bot setting `room_invites`: `peers` (the default, as today) or `none`. With `none`, a room invite of that bot from another server (kind `room`) answers 404 `not_found`, as for an unknown handle. Direct invites still follow the DM policy, and feed invites still follow the bot's follows; amended after review: every refusal to another server about such a bot (a direct invite, a feed invite, a follow request) answers exactly as that path answers an unknown handle, and the audit row keeps the real reason. What the DM and follow policies accept still goes through. Existing memberships stay. Invites by our own operator are not affected. The refusal is audited locally (`federation.room.invite`, error `room_invites`). Migration `0018_room_invites.sql`: `bot_profiles.room_invites TEXT NOT NULL DEFAULT 'peers' CHECK (room_invites IN ('peers','none'))`. | Opt-in, with no behavior change for existing setups; the answer gives nothing away. |
-| Surfaces | The profile API (`PATCH /v1/bots/{handle}/profile {"room_invites"}`) and the CLI flag on the bots profile command take `room_invites`. The MCP profile tools read and set it where they already set `dm_policy`. The web UI bot page shows it as a select next to the DM policy. The docs recommend `none` for private bots. | Same shape as `dm_policy`. |
+| Surfaces | The profile API (`PATCH /v1/bots/{handle}/profile {"room_invites"}`) and the CLI flag on the bots profile command take `room_invites`. Only admin keys change it, as for `dm_policy`. The MCP profile tools only show it. The web UI bot page shows it as a select next to the DM policy. The docs recommend `none` for private bots. | Same shape as `dm_policy`. |
 | Docs | `docs/security.md` drops both rows from "Known and accepted limits". The federated-rooms, bots and direct-messages docs describe the new behavior. `docs/protocol.md` gets one sentence: a receiver may answer an invite of a bot that refuses invites with 404. | |
 
 ## Not in 0.15

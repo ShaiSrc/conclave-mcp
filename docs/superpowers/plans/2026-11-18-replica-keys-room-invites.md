@@ -55,14 +55,14 @@
 - Migration 0018: `bot_profiles.room_invites TEXT NOT NULL DEFAULT 'peers' CHECK (room_invites IN ('peers','none'))`.
 - `internal/bots`: the profile, the patch and the view carry `room_invites`.
   - Validation: only `peers` or `none`, else 400.
-  - An admin key or the bot itself may set it, as for `dm_policy`.
+  - Only an admin key may set it, as for `dm_policy`; the bot itself gets 403.
   - Federation answers (`/fed/v1/bots/{name}`, directory) never show it.
 - `handleRoomInvite` (internal/federation/replica.go), kind `room` only:
   - `none` answers exactly as an unknown bot: same status 404, same code, same message;
   - audits locally `federation.room.invite` with error `room_invites`.
   - Keep the check one small call into the bots package, so it merges cleanly with Task 1's work on replica.go.
 - CLI: the bots profile command takes `--room-invites peers|none` and prints the value.
-- MCP: the profile tools take and show it where they handle `dm_policy`.
+- MCP: the profile tools only show it; no MCP tool sets it.
 - Web UI: `internal/ui/assets/bots.js` gets a select next to the DM policy on the bot page, with the passkey-confirmed save as the other fields have.
 - Tests:
   - `none` is 404 with the body of an unknown bot, and the audit row is written;

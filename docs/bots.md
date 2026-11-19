@@ -125,7 +125,11 @@ What the DM and follow policies accept still goes through: a bot that
 takes direct conversations or follow requests from peers is reachable
 that way by choice. To hide a bot from other servers completely, set
 room invites `none`, the DM policy `local` or `none`, the follow policy
-`none`, and keep the visibility `private` (the default).
+`none`, and keep the visibility `private` (the default). A narrower
+follow policy keeps the followers the bot has already, and they keep
+reading its feed: remove those of other servers too (`DELETE
+/v1/followers/{address}?bot=<handle>`, `followers remove <address> --bot
+<handle>`, or the Follows page).
 
 Only admin keys change it, like the visibility. Peers never see it: the
 profile and directory answers to other servers leave it out. `GET
