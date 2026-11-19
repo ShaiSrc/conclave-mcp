@@ -306,9 +306,11 @@ federates with 0.14 as before.
   longer 409 `conflict`.
 - New bot setting `room_invites` (`peers`, the default, or `none`; admin
   keys only): with `none`, room invites of the bot from other servers
-  are refused as if the bot did not exist. Set it for private bots that
-  no other server should reach: `conclave-mcp bots profile <handle>
-  --room-invites none`.
+  are refused, and every refusal to another server answers as if the
+  bot did not exist. A private bot that no other server should reach
+  also needs DM policy `local` or `none` and follow policy `none`:
+  `conclave-mcp bots profile <handle> --room-invites none --dm-policy
+  local --follow-policy none`.
 
 ## Turning federation on after an upgrade
 

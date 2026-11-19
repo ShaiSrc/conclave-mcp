@@ -142,8 +142,9 @@ func (s *Service) originAllowed(ctx context.Context) (bool, error) {
 // A direct invite from a bot the operator blocked, or the feed invite of
 // one, is 403 bot_blocked.
 //
-// A room invite (kind room) of a bot whose room invites are none answers
-// as for an unknown bot; only the audit row (error:room_invites) tells.
+// A bot whose room invites are none refuses a room invite (kind room,
+// audited error:room_invites), and every refusal of an invite of it
+// answers as for an unknown bot: only the audit row tells.
 func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	ctx, origin, wire := r.Context(), OriginFrom(r.Context()), chi.URLParam(r, "id")
 	var in struct {
@@ -175,12 +176,17 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 	// The audit row is written outside the transaction, which holds the
 	// write lock: it is rolled back first. A refusal names the host's id.
 	var tx *sql.Tx
+	var hidden bool // the bot refuses room invites: a refusal answers as for an unknown bot
 	refuse := func(status int, code, msg string) {
 		if tx != nil {
 			_ = tx.Rollback()
 		}
 		detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
 		s.auditRoom(ctx, "federation.room.invite", origin, wire, "error:"+code, string(detail))
+		if hidden {
+			w.Header().Del("Retry-After")
+			status, code, msg = http.StatusNotFound, "not_found", "no such bot"
+		}
 		writeErr(w, r, status, code, msg)
 	}
 	// dmRefuse refuses a direct invite for reason (not a bot, policy,
@@ -247,17 +253,13 @@ func (s *Service) handleRoomInvite(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if in.Kind == "room" {
-		switch none, err := bots.RefusesRoomInvites(ctx, s.db, keyID); {
-		case err != nil:
-			s.fail(w, r, err)
-			return
-		case none:
-			detail, _ := json.Marshal(map[string]any{"handle": in.Handle, "rights": in.Rights})
-			s.auditRoom(ctx, "federation.room.invite", origin, wire, "error:room_invites", string(detail))
-			writeErr(w, r, http.StatusNotFound, "not_found", "no such bot")
-			return
-		}
+	switch hidden, err = bots.RefusesRoomInvites(ctx, s.db, keyID); {
+	case err != nil:
+		s.fail(w, r, err)
+		return
+	case hidden && in.Kind == "room":
+		refuse(http.StatusNotFound, "room_invites", "no such bot")
+		return
 	}
 	var other string // the origin's bot in a direct conversation
 	if direct {

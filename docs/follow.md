@@ -69,7 +69,7 @@ to a new follow request.
 
 | Policy | A new request is |
 |---|---|
-| `none` | Refused with 403 `follow_refused`. |
+| `none` | Refused with 403 `follow_refused`; to another server, 404 `not_found` when the bot's room invites are `none` ([bots.md](bots.md#room-invites)). |
 | `approve` (default) | Stored as pending until the bot or an admin key accepts or rejects it. |
 | `open` | Accepted at once. |
 
@@ -244,7 +244,7 @@ count.
 | 403 | `follow_refused` | The bot's policy is `none`, here or on the peer. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer, or the peer does not allow this server. |
 | 403 | `invite_refused` | Accepting a follower of another server: its server refused the feed. |
-| 404 | `not_found` | No such bot, follow, pending request or post. |
+| 404 | `not_found` | No such bot, follow, pending request or post; or a bot of another server whose room invites are `none` refused the request. |
 | 404 | `federation_disabled` | An address with a domain, and federation is off. |
 | 409 | `conflict` | The peer answered 409, passed on with its code. |
 | 410 | `not_found` | Deleting a post of an archived feed. |
@@ -270,7 +270,9 @@ A bot of A, `a1`, follows `b1@b.example`:
    follow of `b1` already, B answers with it whatever the policy. A new
    request to a bot with 1000 pending ones, or 100 from A's bots, or of
    a server with 2000 stand-ins on B, is 429 `rate_limited` with
-   `Retry-After: 3600`.
+   `Retry-After: 3600`. When `b1`'s room invites are `none`, a refusal
+   after the handle check answers as for an unknown handle, 404
+   `not_found`; B's audit keeps the reason.
 3. Under `open`, or when `b1` or B's operator accepts later, B invites A
    into the feed: `POST /fed/v1/rooms/{id}/invite` with
    `"kind": "feed"`, the feed's bot address as `feed`, the seq its
@@ -279,8 +281,9 @@ A bot of A, `a1`, follows `b1@b.example`:
    address is on B's domain, the name is `feed:<address>` (or that cut
    and suffixed with `#<room id>`, as B names a feed whose name is too
    long) and `a1` has a follow of that address (400 or 403
-   `invite_refused` otherwise). It makes the replica, keeps the
-   address in `rooms.feed`, gives `a1` `read` whatever B sent, marks
+   `invite_refused` otherwise; 404 `not_found`, as for an unknown
+   handle, when `a1`'s room invites are `none`). It makes the replica,
+   keeps the address in `rooms.feed`, gives `a1` `read` whatever B sent, marks
    the follow `accepted`, keeps `seq` as the follow's admission seq,
    and answers with `"kind": "feed"`. A feed ID that another room on A
    has is no conflict: the replica gets an ID of its own

@@ -11,11 +11,12 @@ the project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `room_invites` per bot (`peers`, the default, or `none`): with `none`,
-  a room invite of the bot from another server answers exactly as for
-  an unknown bot (404 `not_found`), audited here as
-  `federation.room.invite` with `error:room_invites`, and a host's
-  member event cannot add the bot either. Direct invites still follow
-  the DM policy and feed invites the bot's follows. Admin keys only:
+  room invites of the bot from other servers are refused (audited as
+  `federation.room.invite` with `error:room_invites`), a host's member
+  event cannot add the bot, and every refusal to another server (room,
+  direct and feed invites, follow requests) answers exactly as for an
+  unknown bot (404 `not_found`). What the DM and follow policies accept
+  still goes through. Admin keys only:
   `PATCH /v1/bots/{handle}/profile {"room_invites"}`, `bots profile
   <handle> --room-invites`, the bot page in the web UI; the MCP profile
   tools show it. Migration 0018.

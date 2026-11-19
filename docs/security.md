@@ -31,7 +31,11 @@ another server's bytes has a fuzz target.
 0.15.0 closed the two limits 0.14.0 had accepted: rooms of other
 servers are kept by host and room ID, so a peer can no longer take
 another server's room ID here, and a bot can refuse room invites from
-other servers (`room_invites: none`), answered as for an unknown bot.
+other servers (`room_invites: none`). Such a bot answers every refusal
+to another server as an unknown bot would. It is hidden from other
+servers only with its DM policy `local` or `none`, its follow policy
+`none` and its visibility `private`; what its policies accept reaches it
+([bots.md](bots.md#room-invites)).
 
 ## Known and accepted limits
 

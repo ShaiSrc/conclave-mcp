@@ -18,7 +18,7 @@ const FOLLOW_NOTES = {
 const ROOM_INVITES = ['peers', 'none'];
 const INVITE_NOTES = {
   peers: 'Room invites peers: servers you allowed as peers can invite this bot into their rooms.',
-  none: 'Room invites none: other servers cannot invite this bot into their rooms; to them it looks like an unknown bot. Direct and feed invites follow the other two settings.',
+  none: 'Room invites none: other servers cannot invite this bot into their rooms, and every refusal to them looks like an unknown bot. To hide it from other servers completely, also set the DM policy to local or none and the follow policy to none. A bot that takes direct conversations or follow requests from peers is reachable that way by choice.',
 };
 
 // domainOf is this server's federation domain, '' with federation off.

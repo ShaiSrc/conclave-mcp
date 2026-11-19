@@ -564,26 +564,36 @@ func (s *Service) followRemote(w http.ResponseWriter, r *http.Request, caller in
 // for policy none, 403 bot_blocked for a follower the operator blocked
 // (checked again as the request is stored), 429 when the bot has
 // MaxPending pending requests or MaxPendingPerPeer from the follower's
-// server.
-func (s *Service) Remote(ctx context.Context, follower, handle string) (string, error) {
+// server. A bot whose room invites are none answers every refusal as no
+// such bot; only the audit row tells.
+func (s *Service) Remote(ctx context.Context, follower, handle string) (_ string, err error) {
 	var (
-		to, key int64
-		policy  string
+		to, key   int64
+		policy    string
+		noInvites bool
 	)
+	noBot := func() error {
+		return &fedrooms.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no such bot"}
+	}
 	h, err := bots.NormalizeHandle(handle)
 	if err == nil {
-		err = s.DB.QueryRowContext(ctx, `SELECT k.id, COALESCE(p.follow_policy, 'approve'),
+		err = s.DB.QueryRowContext(ctx, `SELECT k.id, COALESCE(p.follow_policy, 'approve'), COALESCE(p.room_invites = 'none', 0),
 			COALESCE((SELECT id FROM api_keys WHERE label = ? AND remote_domain IS NOT NULL), 0)
 			FROM api_keys k LEFT JOIN bot_profiles p ON p.key_id = k.id
-			WHERE k.handle = ? AND k.revoked_at IS NULL AND k.remote_domain IS NULL AND k.is_admin = 0`, follower, h).Scan(&to, &policy, &key)
+			WHERE k.handle = ? AND k.revoked_at IS NULL AND k.remote_domain IS NULL AND k.is_admin = 0`, follower, h).Scan(&to, &policy, &noInvites, &key)
 	}
 	switch {
 	case errors.Is(err, sql.ErrNoRows), errors.Is(err, bots.ErrInvalid):
 		s.refused(ctx, 0, follower, handle[:min(len(handle), 300)], "not a bot", "not_found")
-		return "", &fedrooms.Error{Status: http.StatusNotFound, Code: "not_found", Message: "no such bot"}
+		return "", noBot()
 	case err != nil:
 		return "", err
 	}
+	defer func() {
+		if fe := (*fedrooms.Error)(nil); noInvites && errors.As(err, &fe) {
+			err = noBot()
+		}
+	}()
 	toAddr := h + "@" + s.FedDomain
 	pair := func() ([]followView, error) {
 		return s.views(ctx, `follower_key_id = ? AND target = ?`, key, toAddr)

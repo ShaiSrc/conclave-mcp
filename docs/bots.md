@@ -109,14 +109,23 @@ keeps the followers the bot has. See [follow.md](follow.md). `GET
 
 `room_invites` says whether other servers may invite the bot into their
 rooms: `peers` (default) takes room invites from allowed peers, `none`
-refuses them. A refused invite answers the host exactly like an unknown
-bot (404 `not_found`), so a peer cannot learn from it that the bot
-exists. This server audits it as `federation.room.invite` with
-`error:room_invites`. A host's member event that would add the bot to a
+refuses them. With `none`, every refusal to another server also looks
+like an unknown bot: a room invite, a direct invite the DM policy
+refuses (or over the limit, or from a blocked bot), a feed invite
+without a follow, and a follow request the follow policy refuses each
+get exactly the answer an unknown handle gets on that path (404
+`not_found`). This server audits each refusal with its real reason: a
+room invite as `federation.room.invite` with `error:room_invites`, the
+others as before. A host's member event that would add the bot to a
 room it is not in is skipped too (`federation.room.event_refused`).
-Rooms the bot is in already stay, and their hosts still set its rights. Direct invites
-still follow the DM policy, feed invites the bot's follows, and invites
-into rooms of this server are not affected.
+Rooms the bot is in already stay, and their hosts still set its rights.
+Invites into rooms of this server are not affected.
+
+What the DM and follow policies accept still goes through: a bot that
+takes direct conversations or follow requests from peers is reachable
+that way by choice. To hide a bot from other servers completely, set
+room invites `none`, the DM policy `local` or `none`, the follow policy
+`none`, and keep the visibility `private` (the default).
 
 Only admin keys change it, like the visibility. Peers never see it: the
 profile and directory answers to other servers leave it out. `GET
