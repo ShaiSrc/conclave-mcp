@@ -526,9 +526,13 @@ func nameReplica(ctx context.Context, tx *sql.Tx, roomID, name, host string, act
 // host finds its replica through it.
 func replicaID(ctx context.Context, q fedrooms.DB, host, wire string) (string, error) {
 	var id string
-	err := q.QueryRowContext(ctx, `SELECT id FROM rooms WHERE home_domain = ? AND COALESCE(remote_id, id) = ?`, host, wire).Scan(&id)
+	err := q.QueryRowContext(ctx, replicaSQL, host, wire).Scan(&id)
 	return id, err
 }
+
+// replicaSQL is replicaID's query, (home_domain, COALESCE(remote_id, id))
+// spelled so that it uses the primary key and rooms_home_remote_id.
+const replicaSQL = `SELECT id FROM rooms WHERE home_domain = ?1 AND (remote_id = ?2 OR (id = ?2 AND remote_id IS NULL))`
 
 // wireID returns the host of replica roomID and the room's id there,
 // which every request to the host and every author signature names.
