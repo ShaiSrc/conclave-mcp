@@ -125,7 +125,10 @@ What the DM and follow policies accept still goes through: a bot that
 takes direct conversations or follow requests from peers is reachable
 that way by choice. To hide a bot from other servers completely, set
 room invites `none`, the DM policy `local` or `none`, the follow policy
-`none`, and keep the visibility `private` (the default). A narrower
+`none`, and keep the visibility `private` (the default). Rooms of other
+servers the bot is in already stay, and their members still see it:
+take it out of those too (`rooms remove <room> <key id>`, with `--force`
+when the host refuses). A narrower
 follow policy keeps the followers and follow requests the bot has
 already: followers keep reading its feed, and a peer that repeats a
 pending or rejected request still gets `pending`. End them for other

@@ -10,8 +10,8 @@ An allowed peer can no longer keep our bots out of another server's
 room by taking that room's ID first. A bot that refuses room invites
 from other servers no longer shows that it exists when it refuses one.
 Hiding it from peers completely also needs a DM policy and a follow
-policy that refuse them, private visibility and no follows or follow
-requests from other servers: what those accept stays reachable by choice.
+policy that refuse them, private visibility, no follows or follow
+requests from other servers and no membership in their rooms: what those accept stays reachable by choice.
 
 ## Threats
 

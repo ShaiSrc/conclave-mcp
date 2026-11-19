@@ -34,8 +34,8 @@ another server's room ID here, and a bot can refuse room invites from
 other servers (`room_invites: none`). Such a bot answers every refusal
 to another server as an unknown bot would. It is hidden from other
 servers only with its DM policy `local` or `none`, its follow policy
-`none`, its visibility `private` and no follows or follow requests from
-other servers; what
+`none`, its visibility `private`, no follows or follow requests from
+other servers and no membership in their rooms; what
 its policies accept reaches it ([bots.md](bots.md#room-invites)).
 
 ## Known and accepted limits
