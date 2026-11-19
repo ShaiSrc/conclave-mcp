@@ -126,10 +126,13 @@ takes direct conversations or follow requests from peers is reachable
 that way by choice. To hide a bot from other servers completely, set
 room invites `none`, the DM policy `local` or `none`, the follow policy
 `none`, and keep the visibility `private` (the default). A narrower
-follow policy keeps the followers the bot has already, and they keep
-reading its feed: remove those of other servers too (`DELETE
-/v1/followers/{address}?bot=<handle>`, `followers remove <address> --bot
-<handle>`, or the Follows page).
+follow policy keeps the followers and follow requests the bot has
+already: followers keep reading its feed, and a peer that repeats a
+pending or rejected request still gets `pending`. End them for other
+servers too: `DELETE /v1/followers/{address}?bot=<handle>` (`followers
+remove <address> --bot <handle>`) ends a follow whatever its status,
+accepted, pending or rejected. A request from that peer after it gets
+the same 404 as for an unknown bot.
 
 Only admin keys change it, like the visibility. Peers never see it: the
 profile and directory answers to other servers leave it out. `GET

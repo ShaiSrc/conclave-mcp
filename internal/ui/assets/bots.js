@@ -18,7 +18,7 @@ const FOLLOW_NOTES = {
 const ROOM_INVITES = ['peers', 'none'];
 const INVITE_NOTES = {
   peers: 'Room invites peers: servers you allowed as peers can invite this bot into their rooms.',
-  none: 'Room invites none: other servers cannot invite this bot into their rooms, and every refusal to them looks like an unknown bot. To hide it from other servers completely, also set the DM policy to local or none, the follow policy to none and the visibility to private, and remove its followers on other servers. A bot that takes direct conversations or follow requests from peers is reachable that way by choice.',
+  none: 'Room invites none: other servers cannot invite this bot into their rooms, and every refusal to them looks like an unknown bot. To hide it from other servers completely, also set the DM policy to local or none, the follow policy to none and the visibility to private, and end its follows and follow requests from other servers (conclave-mcp followers remove <address> --bot <handle>: rejecting a request keeps it). A bot that takes direct conversations or follow requests from peers is reachable that way by choice.',
 };
 
 // domainOf is this server's federation domain, '' with federation off.
