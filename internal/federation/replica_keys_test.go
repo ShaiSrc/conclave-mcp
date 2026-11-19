@@ -404,3 +404,29 @@ func TestReplicaKeys_LowerRoomByHostID(t *testing.T) {
 		t.Errorf("b1's message went to %q", got)
 	}
 }
+
+// A direct invite under the id of the pair's conversation hosted here is
+// refused as the other start of the same conversation: the host's id is
+// not lower, so it does not win, and no second conversation of the pair
+// begins under a local id of its own.
+func TestReplicaKeys_DirectInviteUnderOurID(t *testing.T) {
+	g := newRoomRig(t)
+	h := newFakeHost(t, g)
+	b1 := g.dmBot(t, "b1", "peers")
+	mine := ulid.Make().String()
+	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at, visibility, kind, pair)
+		VALUES (?, ?, ?, '2026-11-14T00:00:00Z', 'private', 'direct', ?)`, mine, h.pairOf(g, "b1"), b1.KeyID, h.pairOf(g, "b1")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := g.db.Exec(`INSERT INTO room_members(room_id, key_id, role, joined_at, rights)
+		VALUES (?, ?, 'reader', '2026-11-14T00:00:00Z', 'read')`, mine, b1.KeyID); err != nil {
+		t.Fatal(err)
+	}
+	if rec := h.directInvite(t, g, mine, h.pairOf(g, "b1"), "b1"); rec.Code != http.StatusConflict {
+		t.Fatalf("invite under our conversation's id: %d %s, want 409", rec.Code, rec.Body)
+	}
+	var n int
+	if err := g.db.QueryRow(`SELECT COUNT(*) FROM rooms WHERE pair = ? AND archived_at IS NULL`, h.pairOf(g, "b1")).Scan(&n); err != nil || n != 1 {
+		t.Errorf("active conversations of the pair: %d %v, want 1", n, err)
+	}
+}

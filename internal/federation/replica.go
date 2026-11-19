@@ -464,9 +464,10 @@ func (s *Service) directPair(w http.ResponseWriter, r *http.Request, tx *sql.Tx,
 			name, origin, roomID, roomID).Scan(&superseded)
 	}
 	var lower bool
-	if err == nil { // both bots started at once: the room with the lower id is the pair's
+	if err == nil { // both bots started at once: the room with the lower id is the pair's; an
+		// invite under our own conversation's id is not lower and never starts a second one
 		err = tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM rooms o WHERE o.pair = ? AND o.home_domain IS NULL
-			AND o.archived_at IS NULL AND o.id < ?)`, name, wire).Scan(&lower)
+			AND o.archived_at IS NULL AND o.id <= ?)`, name, wire).Scan(&lower)
 	}
 	switch {
 	case taken:
