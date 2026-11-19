@@ -78,7 +78,7 @@ func (s *Service) handleFedBot(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case err == nil && (p.Visibility == bots.Public || p.Visibility == least):
-		p.TrustOrigin = ""
+		p.TrustOrigin, p.RoomInvites = "", ""
 		writeBotJSON(w, p)
 	case err == nil, errors.Is(err, bots.ErrInvalid), errors.Is(err, bots.ErrNotFound):
 		writeErr(w, r, http.StatusNotFound, "not_found", "no such bot")
@@ -113,7 +113,7 @@ func (s *Service) handleFedDirectory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for i := range all {
-		all[i].TrustOrigin = ""
+		all[i].TrustOrigin, all[i].RoomInvites = "", ""
 	}
 	out, next := []bots.Profile{}, (*int)(nil)
 	if pages := (len(all) + directoryPage - 1) / directoryPage; page <= pages {

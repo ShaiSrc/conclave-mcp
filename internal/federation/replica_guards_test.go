@@ -285,23 +285,32 @@ func TestDirectRemote_RevokedStandIn(t *testing.T) {
 	}
 }
 
-// A room id that a room of another host, or one hosted here, holds is a
-// 409, audited with the host that holds it.
-func TestReplicaInvite_IDConflictAudited(t *testing.T) {
+// A room id that a room of another host, or one hosted here, holds is
+// no conflict: the invite makes a replica of its own, audited as taken,
+// and nothing names the room that holds the id.
+func TestReplicaInvite_TakenIDAudited(t *testing.T) {
 	g, h, room, _ := replica(t, "read")
 	h2 := newFakeHost(t, g)
-	wantErr(t, h2.invite(t, g, room, "proj", "b1", "read"), http.StatusConflict, "conflict")
 	ours := ulid.Make().String()
 	if _, err := g.db.Exec(`INSERT INTO rooms(id, name, owner_key_id, created_at) VALUES (?, 'mine', ?, '2026-01-01T00:00:00Z')`,
 		ours, g.admin.KeyID); err != nil {
 		t.Fatal(err)
 	}
-	wantErr(t, h2.invite(t, g, ours, "proj", "b1", "read"), http.StatusConflict, "conflict")
-	for id, holder := range map[string]string{room: h.id.Domain, ours: g.svc.Domain()} {
-		if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.invite' AND result = 'error:conflict'
-			AND target_id = ? AND room_id = ? AND json_extract(detail, '$.held_by') = ?`, h2.id.Domain, id, holder); n != 1 {
-			t.Errorf("room %s: %d conflicts audited as held by %s", id, n, holder)
+	for _, id := range []string{room, ours} {
+		if rec := h2.invite(t, g, id, "proj-"+id, "b1", "read"); rec.Code != http.StatusCreated {
+			t.Fatalf("invite into %s: %d %s", id, rec.Code, rec.Body)
 		}
+		mine := localOf(t, g, h2.id.Domain, id)
+		if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE action = 'federation.room.invite' AND result = 'ok'
+			AND target_id = ? AND room_id = ?`, h2.id.Domain, mine); mine == id || n != 1 {
+			t.Errorf("room %s: replica %s, %d invites audited", id, mine, n)
+		}
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM audit WHERE detail LIKE '%held_by%' OR result = 'error:conflict'`); n != 0 {
+		t.Errorf("%d conflicts audited", n)
+	}
+	if n := count(t, g.db, `SELECT COUNT(*) FROM rooms WHERE id = ? AND home_domain = ?`, room, h.id.Domain); n != 1 {
+		t.Error("the first host's replica changed")
 	}
 }
 

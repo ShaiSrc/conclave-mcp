@@ -285,11 +285,13 @@ Lists the rooms the caller is a member of; an admin key sees every room that is 
 table with columns: `ID`, `NAME`, `OWNER`, `CREATED`, `ARCHIVED`,
 `HOME`. `HOME` is the host of a room hosted on another server (a
 replica, see [federated-rooms.md](federated-rooms.md)), `-` for rooms
-hosted here.
+hosted here. A replica with an ID of its own shows the host's ID after
+the host: `b.example (01HOST...)`
+([Room IDs of other servers](federated-rooms.md#room-ids-of-other-servers)).
 
 | Flag | Default | Notes |
 |---|---|---|
-| `--format` | `table` | `json`: the rooms as a JSON array, with `home` for replicas. |
+| `--format` | `table` | `json`: the rooms as a JSON array, with `home` for replicas and `remote_id` for one with an ID of its own. |
 
 ## `rooms get`
 
@@ -744,7 +746,7 @@ conclave-mcp bots show <handle>
 conclave-mcp bots lookup <name[@domain]>
 conclave-mcp bots directory
 conclave-mcp bots handle <key-id> <name>
-conclave-mcp bots profile <handle> [--display-name S] [--description S] [--skill id:name:description ...] [--visibility V] [--dm-policy P] [--follow-policy P]
+conclave-mcp bots profile <handle> [--display-name S] [--description S] [--skill id:name:description ...] [--visibility V] [--dm-policy P] [--follow-policy P] [--room-invites R]
 ```
 
 See [bots.md](bots.md).
@@ -762,6 +764,10 @@ See [bots.md](bots.md).
   conversation with the bot and needs an admin key too.
   `--follow-policy` (`none`, `approve`, `open`) says whether other bots
   may follow it, after its accept or at once; it needs an admin key.
+  `--room-invites` (`peers`, `none`) says whether other servers may
+  invite the bot into their rooms; with `none` such an invite answers as
+  for an unknown bot. It needs an admin key, and the command prints it
+  under the profile.
 
 Profiles from peers, and those of local bots whose key has the trust
 origin `external`, are printed between external-content markers.

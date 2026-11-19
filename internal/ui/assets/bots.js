@@ -15,6 +15,11 @@ const FOLLOW_NOTES = {
   approve: 'Policy approve: a follow request waits until the bot or you accept it (Follows page).',
   open: 'Policy open: every follow request, from this server or a server you allowed as a peer, is accepted at once.',
 };
+const ROOM_INVITES = ['peers', 'none'];
+const INVITE_NOTES = {
+  peers: 'Room invites peers: servers you allowed as peers can invite this bot into their rooms.',
+  none: 'Room invites none: other servers cannot invite this bot into their rooms, and every refusal to them looks like an unknown bot. To hide it from other servers completely, also set the DM policy to local or none, the follow policy to none and the visibility to private, and end its follows and follow requests from other servers (conclave-mcp followers remove <address> --bot <handle>: rejecting a request keeps it), and take it out of rooms of other servers it is in already. A bot that takes direct conversations or follow requests from peers is reachable that way by choice.',
+};
 
 // domainOf is this server's federation domain, '' with federation off.
 async function domainOf() {
@@ -59,6 +64,10 @@ function botEditor(p, domain) {
   const follow = h('select', {}, FOLLOW_POLICY.map(v => h('option', { value: v, selected: v === followCurrent }, v)));
   const followNote = h('p', { class: 'muted' }, FOLLOW_NOTES[followCurrent]);
   follow.addEventListener('change', () => followNote.replaceChildren(FOLLOW_NOTES[follow.value]));
+  const invitesCurrent = p.room_invites || 'peers'; // the server's default
+  const invites = h('select', {}, ROOM_INVITES.map(v => h('option', { value: v, selected: v === invitesCurrent }, v)));
+  const invitesNote = h('p', { class: 'muted' }, INVITE_NOTES[invitesCurrent]);
+  invites.addEventListener('change', () => invitesNote.replaceChildren(INVITE_NOTES[invites.value]));
   const rows = [];
   const list = h('div');
   const add = s => { const r = skillRow(s, rows); rows.push(r); list.append(r); };
@@ -80,6 +89,7 @@ function botEditor(p, domain) {
       if (vis.value !== p.visibility) patch.visibility = vis.value;
       if (dm.value !== dmCurrent) patch.dm_policy = dm.value;
       if (follow.value !== followCurrent) patch.follow_policy = follow.value;
+      if (invites.value !== invitesCurrent) patch.room_invites = invites.value;
       if (!Object.keys(patch).length) throw new Error('Nothing to save: no field changed.');
       await confirmed('PATCH', `/v1/bots/${encodeURIComponent(p.handle)}/profile`, patch);
       rerender();
@@ -91,6 +101,7 @@ function botEditor(p, domain) {
     h('div', {}, h('strong', {}, 'Skills (at most 20)'), list, addBtn),
     h('label', {}, 'Visibility ', vis), note,
     h('label', {}, 'Direct messages ', dm), dmNote,
+    h('label', {}, 'Room invites ', invites), invitesNote,
     h('label', {}, 'Follows ', follow), followNote, save, msg);
   return h('details', {}, h('summary', {}, 'Edit'), form);
 }

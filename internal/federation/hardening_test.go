@@ -575,3 +575,25 @@ func TestDelivery_ReceiverLimit(t *testing.T) {
 		})
 	}
 }
+
+// replicaID finds a replica by the primary key or the remote_id index,
+// never by scanning rooms.
+func TestReplicaID_Indexes(t *testing.T) {
+	g := newRoomRig(t)
+	rows, err := g.db.Query(`EXPLAIN QUERY PLAN `+replicaSQL, "a.example", "01JAAAAAAAAAAAAAAAAAAAAAAA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		_ = rows.Scan(&id, &parent, &unused, &detail)
+		plan = append(plan, detail)
+	}
+	_ = rows.Close()
+	got := strings.Join(plan, "; ")
+	if strings.Contains(got, "SCAN rooms") || !strings.Contains(got, "rooms_home_remote_id") || !strings.Contains(got, "sqlite_autoindex_rooms_1") {
+		t.Errorf("plan %q", got)
+	}
+}

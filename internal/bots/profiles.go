@@ -39,12 +39,18 @@ const (
 	FollowOpen    = "open"    // every request is accepted
 )
 
+// Room invites: whether other servers may invite a bot into their rooms.
+const (
+	InvitesNone  = "none"  // nobody: an invite answers as for an unknown bot
+	InvitesPeers = "peers" // allowed peers
+)
+
 var (
 	ErrNotFound  = errors.New("no such bot")
 	ErrInvalid   = errors.New("invalid")
 	ErrTaken     = errors.New("handle already taken")
 	ErrAdminKey  = errors.New("admin keys cannot have a handle")
-	ErrForbidden = errors.New("only an admin key changes the visibility, the DM policy or the follow policy")
+	ErrForbidden = errors.New("only an admin key changes the visibility, the DM policy, the follow policy or room invites")
 	// ErrInUse is the error of a handle change or removal of a bot whose
 	// feed or follows name it by its address.
 	ErrInUse = errors.New("the bot has an active feed or follows, which name it by its address: archive its feed and end its follows, followers and follow requests first")
@@ -63,7 +69,8 @@ const External = "external"
 
 // Profile is a bot's public face. KeyID is 0 for remote bots. UpdatedAt
 // is zero without a saved row. TrustOrigin is the trust origin of the
-// bot's key, External for a remote bot; federation answers leave it out.
+// bot's key, External for a remote bot; federation answers leave it and
+// RoomInvites out.
 type Profile struct {
 	KeyID        int64     `json:"-"`
 	Handle       string    `json:"handle"`
@@ -73,6 +80,7 @@ type Profile struct {
 	Visibility   string    `json:"visibility"`
 	DMPolicy     string    `json:"dm_policy,omitempty"`     // "" for remote bots
 	FollowPolicy string    `json:"follow_policy,omitempty"` // "" for remote bots
+	RoomInvites  string    `json:"room_invites,omitempty"`  // "" for remote bots
 	UpdatedAt    time.Time `json:"updated_at,omitzero"`
 	TrustOrigin  string    `json:"trust_origin,omitempty"`
 }
@@ -85,6 +93,7 @@ type Patch struct {
 	Visibility   *string  `json:"visibility"`
 	DMPolicy     *string  `json:"dm_policy"`
 	FollowPolicy *string  `json:"follow_policy"`
+	RoomInvites  *string  `json:"room_invites"`
 }
 
 // Visible reports whether viewer may see p: admin keys see every bot,
@@ -106,7 +115,7 @@ func NewStore(db *sql.DB) *Store { return &Store{db: db} }
 
 const selectProfiles = `SELECT k.id, k.handle, COALESCE(p.display_name, ''), COALESCE(p.description, ''),
 	COALESCE(p.skills, '[]'), COALESCE(p.visibility, 'private'), COALESCE(p.dm_policy, 'local'),
-	COALESCE(p.follow_policy, 'approve'), p.updated_at, k.trust_origin
+	COALESCE(p.follow_policy, 'approve'), COALESCE(p.room_invites, 'peers'), p.updated_at, k.trust_origin
 	FROM api_keys k LEFT JOIN bot_profiles p ON p.key_id = k.id
 	WHERE k.handle IS NOT NULL AND k.revoked_at IS NULL `
 
@@ -123,7 +132,7 @@ func (s *Store) query(ctx context.Context, where string, args ...any) ([]Profile
 			skills  string
 			updated sql.NullString
 		)
-		if err := rows.Scan(&p.KeyID, &p.Handle, &p.DisplayName, &p.Description, &skills, &p.Visibility, &p.DMPolicy, &p.FollowPolicy, &updated,
+		if err := rows.Scan(&p.KeyID, &p.Handle, &p.DisplayName, &p.Description, &skills, &p.Visibility, &p.DMPolicy, &p.FollowPolicy, &p.RoomInvites, &updated,
 			&p.TrustOrigin); err != nil {
 			return nil, err
 		}
@@ -177,9 +186,9 @@ func (s *Store) List(ctx context.Context, minVisibility string) ([]Profile, erro
 // to the profile of handle, which it returns as stored. Fields not in
 // the patch keep their stored value, in the same statement, so a stale
 // read cannot undo another write. Only asAdmin may change the
-// visibility, the DM policy and the follow policy.
+// visibility, the DM policy, the follow policy and room invites.
 func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin bool) (Profile, error) {
-	if (patch.Visibility != nil || patch.DMPolicy != nil || patch.FollowPolicy != nil) && !asAdmin {
+	if (patch.Visibility != nil || patch.DMPolicy != nil || patch.FollowPolicy != nil || patch.RoomInvites != nil) && !asAdmin {
 		return Profile{}, ErrForbidden
 	}
 	cur, err := s.Get(ctx, handle)
@@ -190,7 +199,7 @@ func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin 
 		s.afterRead()
 	}
 	// p holds the patched values, and the defaults a new row gets.
-	p := Profile{Skills: []Skill{}, Visibility: Private, DMPolicy: DMLocal, FollowPolicy: FollowApprove}
+	p := Profile{Skills: []Skill{}, Visibility: Private, DMPolicy: DMLocal, FollowPolicy: FollowApprove, RoomInvites: InvitesPeers}
 	if patch.DisplayName != nil {
 		p.DisplayName = Clean(*patch.DisplayName, false)
 	}
@@ -212,12 +221,15 @@ func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin 
 	if patch.FollowPolicy != nil {
 		p.FollowPolicy = *patch.FollowPolicy
 	}
+	if patch.RoomInvites != nil {
+		p.RoomInvites = *patch.RoomInvites
+	}
 	if err := check(p); err != nil {
 		return Profile{}, err
 	}
 	skills, _ := json.Marshal(p.Skills)
 	_, err = s.db.ExecContext(ctx, `INSERT INTO bot_profiles(key_id, display_name, description, skills, visibility, dm_policy,
-		follow_policy, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		follow_policy, room_invites, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(key_id) DO UPDATE SET
 		display_name = CASE WHEN ? THEN excluded.display_name ELSE bot_profiles.display_name END,
 		description = CASE WHEN ? THEN excluded.description ELSE bot_profiles.description END,
@@ -225,14 +237,27 @@ func (s *Store) Update(ctx context.Context, handle string, patch Patch, asAdmin 
 		visibility = CASE WHEN ? THEN excluded.visibility ELSE bot_profiles.visibility END,
 		dm_policy = CASE WHEN ? THEN excluded.dm_policy ELSE bot_profiles.dm_policy END,
 		follow_policy = CASE WHEN ? THEN excluded.follow_policy ELSE bot_profiles.follow_policy END,
+		room_invites = CASE WHEN ? THEN excluded.room_invites ELSE bot_profiles.room_invites END,
 		updated_at = excluded.updated_at`,
-		cur.KeyID, p.DisplayName, p.Description, string(skills), p.Visibility, p.DMPolicy, p.FollowPolicy, storage.FormatTS(time.Now()),
-		patch.DisplayName != nil, patch.Description != nil, patch.Skills != nil, asAdmin && patch.Visibility != nil,
-		asAdmin && patch.DMPolicy != nil, asAdmin && patch.FollowPolicy != nil)
+		cur.KeyID, p.DisplayName, p.Description, string(skills), p.Visibility, p.DMPolicy, p.FollowPolicy, p.RoomInvites,
+		storage.FormatTS(time.Now()), patch.DisplayName != nil, patch.Description != nil, patch.Skills != nil,
+		asAdmin && patch.Visibility != nil, asAdmin && patch.DMPolicy != nil, asAdmin && patch.FollowPolicy != nil,
+		asAdmin && patch.RoomInvites != nil)
 	if err != nil {
 		return Profile{}, err
 	}
 	return s.ByKey(ctx, cur.KeyID)
+}
+
+// RefusesRoomInvites reports whether the bot of key keyID refuses room
+// invites from other servers, read through q (a DB or a transaction).
+// Federation answers such an invite as for an unknown bot.
+func RefusesRoomInvites(ctx context.Context, q interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, keyID int64) (bool, error) {
+	var none bool
+	err := q.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM bot_profiles WHERE key_id = ? AND room_invites = 'none')`, keyID).Scan(&none)
+	return none, err
 }
 
 var skillIDRE = regexp.MustCompile(`^[a-z0-9_.-]{1,32}$`)
@@ -261,6 +286,8 @@ func check(p Profile) error {
 		return fmt.Errorf("%w: dm_policy must be none, local or peers", ErrInvalid)
 	case !slices.Contains([]string{FollowNone, FollowApprove, FollowOpen}, p.FollowPolicy):
 		return fmt.Errorf("%w: follow_policy must be none, approve or open", ErrInvalid)
+	case !slices.Contains([]string{InvitesNone, InvitesPeers}, p.RoomInvites):
+		return fmt.Errorf("%w: room_invites must be peers or none", ErrInvalid)
 	}
 	for _, sk := range p.Skills {
 		switch {

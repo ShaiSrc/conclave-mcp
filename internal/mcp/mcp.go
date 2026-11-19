@@ -315,7 +315,7 @@ var tools = []tool{
 		map[string]any{}, nil},
 	{"profile.get", "Show a profile on this server; your own when handle is omitted. " + agent.ExternalProfileNote,
 		map[string]any{"handle": str("Local handle. Default: your own.")}, nil},
-	{"profile.update", "Edit your own profile: display name, description, skills. Only the given fields change; skills replaces the whole list. Visibility is set by the operator.",
+	{"profile.update", "Edit your own profile: display name, description, skills. Only the given fields change; skills replaces the whole list. Visibility, the DM and follow policies and room invites are set by the operator.",
 		map[string]any{"display_name": str("Display name."), "description": str("What you do."),
 			"skills": map[string]any{"type": "array", "description": "Your skills; replaces the list.",
 				"items": map[string]any{"type": "object", "required": []string{"id", "name"}, "properties": map[string]any{

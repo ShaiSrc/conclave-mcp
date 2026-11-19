@@ -63,8 +63,12 @@ A narrower policy stops new conversations only. Existing ones stay
 usable; an admin can archive them.
 
 The DM policy covers direct conversations only. An invite into an
-ordinary room from an allowed peer is governed by the peer allowlist,
-whatever the policy ([federated-rooms.md](federated-rooms.md)).
+ordinary room from an allowed peer is governed by the peer allowlist and
+the bot's room invites setting, whatever the DM policy: with
+`room_invites` `none` the bot refuses it
+([bots.md](bots.md#room-invites)). That setting does not decide direct
+invites, but with `none` a direct invite from another server that the
+bot refuses answers as for an unknown bot.
 
 ## Starting and continuing
 
@@ -110,7 +114,7 @@ Errors on a start:
 | 403 | `bot_blocked` | The operator blocked the recipient, a bot of another server ([federation.md](federation.md#blocking-a-bot)); its server is not asked. Or the recipient's server blocked the caller: its 403 is passed on. |
 | 403 | `forbidden` | The caller is not a bot. |
 | 403 | `peer_not_allowed` | The domain is not an `allowed` peer. |
-| 404 | `not_found` | No such bot. |
+| 404 | `not_found` | No such bot, or a bot of another server whose room invites are `none` refused it. |
 | 404 | `federation_disabled` | An address with a domain, and federation is off. |
 | 409 | `conflict`, `limit` | The peer answered 409, passed on: for example the other bot started the conversation at the same time; start again to use it. |
 | 413 | `payload_too_large` | The content is over the message cap. |
@@ -136,10 +140,15 @@ A bot on A starts a conversation with `b1@B`:
    peer gets 403 `dm_refused` before B looks at the handle), the handle
    is a bot, the name is the pair's (`dm:` with `b1@B` and a bot of A,
    sorted; 400 otherwise), its policy is `peers`, and B has not taken
-   100 new conversations from A in the last hour.
+   100 new conversations from A in the last hour. When `b1`'s room
+   invites are `none`, each refusal after the handle check answers as
+   for an unknown handle, 404 `not_found`; B's audit keeps the reason.
 3. B makes the replica with `b1` and A's bot as its members, both with
-   the direct rights, whatever rights A sent. An invite into a replica
-   that has another member (another bot of B, or of A) is a 409; the
+   the direct rights, whatever rights A sent. A room ID that another
+   room on B has is no conflict: the replica gets an ID of its own
+   ([Room IDs of other servers](federated-rooms.md#room-ids-of-other-servers)).
+   An invite into a replica that has another member (another bot of B,
+   or of A) is a 409; the
    same invite again changes nothing. A replica of the same pair from A that is still active is
    archived. B's answer carries `"kind":"direct"`.
 4. On a refusal A removes the room it had made and passes B's status
@@ -161,7 +170,8 @@ A bot on A starts a conversation with `b1@B`:
    invites the other. A server that hosts a room of the pair with a
    lower id refuses the invite into the higher one (409 `conflict`), so
    both end with the lower room; the bot whose start was refused starts
-   again and finds it.
+   again and finds it. The IDs compared are the hosts' IDs, also for a
+   replica with an ID of its own.
 
 A direct replica takes the two bots of its pair only. A member event
 about any other bot, and a message of any other author, are skipped,

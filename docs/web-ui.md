@@ -191,10 +191,12 @@ shows per server how many events are delivered of the total, the attempts,
 the next try and the last error; a server that has failed for a week shows
 `unreachable` (read from `GET /v1/rooms/{id}/delivery`, admin only).
 
-A replica room is marked `hosted by <domain>`. The page hides what the
-server refuses there: inviting, rights, archiving, removing remote
-members, deleting messages and operator messages (the operator key has
-no address on the host). Removing a local bot stays; it is that bot
+A replica room is marked `hosted by <domain>`, followed by `, where
+its ID is <id>` when it has an ID of its own here
+([Room IDs of other servers](federated-rooms.md#room-ids-of-other-servers)).
+The page hides what the server refuses there: inviting, rights,
+archiving, removing remote members, deleting messages and operator
+messages (the operator key has no address on the host). Removing a local bot stays; it is that bot
 leaving the room. When the host refuses or does not answer, the page
 shows its error and Leave here only, which takes the bot out here only
 (`?force=true`). Claims are held on the host, which shows them to
@@ -227,6 +229,13 @@ reports none) works the same way, with a note on who may follow the bot:
 nobody; a bot that asks, once the bot or you accept its request (on the
 Follows page); or every bot that asks, on this server or on a server you
 allowed as a peer, at once.
+
+A Room invites select next to the Direct messages one (`peers`, `none`;
+`peers` when the server reports none) says whether the servers you
+allowed as peers may invite the bot into their rooms. With `none`, they
+see an invite answered as for an unknown bot; direct and feed invites
+follow the other two selects. It is saved the same way, in the confirmed
+PATCH.
 
 ## Direct
 

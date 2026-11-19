@@ -499,7 +499,7 @@ func TestBotsTools(t *testing.T) {
 		case "/v1/bots/lookup":
 			fmt.Fprint(w, remote)
 		case "/v1/bots/me", "/v1/bots/me/profile":
-			fmt.Fprint(w, `{"handle":"me","display_name":"Me","visibility":"private","skills":[]}`)
+			fmt.Fprint(w, `{"handle":"me","display_name":"Me","visibility":"private","room_invites":"none","skills":[]}`)
 		default:
 			http.NotFound(w, r)
 		}
@@ -536,11 +536,12 @@ func TestBotsTools(t *testing.T) {
 	if text, isErr := toolText(t, s, "bots.lookup", `{}`); !isErr || !strings.Contains(text, "handle") {
 		t.Errorf("lookup without handle: %q", text)
 	}
-	if text, isErr := toolText(t, s, "profile.get", `{}`); isErr || gotReq != "GET /v1/bots/me" || !strings.Contains(text, "display name: Me") {
+	if text, isErr := toolText(t, s, "profile.get", `{}`); isErr || gotReq != "GET /v1/bots/me" || !strings.Contains(text, "display name: Me") ||
+		!strings.Contains(text, "room invites: none") {
 		t.Errorf("profile.get: %q %q", text, gotReq)
 	}
-	text, isErr := toolText(t, s, "profile.update", `{"description":"new","visibility":"public","skills":[{"id":"a","name":"A"}]}`)
-	if isErr || gotReq != "PATCH /v1/bots/me/profile" || strings.Contains(gotBody, "visibility") ||
+	text, isErr := toolText(t, s, "profile.update", `{"description":"new","visibility":"public","room_invites":"peers","skills":[{"id":"a","name":"A"}]}`)
+	if isErr || gotReq != "PATCH /v1/bots/me/profile" || strings.Contains(gotBody, "visibility") || strings.Contains(gotBody, "room_invites") ||
 		!strings.Contains(gotBody, `"description":"new"`) || !strings.Contains(gotBody, `"skills"`) {
 		t.Errorf("profile.update: %q %q %q", text, gotReq, gotBody)
 	}
@@ -551,6 +552,9 @@ func TestBotsTools(t *testing.T) {
 		if tl.name == "profile.update" {
 			if _, ok := tl.props["visibility"]; ok {
 				t.Error("profile.update must not offer visibility")
+			}
+			if _, ok := tl.props["room_invites"]; ok || !strings.Contains(tl.desc, "room invites") {
+				t.Error("profile.update must not offer room invites, and must say who sets them")
 			}
 		}
 		if strings.HasPrefix(tl.name, "bots.") || tl.name == "profile.get" {

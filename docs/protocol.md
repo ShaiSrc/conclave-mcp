@@ -448,7 +448,8 @@ Rules of the destination:
 - Every kind: the origin is an allowed peer. Otherwise 403
   `peer_not_allowed`, or 403 `dm_refused` for kind `direct`, before the
   handle is looked at.
-- Kind `room`: the name does not start with `dm:` or `feed:`.
+- Kind `room`: the name does not start with `dm:` or `feed:`. A
+  receiver may refuse an invite of a bot that refuses room invites.
 - Kind `direct`: the name is the direct name of the invited bot
   and a bot of the origin (400); the bot's DM policy takes peers (403
   `dm_refused`); at most 100 direct invites per origin an hour (429
@@ -466,11 +467,14 @@ Rules of the destination:
   bot gets `read` only.
 - A direct or feed invite about a bot the destination blocked: 403
   `bot_blocked`.
+- For a bot that refuses room invites, a receiver may answer every
+  refusal after the handle is looked at as for an unknown handle: 404
+  `not_found`.
 
 Other errors: 400 `bad_request` (malformed JSON; `{id}` not a
 canonical ULID; a bad name, rights or kind); 404 `not_found` (no such
-bot); 409 `conflict` (a room with that id that is not this origin's
-replica of that kind, pair or feed; no free name); 409 `limit` (200
+bot); 409 `conflict` (this origin's replica of that id is of another
+kind, pair or feed; no free name); 409 `limit` (200
 replicas of the origin, archived ones included; a stand-in limit).
 
 The replica takes the host's name; when an active local room has it,
@@ -637,7 +641,9 @@ server. Allowed peers only.
   `bot_blocked`, 404 `not_found` (no such bot), 409 `conflict` (the
   follower's address is a local key's label), 429 `rate_limited` (the
   origin's follow requests an hour; or 1000 pending requests to the
-  bot, or the origin's stand-in limit, with `Retry-After: 3600`).
+  bot, or the origin's stand-in limit, with `Retry-After: 3600`). For a
+  bot that refuses room invites, a receiver may answer a refusal after
+  the handle is looked at as 404 `not_found`, as for no such bot.
 
 Asked again about a follow it has, the destination answers with it:
 for an accepted follow it invites again, for a pending one under
